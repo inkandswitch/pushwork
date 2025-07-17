@@ -136,11 +136,53 @@ export async function removePath(filePath: string): Promise<void> {
 }
 
 /**
+ * Check if a path matches any of the exclude patterns
+ */
+function isExcluded(
+  filePath: string,
+  basePath: string,
+  excludePatterns: string[]
+): boolean {
+  const relativePath = path.relative(basePath, filePath);
+
+  for (const pattern of excludePatterns) {
+    // Handle different pattern types
+    if (pattern.startsWith(".") && !pattern.includes("*")) {
+      // Directory pattern like ".sync-tool" or ".git"
+      if (
+        relativePath.startsWith(pattern) ||
+        relativePath.includes(`/${pattern}/`) ||
+        relativePath.includes(`\\${pattern}\\`)
+      ) {
+        return true;
+      }
+    } else if (pattern.includes("*")) {
+      // Glob pattern like "*.tmp"
+      const regex = new RegExp(
+        pattern.replace(/\*/g, ".*").replace(/\?/g, ".")
+      );
+      if (regex.test(relativePath)) {
+        return true;
+      }
+    } else {
+      // Exact directory name like "node_modules"
+      const parts = relativePath.split(/[/\\]/);
+      if (parts.includes(pattern)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * List directory contents with metadata
  */
 export async function listDirectory(
   dirPath: string,
-  recursive = false
+  recursive = false,
+  excludePatterns: string[] = []
 ): Promise<FileSystemEntry[]> {
   const entries: FileSystemEntry[] = [];
 
@@ -148,12 +190,28 @@ export async function listDirectory(
     const pattern = recursive
       ? path.join(dirPath, "**/*")
       : path.join(dirPath, "*");
-    const paths = await glob(pattern, { dot: true });
+
+    // Convert exclude patterns to glob ignore patterns
+    const ignorePatterns = excludePatterns.map((pattern) => {
+      if (pattern.startsWith(".") && !pattern.includes("*")) {
+        // Directory patterns
+        return `${pattern}/**`;
+      }
+      return pattern;
+    });
+
+    const paths = await glob(pattern, {
+      dot: true,
+      ignore: ignorePatterns,
+    });
 
     for (const filePath of paths) {
-      const entry = await getFileSystemEntry(filePath);
-      if (entry) {
-        entries.push(entry);
+      // Additional filtering for safety
+      if (!isExcluded(filePath, dirPath, excludePatterns)) {
+        const entry = await getFileSystemEntry(filePath);
+        if (entry) {
+          entries.push(entry);
+        }
       }
     }
   } catch {

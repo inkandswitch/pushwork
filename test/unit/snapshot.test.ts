@@ -110,20 +110,23 @@ describe("SnapshotManager", () => {
   });
 
   describe("updateFileEntry", () => {
-    it("should add new file entry", async () => {
+    it("should add new file entry", () => {
       const snapshot = snapshotManager.createEmpty();
       const originalTimestamp = snapshot.timestamp;
 
-      // Add small delay to ensure timestamp difference
-      await new Promise((resolve) => setTimeout(resolve, 1));
-
       const fileEntry: SnapshotFileEntry = {
-        path: path.join(tmpDir, "test.txt"),
+        path: "/test/path/test.txt",
         url: "automerge:test-url" as any,
         head: "test-head",
         extension: "txt",
         mimeType: "text/plain",
       };
+
+      // Add small delay to ensure timestamp changes
+      const startTime = Date.now();
+      while (Date.now() === startTime) {
+        // Wait for at least 1ms
+      }
 
       snapshotManager.updateFileEntry(snapshot, "test.txt", fileEntry);
 

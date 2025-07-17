@@ -27,6 +27,7 @@ export interface SnapshotDirectoryEntry {
 export interface SyncSnapshot {
   timestamp: number;
   rootPath: string;
+  rootDirectoryUrl?: AutomergeUrl; // URL of the root directory document
   files: Map<string, SnapshotFileEntry>;
   directories: Map<string, SnapshotDirectoryEntry>;
 }
@@ -37,6 +38,7 @@ export interface SyncSnapshot {
 export interface SerializableSyncSnapshot {
   timestamp: number;
   rootPath: string;
+  rootDirectoryUrl?: AutomergeUrl; // URL of the root directory document
   files: Array<[string, SnapshotFileEntry]>;
   directories: Array<[string, SnapshotDirectoryEntry]>;
 }

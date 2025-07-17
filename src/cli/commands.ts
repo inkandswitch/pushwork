@@ -5,6 +5,7 @@ import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import { NodeWSServerAdapter } from "@automerge/automerge-repo-network-websocket";
 import chalk from "chalk";
 import ora from "ora";
+import * as diffLib from "diff";
 import {
   InitOptions,
   CloneOptions,
@@ -16,6 +17,7 @@ import {
   DirectoryDocument,
 } from "../types";
 import { SyncEngine } from "../core";
+import { DetectedChange } from "../core/change-detection";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 
@@ -41,6 +43,67 @@ function createRepo(
   }
 
   return new Repo(repoConfig);
+}
+
+/**
+ * Show actual content diff for a changed file
+ */
+async function showContentDiff(change: DetectedChange): Promise<void> {
+  try {
+    // Get old content (from snapshot/remote)
+    const oldContent = change.remoteContent || "";
+
+    // Get new content (current local)
+    const newContent = change.localContent || "";
+
+    // Convert binary content to string representation if needed
+    const oldText =
+      typeof oldContent === "string"
+        ? oldContent
+        : `<binary content: ${oldContent.length} bytes>`;
+    const newText =
+      typeof newContent === "string"
+        ? newContent
+        : `<binary content: ${newContent.length} bytes>`;
+
+    // Generate unified diff
+    const diffResult = diffLib.createPatch(
+      change.path,
+      oldText,
+      newText,
+      "previous",
+      "current"
+    );
+
+    // Skip the header lines and process the diff
+    const lines = diffResult.split("\n").slice(4); // Skip index, ===, ---, +++ lines
+
+    if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
+      console.log(chalk.gray("  (content identical)"));
+      return;
+    }
+
+    for (const line of lines) {
+      if (line.startsWith("@@")) {
+        // Hunk header
+        console.log(chalk.cyan(line));
+      } else if (line.startsWith("+")) {
+        // Added line
+        console.log(chalk.green(line));
+      } else if (line.startsWith("-")) {
+        // Removed line
+        console.log(chalk.red(line));
+      } else if (line.startsWith(" ")) {
+        // Context line
+        console.log(chalk.gray(line));
+      } else if (line === "") {
+        // Empty line
+        console.log("");
+      }
+    }
+  } catch (error) {
+    console.log(chalk.gray(`  (diff error: ${error})`));
+  }
 }
 
 /**
@@ -77,7 +140,7 @@ export async function init(targetPath: string): Promise<void> {
       sync_server: "wss://sync3.automerge.org",
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -110,7 +173,11 @@ export async function init(targetPath: string): Promise<void> {
 
     // Step 5: Scan existing files
     spinner.text = "Scanning existing files...";
-    const syncEngine = new SyncEngine(repo, resolvedPath);
+    const syncEngine = new SyncEngine(
+      repo,
+      resolvedPath,
+      config.defaults.exclude_patterns
+    );
 
     // Get file count for progress
     const dirEntries = await fs.readdir(resolvedPath, { withFileTypes: true });
@@ -131,6 +198,11 @@ export async function init(targetPath: string): Promise<void> {
     const duration = Date.now() - startTime;
 
     console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`));
+
+    // Step 7: Ensure all Automerge operations are flushed to disk
+    spinner.text = "Flushing changes to disk...";
+    await repo.shutdown();
+    console.log(chalk.gray("  ✓ All changes written to disk"));
 
     spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
 
@@ -175,7 +247,7 @@ export async function sync(options: SyncOptions): Promise<void> {
     // Step 2: Load configuration
     spinner.text = "Loading configuration...";
     const syncConfigManager = new ConfigManager(currentPath);
-    const syncConfig = await syncConfigManager.load();
+    const syncConfig = await syncConfigManager.getMerged();
 
     console.log(chalk.gray(`  ✓ Configuration loaded`));
     console.log(
@@ -189,7 +261,11 @@ export async function sync(options: SyncOptions): Promise<void> {
     // Step 3: Initialize Automerge repo
     spinner.text = "Connecting to Automerge repository...";
     const repo = createRepo(syncToolDir, syncConfig?.sync_server, false); // Local-only for now
-    const syncEngine = new SyncEngine(repo, currentPath);
+    const syncEngine = new SyncEngine(
+      repo,
+      currentPath,
+      syncConfig.defaults.exclude_patterns
+    );
 
     console.log(chalk.gray("  ✓ Connected to repository"));
 
@@ -327,6 +403,10 @@ export async function sync(options: SyncOptions): Promise<void> {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
           console.log(`\n${chalk.green("✨ Everything already in sync!")}`);
         }
+
+        // Ensure all changes are flushed to disk
+        spinner.text = "Flushing changes to disk...";
+        await repo.shutdown();
       } else {
         spinner.fail("Sync completed with errors");
 
@@ -349,6 +429,9 @@ export async function sync(options: SyncOptions): Promise<void> {
           console.log(`  📄 Files changed: ${result.filesChanged}`);
           console.log(`  📁 Directories changed: ${result.directoriesChanged}`);
         }
+
+        // Still try to flush any partial changes
+        await repo.shutdown();
       }
     }
   } catch (error) {
@@ -376,13 +459,17 @@ export async function diff(
 
     // Load configuration
     const diffConfigManager = new ConfigManager(resolvedPath);
-    const diffConfig = await diffConfigManager.load();
+    const diffConfig = await diffConfigManager.getMerged();
 
     // Initialize Automerge repo
     const repo = createRepo(syncToolDir, diffConfig?.sync_server, false); // Local-only for now
 
     // Get changes
-    const syncEngine = new SyncEngine(repo, resolvedPath);
+    const syncEngine = new SyncEngine(
+      repo,
+      resolvedPath,
+      diffConfig.defaults.exclude_patterns
+    );
     const preview = await syncEngine.previewChanges();
 
     if (options.nameOnly) {
@@ -410,13 +497,18 @@ export async function diff(
           ? chalk.yellow("[CONFLICT]")
           : chalk.gray("[NO CHANGE]");
 
-      console.log(`${typeLabel} ${change.path}`);
+      console.log(`\n${typeLabel} ${change.path}`);
 
-      // TODO: Show actual diff content if external tool not specified
       if (options.tool) {
         console.log(`  Use "${options.tool}" to view detailed diff`);
+      } else {
+        // Show actual diff content
+        await showContentDiff(change);
       }
     }
+
+    // Cleanup repo resources
+    await repo.shutdown();
   } catch (error) {
     console.error(chalk.red(`Diff failed: ${error}`));
     throw error;
@@ -442,11 +534,15 @@ export async function status(): Promise<void> {
 
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
-    const statusConfig = await statusConfigManager.load();
+    const statusConfig = await statusConfigManager.getMerged();
     const repo = createRepo(syncToolDir, statusConfig?.sync_server, false); // Local-only for now
 
     // Get status
-    const syncEngine = new SyncEngine(repo, currentPath);
+    const syncEngine = new SyncEngine(
+      repo,
+      currentPath,
+      statusConfig.defaults.exclude_patterns
+    );
     const syncStatus = await syncEngine.getStatus();
 
     spinner.stop();
@@ -545,6 +641,9 @@ export async function status(): Promise<void> {
       );
     }
     console.log(`  ${chalk.cyan("sync-tool log")}      - View sync history`);
+
+    // Cleanup repo resources
+    await repo.shutdown();
   } catch (error) {
     console.error(chalk.red(`❌ Status check failed: ${error}`));
     throw error;
@@ -587,6 +686,8 @@ export async function log(
     } else {
       console.log(chalk.yellow("No sync history found"));
     }
+
+    // Note: log command doesn't create a repo, so no shutdown needed
   } catch (error) {
     console.error(chalk.red(`Log failed: ${error}`));
     throw error;
@@ -684,7 +785,7 @@ export async function clone(
       sync_server: "wss://sync3.automerge.org",
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -711,7 +812,11 @@ export async function clone(
 
     // Step 5: Initialize sync engine and pull existing structure
     spinner.text = "Downloading directory structure...";
-    const syncEngine = new SyncEngine(repo, resolvedPath);
+    const syncEngine = new SyncEngine(
+      repo,
+      resolvedPath,
+      config.defaults.exclude_patterns
+    );
 
     // TODO: Actually connect to and pull from the root directory document
     // For now, create an empty snapshot since we're in local-only mode
@@ -720,6 +825,11 @@ export async function clone(
     const duration = Date.now() - startTime;
 
     console.log(chalk.gray(`  ✓ Directory sync completed in ${duration}ms`));
+
+    // Ensure all changes are flushed to disk
+    spinner.text = "Flushing changes to disk...";
+    await repo.shutdown();
+    console.log(chalk.gray("  ✓ All changes written to disk"));
 
     spinner.succeed(`Cloned sync directory to ${chalk.green(resolvedPath)}`);
 

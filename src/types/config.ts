@@ -50,6 +50,7 @@ export interface SyncSettings {
 export interface DirectoryConfig {
   sync_server?: string;
   sync_enabled: boolean;
+  root_directory_url?: string; // AutomergeUrl of the root directory document
   defaults: {
     exclude_patterns: string[];
     large_file_threshold: string;

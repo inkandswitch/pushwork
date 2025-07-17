@@ -22,12 +22,13 @@ describe("Sync Flow Integration", () => {
     it("should create and load configuration", async () => {
       const configManager = new ConfigManager(tmpDir);
 
-      const config: DirectoryConfig = {
-        remote_repo: "test-repo-id",
+      // Create test config
+      const testConfig: DirectoryConfig = {
+        sync_server: "wss://test.server.com",
         sync_enabled: true,
         defaults: {
           exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "100MB",
+          large_file_threshold: "1MB",
         },
         diff: {
           show_binary: false,
@@ -36,14 +37,14 @@ describe("Sync Flow Integration", () => {
           move_detection_threshold: 0.8,
           prompt_threshold: 0.5,
           auto_sync: false,
-          parallel_operations: 4,
+          parallel_operations: 2,
         },
       };
 
-      await configManager.save(config);
+      await configManager.save(testConfig);
 
       const loadedConfig = await configManager.load();
-      expect(loadedConfig).toEqual(config);
+      expect(loadedConfig).toEqual(testConfig);
     });
 
     it("should merge global and local configurations", async () => {
@@ -52,37 +53,34 @@ describe("Sync Flow Integration", () => {
       // Create default global config
       await configManager.createDefaultGlobal();
 
-      // Create local config with overrides
+      // Test directory config
       const localConfig: DirectoryConfig = {
-        remote_repo: "local-repo-id",
-        sync_server: "wss://test.sync.server",
+        sync_server: "wss://local.server.com",
         sync_enabled: true,
         defaults: {
           exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "50MB",
+          large_file_threshold: "5MB",
         },
         diff: {
-          show_binary: false,
+          show_binary: true,
         },
         sync: {
-          move_detection_threshold: 0.9, // Override global
-          prompt_threshold: 0.6, // Override global
-          auto_sync: true, // Override global
-          parallel_operations: 8, // Override global
+          move_detection_threshold: 0.9,
+          prompt_threshold: 0.6,
+          auto_sync: true,
+          parallel_operations: 1,
         },
       };
 
       await configManager.save(localConfig);
 
+      // Verify merged config
       const mergedConfig = await configManager.getMerged();
-
-      expect(mergedConfig.remote_repo).toBe("local-repo-id");
-      expect(mergedConfig.sync?.move_detection_threshold).toBe(0.9);
-      expect(mergedConfig.sync?.auto_sync).toBe(true);
-
-      // Should keep global defaults for non-overridden values
+      expect(mergedConfig.sync_server).toBe("wss://local.server.com");
       expect(mergedConfig.defaults?.exclude_patterns).toContain(".git");
-      expect(mergedConfig.diff?.show_binary).toBe(false);
+      expect(mergedConfig.defaults?.large_file_threshold).toBe("5MB");
+      expect(mergedConfig.diff?.show_binary).toBe(true);
+      expect(mergedConfig.sync?.move_detection_threshold).toBe(0.9);
     });
   });
 

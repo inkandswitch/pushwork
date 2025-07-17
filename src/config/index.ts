@@ -124,7 +124,7 @@ export class ConfigManager {
     const defaultConfig: DirectoryConfig = {
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -204,7 +204,13 @@ export class ConfigManager {
    */
   async createDefaultGlobal(): Promise<void> {
     const defaultGlobal: GlobalConfig = {
-      exclude_patterns: [".git", "node_modules", "*.tmp", ".DS_Store"],
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".DS_Store",
+        ".sync-tool",
+      ],
       large_file_threshold: "100MB",
       sync_server: "wss://sync3.automerge.org",
       diff: {

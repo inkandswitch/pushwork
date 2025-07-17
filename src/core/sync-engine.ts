@@ -35,9 +35,13 @@ export class SyncEngine {
   private changeDetector: ChangeDetector;
   private moveDetector: MoveDetector;
 
-  constructor(private repo: Repo, private rootPath: string) {
+  constructor(
+    private repo: Repo,
+    private rootPath: string,
+    excludePatterns: string[] = []
+  ) {
     this.snapshotManager = new SnapshotManager(rootPath);
-    this.changeDetector = new ChangeDetector(repo, rootPath);
+    this.changeDetector = new ChangeDetector(repo, rootPath, excludePatterns);
     this.moveDetector = new MoveDetector();
   }
 
@@ -52,7 +56,6 @@ export class SyncEngine {
       errors: [],
       warnings: [],
     };
-
     try {
       // Load current snapshot
       let snapshot = await this.snapshotManager.load();

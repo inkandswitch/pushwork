@@ -37,7 +37,11 @@ export interface DetectedChange {
  * Change detection engine
  */
 export class ChangeDetector {
-  constructor(private repo: Repo, private rootPath: string) {}
+  constructor(
+    private repo: Repo,
+    private rootPath: string,
+    private excludePatterns: string[] = []
+  ) {}
 
   /**
    * Detect all changes between local filesystem and snapshot
@@ -213,7 +217,11 @@ export class ChangeDetector {
     >();
 
     try {
-      const entries = await listDirectory(this.rootPath, true);
+      const entries = await listDirectory(
+        this.rootPath,
+        true,
+        this.excludePatterns
+      );
 
       for (const entry of entries) {
         if (entry.type !== FileType.DIRECTORY) {
