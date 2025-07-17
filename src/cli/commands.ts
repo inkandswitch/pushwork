@@ -193,13 +193,17 @@ export async function init(targetPath: string): Promise<void> {
     }
 
     // Step 6: Create initial snapshot
+    spinner.text = "Creating initial snapshot...";
     const startTime = Date.now();
     await syncEngine.sync(false);
+
+    // Step 7: Set the root directory URL after snapshot is created
+    await syncEngine.setRootDirectoryUrl(rootHandle.url);
     const duration = Date.now() - startTime;
 
     console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`));
 
-    // Step 7: Ensure all Automerge operations are flushed to disk
+    // Step 8: Ensure all Automerge operations are flushed to disk
     spinner.text = "Flushing changes to disk...";
     await repo.shutdown();
     console.log(chalk.gray("  ✓ All changes written to disk"));

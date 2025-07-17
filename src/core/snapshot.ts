@@ -81,6 +81,7 @@ export class SnapshotManager {
     return {
       timestamp: Date.now(),
       rootPath: this.rootPath,
+      rootDirectoryUrl: undefined,
       files: new Map(),
       directories: new Map(),
     };
@@ -235,6 +236,7 @@ export class SnapshotManager {
     return {
       timestamp: snapshot.timestamp,
       rootPath: snapshot.rootPath,
+      rootDirectoryUrl: snapshot.rootDirectoryUrl,
       files: Array.from(snapshot.files.entries()),
       directories: Array.from(snapshot.directories.entries()),
     };
@@ -249,6 +251,7 @@ export class SnapshotManager {
     return {
       timestamp: serializable.timestamp,
       rootPath: serializable.rootPath,
+      rootDirectoryUrl: serializable.rootDirectoryUrl,
       files: new Map(serializable.files),
       directories: new Map(serializable.directories),
     };
@@ -270,6 +273,7 @@ export class SnapshotManager {
     return {
       timestamp: snapshot.timestamp,
       rootPath: snapshot.rootPath,
+      rootDirectoryUrl: snapshot.rootDirectoryUrl,
       files: new Map(snapshot.files),
       directories: new Map(snapshot.directories),
     };

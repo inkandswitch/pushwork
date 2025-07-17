@@ -1,4 +1,4 @@
-import { AutomergeUrl, Repo } from "@automerge/automerge-repo";
+import { AutomergeUrl, Repo, updateText } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   SyncSnapshot,
@@ -43,6 +43,41 @@ export class SyncEngine {
     this.snapshotManager = new SnapshotManager(rootPath);
     this.changeDetector = new ChangeDetector(repo, rootPath, excludePatterns);
     this.moveDetector = new MoveDetector();
+  }
+
+  /**
+   * Determine if content should be treated as text for Automerge text operations
+   */
+  private isTextContent(
+    content: string | Uint8Array,
+    mimeType: string
+  ): boolean {
+    // If content is already a Uint8Array, it's binary
+    if (content instanceof Uint8Array) {
+      return false;
+    }
+
+    // If content is a string, check MIME type to be safe
+    return (
+      mimeType.startsWith("text/") ||
+      mimeType === "application/json" ||
+      mimeType === "application/xml" ||
+      mimeType.includes("javascript") ||
+      mimeType.includes("typescript") ||
+      mimeType === "text/plain"
+    );
+  }
+
+  /**
+   * Set the root directory URL in the snapshot
+   */
+  async setRootDirectoryUrl(url: AutomergeUrl): Promise<void> {
+    let snapshot = await this.snapshotManager.load();
+    if (!snapshot) {
+      snapshot = this.snapshotManager.createEmpty();
+    }
+    snapshot.rootDirectoryUrl = url;
+    await this.snapshotManager.save(snapshot);
   }
 
   /**
@@ -238,6 +273,9 @@ export class SyncEngine {
       // File was deleted locally
       if (snapshotEntry) {
         await this.deleteRemoteFile(snapshotEntry.url, dryRun);
+        // Remove from root directory document
+        const fileName = change.path.split("/").pop() || "";
+        await this.removeFileFromRootDirectory(snapshot, fileName, dryRun);
         if (!dryRun) {
           this.snapshotManager.removeFileEntry(snapshot, change.path);
         }
@@ -249,6 +287,10 @@ export class SyncEngine {
       // New file
       const url = await this.createRemoteFile(change, dryRun);
       if (!dryRun && url) {
+        // Add to root directory document
+        const fileName = change.path.split("/").pop() || "";
+        await this.addFileToRootDirectory(snapshot, fileName, url, dryRun);
+
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
           path: normalizePath(this.rootPath + "/" + change.path),
           url,
@@ -333,17 +375,29 @@ export class SyncEngine {
   ): Promise<AutomergeUrl | null> {
     if (dryRun || !change.localContent) return null;
 
+    const mimeType = getMimeType(change.path);
+    const isText = this.isTextContent(change.localContent, mimeType);
+
+    // Create initial document structure
     const fileDoc: FileDocument = {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
-      mimeType: getMimeType(change.path),
-      contents: change.localContent,
+      mimeType,
+      contents: isText ? "" : change.localContent, // Empty string for text, actual content for binary
       metadata: {
         permissions: 0o644,
       },
     };
 
     const handle = this.repo.create(fileDoc);
+
+    // For text files, use updateText to set the content properly
+    if (isText && typeof change.localContent === "string") {
+      handle.change((doc: FileDocument) => {
+        updateText(doc, ["contents"], change.localContent as string);
+      });
+    }
+
     return handle.url;
   }
 
@@ -359,7 +413,15 @@ export class SyncEngine {
 
     const handle = await this.repo.find(url);
     handle.change((doc: FileDocument) => {
-      doc.contents = content;
+      const isText = this.isTextContent(content, doc.mimeType);
+
+      if (isText && typeof content === "string") {
+        // Use updateText for text content to get proper CRDT merging
+        updateText(doc, ["contents"], content);
+      } else {
+        // Direct assignment for binary content
+        doc.contents = content;
+      }
     });
   }
 
@@ -379,6 +441,63 @@ export class SyncEngine {
     handle.change((doc: FileDocument) => {
       doc.contents = "";
     });
+  }
+
+  /**
+   * Add file entry to root directory document
+   */
+  private async addFileToRootDirectory(
+    snapshot: SyncSnapshot,
+    fileName: string,
+    fileUrl: AutomergeUrl,
+    dryRun: boolean
+  ): Promise<void> {
+    if (dryRun || !snapshot.rootDirectoryUrl) return;
+
+    const dirHandle = await this.repo.find(snapshot.rootDirectoryUrl);
+    dirHandle.change((doc: DirectoryDocument) => {
+      // Check if entry already exists
+      const existingIndex = doc.docs.findIndex(
+        (entry) => entry.name === fileName
+      );
+      if (existingIndex === -1) {
+        doc.docs.push({
+          name: fileName,
+          type: "file",
+          url: fileUrl,
+        });
+      }
+    });
+  }
+
+  /**
+   * Remove file entry from root directory document
+   */
+  private async removeFileFromRootDirectory(
+    snapshot: SyncSnapshot,
+    fileName: string,
+    dryRun: boolean
+  ): Promise<void> {
+    if (dryRun || !snapshot.rootDirectoryUrl) return;
+
+    try {
+      const dirHandle = await this.repo.find(snapshot.rootDirectoryUrl);
+      dirHandle.change((doc: DirectoryDocument) => {
+        // Find the index of the entry to remove
+        const indexToRemove = doc.docs.findIndex(
+          (entry) => entry.name === fileName
+        );
+        if (indexToRemove !== -1) {
+          // Use splice to mutate the array in place
+          doc.docs.splice(indexToRemove, 1);
+        }
+      });
+    } catch (error) {
+      console.warn(
+        `Failed to remove ${fileName} from root directory: ${error}`
+      );
+      throw error;
+    }
   }
 
   /**
