@@ -208,7 +208,6 @@ When a path changes type (text↔binary↔directory):
 
 ```toml
 [defaults]
-remote_repo = "automerge-repo-id"
 exclude_patterns = [".git", "node_modules", "*.tmp"]
 large_file_threshold = "100MB"
 

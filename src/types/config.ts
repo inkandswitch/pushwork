@@ -2,7 +2,6 @@
  * Global configuration options
  */
 export interface GlobalConfig {
-  remote_repo?: string;
   sync_server?: string;
   exclude_patterns?: string[];
   large_file_threshold?: string;
@@ -49,7 +48,6 @@ export interface SyncSettings {
  * Per-directory configuration
  */
 export interface DirectoryConfig {
-  remote_repo?: string;
   sync_server?: string;
   sync_enabled: boolean;
   defaults: {
@@ -84,7 +82,14 @@ export interface CommandOptions {
  * Init command specific options
  */
 export interface InitOptions extends CommandOptions {
-  remote: string;
+  // No additional options needed - init creates a new sync directory
+}
+
+/**
+ * Clone command specific options
+ */
+export interface CloneOptions extends CommandOptions {
+  force?: boolean; // Overwrite existing directory
 }
 
 /**

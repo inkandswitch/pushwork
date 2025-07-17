@@ -2,7 +2,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
-import { init, sync, diff, status, log, checkout } from "./cli/commands";
+import { init, clone, sync, diff, status, log, checkout } from "./cli/commands";
 
 const program = new Command();
 
@@ -16,16 +16,26 @@ program
   .command("init")
   .description("Initialize sync in directory")
   .argument("<path>", "Directory path to initialize")
-  .option("--remote <repo-id>", "Specify remote Automerge repository ID")
   .action(async (path: string, options) => {
     try {
-      if (!options.remote) {
-        console.error(chalk.red("Error: --remote option is required"));
-        process.exit(1);
-      }
+      await init(path);
+    } catch (error) {
+      console.error(chalk.red(`Error: ${error}`));
+      process.exit(1);
+    }
+  });
 
-      await init(path, {
-        remote: options.remote,
+// Clone command
+program
+  .command("clone")
+  .description("Clone an existing synced directory")
+  .argument("<url>", "AutomergeUrl of root directory to clone")
+  .argument("<path>", "Target directory path")
+  .option("--force", "Overwrite existing directory")
+  .action(async (url: string, path: string, options) => {
+    try {
+      await clone(url, path, {
+        force: options.force || false,
         dryRun: false,
         verbose: false,
       });

@@ -122,7 +122,6 @@ export class ConfigManager {
 
     // Create default configuration
     const defaultConfig: DirectoryConfig = {
-      remote_repo: undefined,
       sync_enabled: true,
       defaults: {
         exclude_patterns: [".git", "node_modules", "*.tmp"],
@@ -161,10 +160,6 @@ export class ConfigManager {
     override: Partial<DirectoryConfig> | GlobalConfig
   ): DirectoryConfig {
     const merged = { ...base };
-
-    if ("remote_repo" in override && override.remote_repo !== undefined) {
-      merged.remote_repo = override.remote_repo;
-    }
 
     if ("sync_server" in override && override.sync_server !== undefined) {
       merged.sync_server = override.sync_server;

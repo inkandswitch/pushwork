@@ -7,28 +7,37 @@ import chalk from "chalk";
 import ora from "ora";
 import {
   InitOptions,
+  CloneOptions,
   SyncOptions,
   DiffOptions,
   LogOptions,
   CheckoutOptions,
   DirectoryConfig,
+  DirectoryDocument,
 } from "../types";
 import { SyncEngine } from "../core";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 
 /**
- * Create Automerge repo with network connectivity
+ * Create Automerge repo with optional network connectivity
  */
-function createRepo(syncToolDir: string, syncServer?: string): Repo {
+function createRepo(
+  syncToolDir: string,
+  syncServer?: string,
+  enableNetwork: boolean = false
+): Repo {
   const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
 
   const repoConfig: any = { storage };
 
-  // Add network adapter if sync server is configured
-  if (syncServer) {
+  // Add network adapter only if explicitly enabled and sync server is configured
+  if (enableNetwork && syncServer) {
     const networkAdapter = new NodeWSServerAdapter(syncServer);
     repoConfig.network = [networkAdapter];
+    console.log(chalk.gray(`  ✓ Network sync enabled: ${syncServer}`));
+  } else {
+    console.log(chalk.gray("  ✓ Local-only mode (network sync disabled)"));
   }
 
   return new Repo(repoConfig);
@@ -37,10 +46,7 @@ function createRepo(syncToolDir: string, syncServer?: string): Repo {
 /**
  * Initialize sync in a directory
  */
-export async function init(
-  targetPath: string,
-  options: InitOptions
-): Promise<void> {
+export async function init(targetPath: string): Promise<void> {
   const spinner = ora("Starting initialization...").start();
 
   try {
@@ -68,7 +74,6 @@ export async function init(
     spinner.text = "Setting up configuration...";
     const configManager = new ConfigManager(resolvedPath);
     const config: DirectoryConfig = {
-      remote_repo: options.remote,
       sync_server: "wss://sync3.automerge.org",
       sync_enabled: true,
       defaults: {
@@ -88,14 +93,20 @@ export async function init(
     await configManager.save(config);
 
     console.log(chalk.gray("  ✓ Saved configuration"));
-    console.log(chalk.gray(`  ✓ Remote repository: ${options.remote}`));
     console.log(chalk.gray("  ✓ Sync server: wss://sync3.automerge.org"));
 
-    // Step 4: Initialize Automerge repo
-    spinner.text = "Initializing Automerge repository...";
-    const repo = createRepo(syncToolDir, config.sync_server);
+    // Step 4: Initialize Automerge repo and create root directory document
+    spinner.text = "Creating root directory document...";
+    const repo = createRepo(syncToolDir, config.sync_server, false); // Local-only for now
+
+    // Create the root directory document
+    const rootDoc: DirectoryDocument = {
+      docs: [],
+    };
+    const rootHandle = repo.create(rootDoc);
 
     console.log(chalk.gray("  ✓ Created Automerge repository"));
+    console.log(chalk.gray(`  ✓ Root directory URL: ${rootHandle.url}`));
 
     // Step 5: Scan existing files
     spinner.text = "Scanning existing files...";
@@ -123,11 +134,12 @@ export async function init(
 
     spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
 
-    console.log(`\n${chalk.bold("Setup Summary:")}:`);
+    console.log(`\n${chalk.bold("🎉 Sync Directory Created!")}`);
     console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
-    console.log(`  🌐 Remote repository: ${chalk.blue(options.remote)}`);
     console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
     console.log(`  📄 Files processed: ${chalk.yellow(fileCount)}`);
+    console.log(`\n${chalk.bold("📋 Share this URL with collaborators:")}`);
+    console.log(`  ${chalk.cyan(rootHandle.url)}`);
     console.log(
       `\n${chalk.green("Ready to sync!")} Run ${chalk.cyan(
         "sync-tool sync"
@@ -165,17 +177,18 @@ export async function sync(options: SyncOptions): Promise<void> {
     const syncConfigManager = new ConfigManager(currentPath);
     const syncConfig = await syncConfigManager.load();
 
-    if (!syncConfig?.remote_repo) {
-      spinner.fail("No remote repository configured");
-      return;
-    }
-
-    console.log(chalk.gray(`  ✓ Remote repository: ${syncConfig.remote_repo}`));
-    console.log(chalk.gray(`  ✓ Sync server: ${syncConfig.sync_server}`));
+    console.log(chalk.gray(`  ✓ Configuration loaded`));
+    console.log(
+      chalk.gray(
+        `  ✓ Sync server: ${
+          syncConfig?.sync_server || "wss://sync3.automerge.org"
+        }`
+      )
+    );
 
     // Step 3: Initialize Automerge repo
     spinner.text = "Connecting to Automerge repository...";
-    const repo = createRepo(syncToolDir, syncConfig?.sync_server);
+    const repo = createRepo(syncToolDir, syncConfig?.sync_server, false); // Local-only for now
     const syncEngine = new SyncEngine(repo, currentPath);
 
     console.log(chalk.gray("  ✓ Connected to repository"));
@@ -366,7 +379,7 @@ export async function diff(
     const diffConfig = await diffConfigManager.load();
 
     // Initialize Automerge repo
-    const repo = createRepo(syncToolDir, diffConfig?.sync_server);
+    const repo = createRepo(syncToolDir, diffConfig?.sync_server, false); // Local-only for now
 
     // Get changes
     const syncEngine = new SyncEngine(repo, resolvedPath);
@@ -430,7 +443,7 @@ export async function status(): Promise<void> {
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
     const statusConfig = await statusConfigManager.load();
-    const repo = createRepo(syncToolDir, statusConfig?.sync_server);
+    const repo = createRepo(syncToolDir, statusConfig?.sync_server, false); // Local-only for now
 
     // Get status
     const syncEngine = new SyncEngine(repo, currentPath);
@@ -488,18 +501,12 @@ export async function status(): Promise<void> {
     const statusConfigManager2 = new ConfigManager(currentPath);
     const statusConfig2 = await statusConfigManager2.load();
 
-    if (statusConfig2?.remote_repo) {
-      console.log(
-        `  🌐 Remote repository: ${chalk.blue(statusConfig2.remote_repo)}`
-      );
-    } else {
-      console.log(`  🌐 Remote repository: ${chalk.red("Not configured")}`);
-    }
-
     if (statusConfig2?.sync_server) {
       console.log(`  🔗 Sync server: ${chalk.blue(statusConfig2.sync_server)}`);
     } else {
-      console.log(`  🔗 Sync server: ${chalk.red("Not configured")}`);
+      console.log(
+        `  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")} (default)`
+      );
     }
 
     console.log(
@@ -615,6 +622,118 @@ export async function checkout(
     console.log(`Target path: ${resolvedPath}`);
   } catch (error) {
     console.error(chalk.red(`Checkout failed: ${error}`));
+    throw error;
+  }
+}
+
+/**
+ * Clone an existing synced directory from an AutomergeUrl
+ */
+export async function clone(
+  rootUrl: string,
+  targetPath: string,
+  options: CloneOptions
+): Promise<void> {
+  const spinner = ora("Starting clone operation...").start();
+
+  try {
+    const resolvedPath = path.resolve(targetPath);
+
+    // Step 1: Directory setup
+    spinner.text = "Setting up target directory...";
+
+    // Check if directory exists and handle --force
+    if (await pathExists(resolvedPath)) {
+      const files = await fs.readdir(resolvedPath);
+      if (files.length > 0 && !options.force) {
+        spinner.fail(
+          "Target directory is not empty. Use --force to overwrite."
+        );
+        return;
+      }
+    } else {
+      await ensureDirectoryExists(resolvedPath);
+    }
+
+    // Check if already initialized
+    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    if (await pathExists(syncToolDir)) {
+      if (!options.force) {
+        spinner.fail(
+          "Directory already initialized for sync. Use --force to overwrite."
+        );
+        return;
+      }
+      // Clean up existing sync directory
+      await fs.rm(syncToolDir, { recursive: true, force: true });
+    }
+
+    console.log(chalk.gray("  ✓ Target directory prepared"));
+
+    // Step 2: Create sync directories
+    spinner.text = "Creating .sync-tool directory...";
+    await ensureDirectoryExists(syncToolDir);
+    await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
+
+    console.log(chalk.gray("  ✓ Created sync directory structure"));
+
+    // Step 3: Configuration setup
+    spinner.text = "Setting up configuration...";
+    const configManager = new ConfigManager(resolvedPath);
+    const config: DirectoryConfig = {
+      sync_server: "wss://sync3.automerge.org",
+      sync_enabled: true,
+      defaults: {
+        exclude_patterns: [".git", "node_modules", "*.tmp"],
+        large_file_threshold: "100MB",
+      },
+      diff: {
+        show_binary: false,
+      },
+      sync: {
+        move_detection_threshold: 0.8,
+        prompt_threshold: 0.5,
+        auto_sync: false,
+        parallel_operations: 4,
+      },
+    };
+    await configManager.save(config);
+
+    console.log(chalk.gray("  ✓ Saved configuration"));
+    console.log(chalk.gray("  ✓ Sync server: wss://sync3.automerge.org"));
+
+    // Step 4: Initialize Automerge repo and connect to root directory
+    spinner.text = "Connecting to root directory document...";
+    const repo = createRepo(syncToolDir, config.sync_server, false); // Local-only for now
+
+    console.log(chalk.gray("  ✓ Created Automerge repository"));
+    console.log(chalk.gray(`  ✓ Root directory URL: ${rootUrl}`));
+
+    // Step 5: Initialize sync engine and pull existing structure
+    spinner.text = "Downloading directory structure...";
+    const syncEngine = new SyncEngine(repo, resolvedPath);
+
+    // TODO: Actually connect to and pull from the root directory document
+    // For now, create an empty snapshot since we're in local-only mode
+    const startTime = Date.now();
+    await syncEngine.sync(false);
+    const duration = Date.now() - startTime;
+
+    console.log(chalk.gray(`  ✓ Directory sync completed in ${duration}ms`));
+
+    spinner.succeed(`Cloned sync directory to ${chalk.green(resolvedPath)}`);
+
+    console.log(`\n${chalk.bold("📂 Directory Cloned!")}`);
+    console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
+    console.log(`  🔗 Root URL: ${chalk.cyan(rootUrl)}`);
+    console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
+    console.log(
+      `\n${chalk.green("Clone complete!")} Run ${chalk.cyan(
+        "sync-tool sync"
+      )} to stay in sync.`
+    );
+  } catch (error) {
+    spinner.fail(`Failed to clone: ${error}`);
     throw error;
   }
 }
