@@ -2,6 +2,7 @@ import * as path from "path";
 import * as fs from "fs/promises";
 import { Repo } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
+import { NodeWSServerAdapter } from "@automerge/automerge-repo-network-websocket";
 import chalk from "chalk";
 import ora from "ora";
 import {
@@ -15,6 +16,23 @@ import {
 import { SyncEngine } from "../core";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
+
+/**
+ * Create Automerge repo with network connectivity
+ */
+function createRepo(syncToolDir: string, syncServer?: string): Repo {
+  const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
+
+  const repoConfig: any = { storage };
+
+  // Add network adapter if sync server is configured
+  if (syncServer) {
+    const networkAdapter = new NodeWSServerAdapter(syncServer);
+    repoConfig.network = [networkAdapter];
+  }
+
+  return new Repo(repoConfig);
+}
 
 /**
  * Initialize sync in a directory
@@ -45,6 +63,7 @@ export async function init(
     const configManager = new ConfigManager(resolvedPath);
     const config: DirectoryConfig = {
       remote_repo: options.remote,
+      sync_server: "wss://sync3.automerge.org",
       sync_enabled: true,
       defaults: {
         exclude_patterns: [".git", "node_modules", "*.tmp"],
@@ -63,10 +82,7 @@ export async function init(
     await configManager.save(config);
 
     // Initialize Automerge repo
-    const repo = new Repo({
-      storage: new NodeFSStorageAdapter(path.join(syncToolDir, "automerge")),
-      // TODO: Add network adapter based on remote_repo
-    });
+    const repo = createRepo(syncToolDir, config.sync_server);
 
     // Initialize sync engine and create initial snapshot
     const syncEngine = new SyncEngine(repo, resolvedPath);
@@ -99,19 +115,16 @@ export async function sync(options: SyncOptions): Promise<void> {
     }
 
     // Load configuration
-    const configManager = new ConfigManager(currentPath);
-    const config = await configManager.load();
+    const syncConfigManager = new ConfigManager(currentPath);
+    const syncConfig = await syncConfigManager.load();
 
-    if (!config?.remote_repo) {
+    if (!syncConfig?.remote_repo) {
       spinner.fail("No remote repository configured");
       return;
     }
 
     // Initialize Automerge repo
-    const repo = new Repo({
-      storage: new NodeFSStorageAdapter(path.join(syncToolDir, "automerge")),
-      // TODO: Add network adapter based on remote_repo
-    });
+    const repo = createRepo(syncToolDir, syncConfig?.sync_server);
 
     // Run sync
     const syncEngine = new SyncEngine(repo, currentPath);
@@ -196,13 +209,11 @@ export async function diff(
     }
 
     // Load configuration
-    const configManager = new ConfigManager(resolvedPath);
-    const config = await configManager.load();
+    const diffConfigManager = new ConfigManager(resolvedPath);
+    const diffConfig = await diffConfigManager.load();
 
     // Initialize Automerge repo
-    const repo = new Repo({
-      storage: new NodeFSStorageAdapter(path.join(syncToolDir, "automerge")),
-    });
+    const repo = createRepo(syncToolDir, diffConfig?.sync_server);
 
     // Get changes
     const syncEngine = new SyncEngine(repo, resolvedPath);
@@ -261,9 +272,9 @@ export async function status(): Promise<void> {
     }
 
     // Initialize Automerge repo
-    const repo = new Repo({
-      storage: new NodeFSStorageAdapter(path.join(syncToolDir, "automerge")),
-    });
+    const statusConfigManager = new ConfigManager(currentPath);
+    const statusConfig = await statusConfigManager.load();
+    const repo = createRepo(syncToolDir, statusConfig?.sync_server);
 
     // Get status
     const syncEngine = new SyncEngine(repo, currentPath);
@@ -287,11 +298,17 @@ export async function status(): Promise<void> {
     }
 
     // Load configuration
-    const configManager = new ConfigManager(currentPath);
-    const config = await configManager.load();
+    const statusConfigManager2 = new ConfigManager(currentPath);
+    const statusConfig2 = await statusConfigManager2.load();
 
-    if (config?.remote_repo) {
-      console.log(`  Remote repository: ${chalk.blue(config.remote_repo)}`);
+    if (statusConfig2?.remote_repo) {
+      console.log(
+        `  Remote repository: ${chalk.blue(statusConfig2.remote_repo)}`
+      );
+    }
+
+    if (statusConfig2?.sync_server) {
+      console.log(`  Sync server: ${chalk.blue(statusConfig2.sync_server)}`);
     }
   } catch (error) {
     console.error(chalk.red(`Status failed: ${error}`));

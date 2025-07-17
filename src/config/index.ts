@@ -158,27 +158,46 @@ export class ConfigManager {
    */
   private mergeConfigs(
     base: DirectoryConfig,
-    override: Partial<DirectoryConfig>
+    override: Partial<DirectoryConfig> | GlobalConfig
   ): DirectoryConfig {
     const merged = { ...base };
 
-    if (override.remote_repo !== undefined) {
+    if ("remote_repo" in override && override.remote_repo !== undefined) {
       merged.remote_repo = override.remote_repo;
     }
 
-    if (override.sync_enabled !== undefined) {
+    if ("sync_server" in override && override.sync_server !== undefined) {
+      merged.sync_server = override.sync_server;
+    }
+
+    if ("sync_enabled" in override && override.sync_enabled !== undefined) {
       merged.sync_enabled = override.sync_enabled;
     }
 
-    if (override.defaults) {
+    // Handle GlobalConfig structure
+    if ("exclude_patterns" in override && override.exclude_patterns) {
+      merged.defaults.exclude_patterns = override.exclude_patterns;
+    }
+
+    if ("large_file_threshold" in override && override.large_file_threshold) {
+      merged.defaults.large_file_threshold = override.large_file_threshold;
+    }
+
+    // Handle DirectoryConfig structure
+    if ("defaults" in override && override.defaults) {
       merged.defaults = { ...merged.defaults, ...override.defaults };
     }
 
-    if (override.diff) {
-      merged.diff = { ...merged.diff, ...override.diff };
+    if ("diff" in override && override.diff) {
+      // Merge diff settings, ensuring show_binary has a default
+      merged.diff = {
+        ...merged.diff,
+        ...override.diff,
+        show_binary: override.diff.show_binary ?? merged.diff.show_binary,
+      };
     }
 
-    if (override.sync) {
+    if ("sync" in override && override.sync) {
       merged.sync = { ...merged.sync, ...override.sync };
     }
 
@@ -190,10 +209,9 @@ export class ConfigManager {
    */
   async createDefaultGlobal(): Promise<void> {
     const defaultGlobal: GlobalConfig = {
-      defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".DS_Store"],
-        large_file_threshold: "100MB",
-      },
+      exclude_patterns: [".git", "node_modules", "*.tmp", ".DS_Store"],
+      large_file_threshold: "100MB",
+      sync_server: "wss://sync3.automerge.org",
       diff: {
         show_binary: false,
       },

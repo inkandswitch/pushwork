@@ -55,7 +55,15 @@ describe("Sync Flow Integration", () => {
       // Create local config with overrides
       const localConfig: DirectoryConfig = {
         remote_repo: "local-repo-id",
+        sync_server: "wss://test.sync.server",
         sync_enabled: true,
+        defaults: {
+          exclude_patterns: [".git", "*.tmp"],
+          large_file_threshold: "50MB",
+        },
+        diff: {
+          show_binary: false,
+        },
         sync: {
           move_detection_threshold: 0.9, // Override global
           prompt_threshold: 0.6, // Override global
@@ -239,7 +247,7 @@ describe("Sync Flow Integration", () => {
   describe("Performance Scenarios", () => {
     it("should handle many small files", async () => {
       const fileCount = 100;
-      const promises = [];
+      const promises: Promise<void>[] = [];
 
       for (let i = 0; i < fileCount; i++) {
         const filePath = path.join(tmpDir, `file-${i}.txt`);

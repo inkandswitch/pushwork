@@ -2,9 +2,20 @@
  * Global configuration options
  */
 export interface GlobalConfig {
-  defaults: DefaultSettings;
-  diff: DiffSettings;
-  sync: SyncSettings;
+  remote_repo?: string;
+  sync_server?: string;
+  exclude_patterns?: string[];
+  large_file_threshold?: string;
+  diff?: {
+    external_tool?: string;
+    show_binary?: boolean;
+  };
+  sync?: {
+    move_detection_threshold?: number;
+    prompt_threshold?: number;
+    auto_sync?: boolean;
+    parallel_operations?: number;
+  };
 }
 
 /**
@@ -37,9 +48,24 @@ export interface SyncSettings {
 /**
  * Per-directory configuration
  */
-export interface DirectoryConfig extends Partial<GlobalConfig> {
+export interface DirectoryConfig {
   remote_repo?: string;
+  sync_server?: string;
   sync_enabled: boolean;
+  defaults: {
+    exclude_patterns: string[];
+    large_file_threshold: string;
+  };
+  diff: {
+    external_tool?: string;
+    show_binary: boolean;
+  };
+  sync: {
+    move_detection_threshold: number;
+    prompt_threshold: number;
+    auto_sync: boolean;
+    parallel_operations: number;
+  };
 }
 
 /**
