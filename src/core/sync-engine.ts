@@ -22,6 +22,8 @@ import {
   getFileExtension,
   normalizePath,
   getRelativePath,
+  getEnhancedMimeType,
+  isEnhancedTextFile,
 } from "../utils";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector, DetectedChange } from "./change-detection";
@@ -47,6 +49,8 @@ export class SyncEngine {
 
   /**
    * Determine if content should be treated as text for Automerge text operations
+   * Note: This method checks the runtime type. File type detection happens
+   * during reading with isEnhancedTextFile() which now has better dev file support.
    */
   private isTextContent(content: string | Uint8Array): boolean {
     // Simply check the actual type of the content
@@ -281,7 +285,7 @@ export class SyncEngine {
           url,
           head: await this.getCurrentRemoteHead(url),
           extension: getFileExtension(change.path),
-          mimeType: getMimeType(change.path),
+          mimeType: getEnhancedMimeType(change.path),
         });
       }
     } else {

@@ -4,6 +4,7 @@ import * as crypto from "crypto";
 import { glob } from "glob";
 import * as mimeTypes from "mime-types";
 import { FileSystemEntry, FileType } from "../types";
+import { isEnhancedTextFile } from "./mime-types";
 
 /**
  * Check if a path exists
@@ -27,7 +28,7 @@ export async function getFileSystemEntry(
     const stats = await fs.stat(filePath);
     const type = stats.isDirectory()
       ? FileType.DIRECTORY
-      : (await isTextFile(filePath))
+      : (await isEnhancedTextFile(filePath))
       ? FileType.TEXT
       : FileType.BINARY;
 
