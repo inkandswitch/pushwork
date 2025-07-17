@@ -41,12 +41,13 @@ export async function init(
   targetPath: string,
   options: InitOptions
 ): Promise<void> {
-  const spinner = ora("Initializing sync...").start();
+  const spinner = ora("Starting initialization...").start();
 
   try {
     const resolvedPath = path.resolve(targetPath);
 
-    // Ensure target directory exists
+    // Step 1: Directory setup
+    spinner.text = "Setting up directory structure...";
     await ensureDirectoryExists(resolvedPath);
 
     // Check if already initialized
@@ -56,10 +57,15 @@ export async function init(
       return;
     }
 
-    // Create .sync-tool directory
+    // Step 2: Create sync directories
+    spinner.text = "Creating .sync-tool directory...";
     await ensureDirectoryExists(syncToolDir);
+    await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-    // Create local configuration
+    console.log(chalk.gray("  ✓ Created sync directory structure"));
+
+    // Step 3: Configuration setup
+    spinner.text = "Setting up configuration...";
     const configManager = new ConfigManager(resolvedPath);
     const config: DirectoryConfig = {
       remote_repo: options.remote,
@@ -81,15 +87,52 @@ export async function init(
     };
     await configManager.save(config);
 
-    // Initialize Automerge repo
+    console.log(chalk.gray("  ✓ Saved configuration"));
+    console.log(chalk.gray(`  ✓ Remote repository: ${options.remote}`));
+    console.log(chalk.gray("  ✓ Sync server: wss://sync3.automerge.org"));
+
+    // Step 4: Initialize Automerge repo
+    spinner.text = "Initializing Automerge repository...";
     const repo = createRepo(syncToolDir, config.sync_server);
 
-    // Initialize sync engine and create initial snapshot
+    console.log(chalk.gray("  ✓ Created Automerge repository"));
+
+    // Step 5: Scan existing files
+    spinner.text = "Scanning existing files...";
     const syncEngine = new SyncEngine(repo, resolvedPath);
-    await syncEngine.sync(false); // Initial sync to create snapshot
+
+    // Get file count for progress
+    const dirEntries = await fs.readdir(resolvedPath, { withFileTypes: true });
+    const fileCount = dirEntries.filter((dirent: any) =>
+      dirent.isFile()
+    ).length;
+
+    if (fileCount > 0) {
+      console.log(chalk.gray(`  ✓ Found ${fileCount} existing files`));
+      spinner.text = `Creating initial snapshot with ${fileCount} files...`;
+    } else {
+      spinner.text = "Creating initial empty snapshot...";
+    }
+
+    // Step 6: Create initial snapshot
+    const startTime = Date.now();
+    await syncEngine.sync(false);
+    const duration = Date.now() - startTime;
+
+    console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`));
 
     spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
-    console.log(`Remote repository: ${chalk.blue(options.remote)}`);
+
+    console.log(`\n${chalk.bold("Setup Summary:")}:`);
+    console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
+    console.log(`  🌐 Remote repository: ${chalk.blue(options.remote)}`);
+    console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
+    console.log(`  📄 Files processed: ${chalk.yellow(fileCount)}`);
+    console.log(
+      `\n${chalk.green("Ready to sync!")} Run ${chalk.cyan(
+        "sync-tool sync"
+      )} to start syncing.`
+    );
   } catch (error) {
     spinner.fail(`Failed to initialize: ${error}`);
     throw error;
@@ -100,12 +143,13 @@ export async function init(
  * Run bidirectional sync
  */
 export async function sync(options: SyncOptions): Promise<void> {
-  const spinner = ora("Running sync...").start();
+  const spinner = ora("Starting sync operation...").start();
 
   try {
     const currentPath = process.cwd();
 
-    // Check if initialized
+    // Step 1: Validation
+    spinner.text = "Validating sync setup...";
     const syncToolDir = path.join(currentPath, ".sync-tool");
     if (!(await pathExists(syncToolDir))) {
       spinner.fail(
@@ -114,7 +158,10 @@ export async function sync(options: SyncOptions): Promise<void> {
       return;
     }
 
-    // Load configuration
+    console.log(chalk.gray("  ✓ Sync directory found"));
+
+    // Step 2: Load configuration
+    spinner.text = "Loading configuration...";
     const syncConfigManager = new ConfigManager(currentPath);
     const syncConfig = await syncConfigManager.load();
 
@@ -123,65 +170,171 @@ export async function sync(options: SyncOptions): Promise<void> {
       return;
     }
 
-    // Initialize Automerge repo
-    const repo = createRepo(syncToolDir, syncConfig?.sync_server);
+    console.log(chalk.gray(`  ✓ Remote repository: ${syncConfig.remote_repo}`));
+    console.log(chalk.gray(`  ✓ Sync server: ${syncConfig.sync_server}`));
 
-    // Run sync
+    // Step 3: Initialize Automerge repo
+    spinner.text = "Connecting to Automerge repository...";
+    const repo = createRepo(syncToolDir, syncConfig?.sync_server);
     const syncEngine = new SyncEngine(repo, currentPath);
 
+    console.log(chalk.gray("  ✓ Connected to repository"));
+
     if (options.dryRun) {
-      spinner.text = "Previewing changes...";
+      // Dry run mode - detailed preview
+      spinner.text = "Analyzing changes (dry run)...";
+      const startTime = Date.now();
       const preview = await syncEngine.previewChanges();
+      const analysisTime = Date.now() - startTime;
 
-      spinner.succeed("Sync preview completed");
+      spinner.succeed("Change analysis completed");
 
-      console.log("\n" + chalk.bold("Changes to be synced:"));
-      console.log(preview.summary);
+      console.log(`\n${chalk.bold("📊 Change Analysis")} (${analysisTime}ms):`);
+      console.log(chalk.gray(`  Directory: ${currentPath}`));
+      console.log(chalk.gray(`  Analysis time: ${analysisTime}ms`));
+
+      if (preview.changes.length === 0 && preview.moves.length === 0) {
+        console.log(
+          `\n${chalk.green("✨ No changes detected")} - everything is in sync!`
+        );
+        return;
+      }
+
+      console.log(`\n${chalk.bold("📋 Summary:")}`);
+      console.log(`  ${preview.summary}`);
 
       if (preview.changes.length > 0) {
-        console.log("\n" + chalk.bold("Files:"));
-        for (const change of preview.changes) {
-          const typeColor =
+        const localChanges = preview.changes.filter(
+          (c) =>
+            c.changeType === "local_only" || c.changeType === "both_changed"
+        ).length;
+        const remoteChanges = preview.changes.filter(
+          (c) =>
+            c.changeType === "remote_only" || c.changeType === "both_changed"
+        ).length;
+        const conflicts = preview.changes.filter(
+          (c) => c.changeType === "both_changed"
+        ).length;
+
+        console.log(
+          `\n${chalk.bold("📁 File Changes:")} (${
+            preview.changes.length
+          } total)`
+        );
+        if (localChanges > 0) {
+          console.log(`  ${chalk.green("📤")} Local changes: ${localChanges}`);
+        }
+        if (remoteChanges > 0) {
+          console.log(`  ${chalk.blue("📥")} Remote changes: ${remoteChanges}`);
+        }
+        if (conflicts > 0) {
+          console.log(`  ${chalk.yellow("⚠️")} Conflicts: ${conflicts}`);
+        }
+
+        console.log(`\n${chalk.bold("📄 Changed Files:")}`);
+        for (const change of preview.changes.slice(0, 10)) {
+          // Show first 10
+          const typeIcon =
             change.changeType === "local_only"
-              ? chalk.green
+              ? chalk.green("📤")
               : change.changeType === "remote_only"
-              ? chalk.blue
+              ? chalk.blue("📥")
               : change.changeType === "both_changed"
-              ? chalk.yellow
-              : chalk.gray;
-          console.log(`  ${typeColor(change.changeType)}: ${change.path}`);
+              ? chalk.yellow("⚠️")
+              : chalk.gray("➖");
+          console.log(`  ${typeIcon} ${change.path}`);
+        }
+        if (preview.changes.length > 10) {
+          console.log(
+            `  ${chalk.gray(
+              `... and ${preview.changes.length - 10} more files`
+            )}`
+          );
         }
       }
 
       if (preview.moves.length > 0) {
-        console.log("\n" + chalk.bold("Potential moves:"));
-        for (const move of preview.moves) {
+        console.log(
+          `\n${chalk.bold("🔄 Potential Moves:")} (${preview.moves.length})`
+        );
+        for (const move of preview.moves.slice(0, 5)) {
+          // Show first 5
           const confidence =
             move.confidence === "auto"
-              ? chalk.green(move.confidence)
+              ? chalk.green("Auto")
               : move.confidence === "prompt"
-              ? chalk.yellow(move.confidence)
-              : chalk.red(move.confidence);
-          console.log(`  ${move.fromPath} → ${move.toPath} (${confidence})`);
+              ? chalk.yellow("Prompt")
+              : chalk.red("Low");
+          console.log(`  🔄 ${move.fromPath} → ${move.toPath} (${confidence})`);
+        }
+        if (preview.moves.length > 5) {
+          console.log(
+            `  ${chalk.gray(`... and ${preview.moves.length - 5} more moves`)}`
+          );
         }
       }
+
+      console.log(
+        `\n${chalk.cyan("ℹ️  Run without --dry-run to apply these changes")}`
+      );
     } else {
+      // Actual sync operation
+      spinner.text = "Detecting changes...";
+      const startTime = Date.now();
+
       const result = await syncEngine.sync(false);
+      const totalTime = Date.now() - startTime;
 
       if (result.success) {
-        spinner.succeed(`Sync completed: ${result.filesChanged} files changed`);
+        spinner.succeed(`Sync completed in ${totalTime}ms`);
+
+        console.log(`\n${chalk.bold("✅ Sync Results:")}`);
+        console.log(`  📄 Files changed: ${chalk.yellow(result.filesChanged)}`);
+        console.log(
+          `  📁 Directories changed: ${chalk.yellow(result.directoriesChanged)}`
+        );
+        console.log(`  ⏱️  Total time: ${chalk.gray(totalTime + "ms")}`);
 
         if (result.warnings.length > 0) {
-          console.log("\n" + chalk.yellow("Warnings:"));
-          for (const warning of result.warnings) {
-            console.log(`  ${warning}`);
+          console.log(
+            `\n${chalk.yellow("⚠️  Warnings:")} (${result.warnings.length})`
+          );
+          for (const warning of result.warnings.slice(0, 5)) {
+            console.log(`  ${chalk.yellow("⚠️")} ${warning}`);
           }
+          if (result.warnings.length > 5) {
+            console.log(
+              `  ${chalk.gray(
+                `... and ${result.warnings.length - 5} more warnings`
+              )}`
+            );
+          }
+        }
+
+        if (result.filesChanged === 0 && result.directoriesChanged === 0) {
+          console.log(`\n${chalk.green("✨ Everything already in sync!")}`);
         }
       } else {
         spinner.fail("Sync completed with errors");
 
-        for (const error of result.errors) {
-          console.log(chalk.red(`  ${error.path}: ${error.error.message}`));
+        console.log(
+          `\n${chalk.red("❌ Sync Errors:")} (${result.errors.length})`
+        );
+        for (const error of result.errors.slice(0, 5)) {
+          console.log(
+            `  ${chalk.red("❌")} ${error.path}: ${error.error.message}`
+          );
+        }
+        if (result.errors.length > 5) {
+          console.log(
+            `  ${chalk.gray(`... and ${result.errors.length - 5} more errors`)}`
+          );
+        }
+
+        if (result.filesChanged > 0 || result.directoriesChanged > 0) {
+          console.log(`\n${chalk.yellow("⚠️  Partial sync completed:")}`);
+          console.log(`  📄 Files changed: ${result.filesChanged}`);
+          console.log(`  📁 Directories changed: ${result.directoriesChanged}`);
         }
       }
     }
@@ -267,9 +420,12 @@ export async function status(): Promise<void> {
     // Check if initialized
     const syncToolDir = path.join(currentPath, ".sync-tool");
     if (!(await pathExists(syncToolDir))) {
-      console.log(chalk.red("Directory not initialized for sync"));
+      console.log(chalk.red("❌ Directory not initialized for sync"));
+      console.log(`   Run ${chalk.cyan("sync-tool init .")} to get started`);
       return;
     }
+
+    const spinner = ora("Loading sync status...").start();
 
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
@@ -280,38 +436,110 @@ export async function status(): Promise<void> {
     const syncEngine = new SyncEngine(repo, currentPath);
     const syncStatus = await syncEngine.getStatus();
 
-    console.log(chalk.bold("Sync Status:"));
-    console.log(`  Directory: ${chalk.blue(currentPath)}`);
+    spinner.stop();
 
+    console.log(chalk.bold("📊 Sync Status Report"));
+    console.log(`${"=".repeat(50)}`);
+
+    // Directory information
+    console.log(`\n${chalk.bold("📁 Directory Information:")}`);
+    console.log(`  📂 Path: ${chalk.blue(currentPath)}`);
+    console.log(`  🔧 Config: ${path.join(currentPath, ".sync-tool")}`);
+
+    // Sync timing
     if (syncStatus.lastSync) {
+      const timeSince = Date.now() - syncStatus.lastSync.getTime();
+      const timeAgo =
+        timeSince < 60000
+          ? `${Math.floor(timeSince / 1000)}s ago`
+          : timeSince < 3600000
+          ? `${Math.floor(timeSince / 60000)}m ago`
+          : `${Math.floor(timeSince / 3600000)}h ago`;
+
+      console.log(`\n${chalk.bold("⏱️  Sync Timing:")}`);
       console.log(
-        `  Last sync: ${chalk.green(syncStatus.lastSync.toISOString())}`
+        `  🕐 Last sync: ${chalk.green(syncStatus.lastSync.toLocaleString())}`
       );
+      console.log(`  ⏳ Time since: ${chalk.gray(timeAgo)}`);
     } else {
-      console.log(`  Last sync: ${chalk.yellow("Never")}`);
+      console.log(`\n${chalk.bold("⏱️  Sync Timing:")}`);
+      console.log(`  🕐 Last sync: ${chalk.yellow("Never synced")}`);
+      console.log(
+        `  💡 Run ${chalk.cyan("sync-tool sync")} to perform initial sync`
+      );
     }
 
+    // Change status
+    console.log(`\n${chalk.bold("📝 Change Status:")}`);
     if (syncStatus.hasChanges) {
-      console.log(`  Pending changes: ${chalk.yellow(syncStatus.changeCount)}`);
+      console.log(
+        `  📄 Pending changes: ${chalk.yellow(syncStatus.changeCount)}`
+      );
+      console.log(`  🔄 Status: ${chalk.yellow("Sync needed")}`);
+      console.log(`  💡 Run ${chalk.cyan("sync-tool diff")} to see details`);
     } else {
-      console.log(`  Pending changes: ${chalk.green("None")}`);
+      console.log(`  📄 Pending changes: ${chalk.green("None")}`);
+      console.log(`  ✅ Status: ${chalk.green("Up to date")}`);
     }
 
-    // Load configuration
+    // Configuration
+    console.log(`\n${chalk.bold("⚙️  Configuration:")}`);
+
     const statusConfigManager2 = new ConfigManager(currentPath);
     const statusConfig2 = await statusConfigManager2.load();
 
     if (statusConfig2?.remote_repo) {
       console.log(
-        `  Remote repository: ${chalk.blue(statusConfig2.remote_repo)}`
+        `  🌐 Remote repository: ${chalk.blue(statusConfig2.remote_repo)}`
       );
+    } else {
+      console.log(`  🌐 Remote repository: ${chalk.red("Not configured")}`);
     }
 
     if (statusConfig2?.sync_server) {
-      console.log(`  Sync server: ${chalk.blue(statusConfig2.sync_server)}`);
+      console.log(`  🔗 Sync server: ${chalk.blue(statusConfig2.sync_server)}`);
+    } else {
+      console.log(`  🔗 Sync server: ${chalk.red("Not configured")}`);
     }
+
+    console.log(
+      `  ⚡ Auto sync: ${
+        statusConfig2?.sync?.auto_sync
+          ? chalk.green("Enabled")
+          : chalk.gray("Disabled")
+      }`
+    );
+
+    // Snapshot information
+    if (syncStatus.snapshot) {
+      const fileCount = syncStatus.snapshot.files.size;
+      const dirCount = syncStatus.snapshot.directories.size;
+
+      console.log(`\n${chalk.bold("📊 Repository Statistics:")}`);
+      console.log(`  📄 Tracked files: ${chalk.yellow(fileCount)}`);
+      console.log(`  📁 Tracked directories: ${chalk.yellow(dirCount)}`);
+      console.log(
+        `  🏷️  Snapshot timestamp: ${chalk.gray(
+          new Date(syncStatus.snapshot.timestamp).toLocaleString()
+        )}`
+      );
+    }
+
+    // Quick actions
+    console.log(`\n${chalk.bold("🚀 Quick Actions:")}`);
+    if (syncStatus.hasChanges) {
+      console.log(
+        `  ${chalk.cyan("sync-tool diff")}     - View pending changes`
+      );
+      console.log(`  ${chalk.cyan("sync-tool sync")}     - Apply changes`);
+    } else {
+      console.log(
+        `  ${chalk.cyan("sync-tool sync")}     - Check for remote changes`
+      );
+    }
+    console.log(`  ${chalk.cyan("sync-tool log")}      - View sync history`);
   } catch (error) {
-    console.error(chalk.red(`Status failed: ${error}`));
+    console.error(chalk.red(`❌ Status check failed: ${error}`));
     throw error;
   }
 }
