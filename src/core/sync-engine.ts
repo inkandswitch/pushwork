@@ -48,24 +48,9 @@ export class SyncEngine {
   /**
    * Determine if content should be treated as text for Automerge text operations
    */
-  private isTextContent(
-    content: string | Uint8Array,
-    mimeType: string
-  ): boolean {
-    // If content is already a Uint8Array, it's binary
-    if (content instanceof Uint8Array) {
-      return false;
-    }
-
-    // If content is a string, check MIME type to be safe
-    return (
-      mimeType.startsWith("text/") ||
-      mimeType === "application/json" ||
-      mimeType === "application/xml" ||
-      mimeType.includes("javascript") ||
-      mimeType.includes("typescript") ||
-      mimeType === "text/plain"
-    );
+  private isTextContent(content: string | Uint8Array): boolean {
+    // Simply check the actual type of the content
+    return typeof content === "string";
   }
 
   /**
@@ -375,14 +360,13 @@ export class SyncEngine {
   ): Promise<AutomergeUrl | null> {
     if (dryRun || !change.localContent) return null;
 
-    const mimeType = getMimeType(change.path);
-    const isText = this.isTextContent(change.localContent, mimeType);
+    const isText = this.isTextContent(change.localContent);
 
     // Create initial document structure
     const fileDoc: FileDocument = {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
-      mimeType,
+      mimeType: getMimeType(change.path),
       contents: isText ? "" : change.localContent, // Empty string for text, actual content for binary
       metadata: {
         permissions: 0o644,
@@ -413,7 +397,7 @@ export class SyncEngine {
 
     const handle = await this.repo.find(url);
     handle.change((doc: FileDocument) => {
-      const isText = this.isTextContent(content, doc.mimeType);
+      const isText = this.isTextContent(content);
 
       if (isText && typeof content === "string") {
         // Use updateText for text content to get proper CRDT merging
