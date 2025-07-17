@@ -273,6 +273,14 @@ export async function sync(options: SyncOptions): Promise<void> {
 
     console.log(chalk.gray("  ✓ Connected to repository"));
 
+    // Show root directory URL for context
+    const syncStatus = await syncEngine.getStatus();
+    if (syncStatus.snapshot?.rootDirectoryUrl) {
+      console.log(
+        chalk.gray(`  ✓ Root URL: ${syncStatus.snapshot.rootDirectoryUrl}`)
+      );
+    }
+
     if (options.dryRun) {
       // Dry run mode - detailed preview
       spinner.text = "Analyzing changes (dry run)...";
@@ -484,6 +492,15 @@ export async function diff(
       return;
     }
 
+    // Show root directory URL for context
+    const diffStatus = await syncEngine.getStatus();
+    if (diffStatus.snapshot?.rootDirectoryUrl) {
+      console.log(
+        chalk.gray(`Root URL: ${diffStatus.snapshot.rootDirectoryUrl}`)
+      );
+      console.log("");
+    }
+
     if (preview.changes.length === 0) {
       console.log(chalk.green("No changes detected"));
       return;
@@ -558,6 +575,15 @@ export async function status(): Promise<void> {
     console.log(`\n${chalk.bold("📁 Directory Information:")}`);
     console.log(`  📂 Path: ${chalk.blue(currentPath)}`);
     console.log(`  🔧 Config: ${path.join(currentPath, ".sync-tool")}`);
+
+    // Show root directory URL if available
+    if (syncStatus.snapshot?.rootDirectoryUrl) {
+      console.log(
+        `  🔗 Root URL: ${chalk.cyan(syncStatus.snapshot.rootDirectoryUrl)}`
+      );
+    } else {
+      console.log(`  🔗 Root URL: ${chalk.yellow("Not set")}`);
+    }
 
     // Sync timing
     if (syncStatus.lastSync) {
@@ -671,6 +697,24 @@ export async function log(
       return;
     }
 
+    // Load configuration and show root URL
+    const logConfigManager = new ConfigManager(resolvedPath);
+    const logConfig = await logConfigManager.getMerged();
+    const logRepo = createRepo(syncToolDir, logConfig?.sync_server, false);
+    const logSyncEngine = new SyncEngine(
+      logRepo,
+      resolvedPath,
+      logConfig.defaults.exclude_patterns
+    );
+    const logStatus = await logSyncEngine.getStatus();
+
+    if (logStatus.snapshot?.rootDirectoryUrl) {
+      console.log(
+        chalk.gray(`Root URL: ${logStatus.snapshot.rootDirectoryUrl}`)
+      );
+      console.log("");
+    }
+
     // TODO: Implement history tracking and display
     // For now, show basic information
 
@@ -691,7 +735,8 @@ export async function log(
       console.log(chalk.yellow("No sync history found"));
     }
 
-    // Note: log command doesn't create a repo, so no shutdown needed
+    // Cleanup repo resources
+    await logRepo.shutdown();
   } catch (error) {
     console.error(chalk.red(`Log failed: ${error}`));
     throw error;
