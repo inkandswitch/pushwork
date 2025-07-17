@@ -395,7 +395,7 @@ export class SyncEngine {
   ): Promise<void> {
     if (dryRun) return;
 
-    const handle = await this.repo.find(url);
+    const handle = await this.repo.find<FileDocument>(url);
     handle.change((doc: FileDocument) => {
       const isText = this.isTextContent(content);
 
@@ -421,7 +421,7 @@ export class SyncEngine {
     // In Automerge, we don't actually delete documents
     // They become orphaned and will be garbage collected
     // For now, we just mark them as deleted by clearing content
-    const handle = await this.repo.find(url);
+    const handle = await this.repo.find<FileDocument>(url);
     handle.change((doc: FileDocument) => {
       doc.contents = "";
     });
@@ -438,7 +438,9 @@ export class SyncEngine {
   ): Promise<void> {
     if (dryRun || !snapshot.rootDirectoryUrl) return;
 
-    const dirHandle = await this.repo.find(snapshot.rootDirectoryUrl);
+    const dirHandle = await this.repo.find<DirectoryDocument>(
+      snapshot.rootDirectoryUrl
+    );
     dirHandle.change((doc: DirectoryDocument) => {
       // Check if entry already exists
       const existingIndex = doc.docs.findIndex(
@@ -465,7 +467,9 @@ export class SyncEngine {
     if (dryRun || !snapshot.rootDirectoryUrl) return;
 
     try {
-      const dirHandle = await this.repo.find(snapshot.rootDirectoryUrl);
+      const dirHandle = await this.repo.find<DirectoryDocument>(
+        snapshot.rootDirectoryUrl
+      );
       dirHandle.change((doc: DirectoryDocument) => {
         // Find the index of the entry to remove
         const indexToRemove = doc.docs.findIndex(
@@ -489,7 +493,7 @@ export class SyncEngine {
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<string> {
     try {
-      const handle = await this.repo.find(url);
+      const handle = await this.repo.find<FileDocument>(url);
       const doc = await handle.doc();
 
       if (!doc) return "";

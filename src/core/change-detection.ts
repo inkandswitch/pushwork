@@ -263,7 +263,7 @@ export class ChangeDetector {
     head: string
   ): Promise<string | Uint8Array | null> {
     try {
-      const handle = await this.repo.find(url);
+      const handle = await this.repo.find<FileDocument>(url);
       const doc = await handle.doc();
 
       if (!doc) return null;
@@ -285,7 +285,7 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      const handle = await this.repo.find(url);
+      const handle = await this.repo.find<FileDocument>(url);
       const doc = (await handle.doc()) as FileDocument;
 
       if (!doc) return null;
@@ -302,7 +302,7 @@ export class ChangeDetector {
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<string> {
     try {
-      const handle = await this.repo.find(url);
+      const handle = await this.repo.find<FileDocument>(url);
       const doc = await handle.doc();
 
       if (!doc) return "";
