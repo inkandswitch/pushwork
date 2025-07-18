@@ -18,7 +18,7 @@ import { SyncEngine } from "../core";
 import { DetectedChange } from "../core/change-detection";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
-import { createConfiguredRepo } from "../utils/repo-factory";
+import { createRepo } from "../utils/repo-factory";
 
 /**
  * Show actual content diff for a changed file
@@ -144,7 +144,7 @@ export async function init(
 
     // Step 4: Initialize Automerge repo and create root directory document
     spinner.text = "Creating root directory document...";
-    const repo = await createConfiguredRepo(resolvedPath, {
+    const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
       syncServer: syncServer,
       syncServerStorageId: syncServerStorageId,
@@ -256,7 +256,7 @@ export async function sync(options: SyncOptions): Promise<void> {
 
     // Step 3: Initialize Automerge repo
     spinner.text = "Connecting to Automerge repository...";
-    const repo = await createConfiguredRepo(currentPath, {
+    const repo = await createRepo(currentPath, {
       enableNetwork: !options.localOnly,
     });
     const syncEngine = new SyncEngine(
@@ -478,7 +478,7 @@ export async function diff(
     const diffConfig = await diffConfigManager.getMerged();
 
     // Initialize Automerge repo
-    const repo = await createConfiguredRepo(resolvedPath, {
+    const repo = await createRepo(resolvedPath, {
       enableNetwork: !options.localOnly,
     });
 
@@ -567,7 +567,7 @@ export async function status(localOnly: boolean = false): Promise<void> {
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
     const statusConfig = await statusConfigManager.getMerged();
-    const repo = await createConfiguredRepo(currentPath, {
+    const repo = await createRepo(currentPath, {
       enableNetwork: !localOnly,
     });
 
@@ -718,7 +718,7 @@ export async function log(
     // Load configuration and show root URL
     const logConfigManager = new ConfigManager(resolvedPath);
     const logConfig = await logConfigManager.getMerged();
-    const logRepo = await createConfiguredRepo(resolvedPath, {
+    const logRepo = await createRepo(resolvedPath, {
       enableNetwork: true,
     });
     const logSyncEngine = new SyncEngine(
@@ -875,7 +875,7 @@ export async function clone(
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
-    const repo = await createConfiguredRepo(resolvedPath, {
+    const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
     });
 
@@ -943,7 +943,7 @@ export async function commit(
 
     // Create repository (local only - no network)
     spinner.text = "Connecting to local repository...";
-    repo = await createConfiguredRepo(targetPath, {
+    repo = await createRepo(targetPath, {
       enableNetwork: false,
     });
     spinner.succeed("Connected to local repository");
