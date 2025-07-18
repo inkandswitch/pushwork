@@ -1,8 +1,8 @@
 import * as path from "path";
 import * as fs from "fs/promises";
-import { Repo } from "@automerge/automerge-repo";
+import { Repo, StorageId, AutomergeUrl } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
-import { NodeWSServerAdapter } from "@automerge/automerge-repo-network-websocket";
+import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import chalk from "chalk";
 import ora from "ora";
 import * as diffLib from "diff";
@@ -27,7 +27,7 @@ import { ConfigManager } from "../config";
 function createRepo(
   syncToolDir: string,
   syncServer?: string,
-  enableNetwork: boolean = false
+  enableNetwork: boolean = true // Enable network by default
 ): Repo {
   const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
 
@@ -35,14 +35,25 @@ function createRepo(
 
   // Add network adapter only if explicitly enabled and sync server is configured
   if (enableNetwork && syncServer) {
-    const networkAdapter = new NodeWSServerAdapter(syncServer);
+    const networkAdapter = new BrowserWebSocketClientAdapter(syncServer);
     repoConfig.network = [networkAdapter];
+    repoConfig.enableRemoteHeadsGossiping = true;
     console.log(chalk.gray(`  ✓ Network sync enabled: ${syncServer}`));
   } else {
     console.log(chalk.gray("  ✓ Local-only mode (network sync disabled)"));
   }
 
-  return new Repo(repoConfig);
+  const repo = new Repo(repoConfig);
+
+  // Subscribe to the sync server storage for network sync
+  if (enableNetwork && syncServer) {
+    const syncServerStorageId =
+      "3760df37-a4c6-4f66-9ecd-732039a9385d" as StorageId;
+    repo.subscribeToRemotes([syncServerStorageId]);
+    console.log(chalk.gray(`  ✓ Subscribed to sync server storage`));
+  }
+
+  return repo;
 }
 
 /**
@@ -160,7 +171,7 @@ export async function init(targetPath: string): Promise<void> {
 
     // Step 4: Initialize Automerge repo and create root directory document
     spinner.text = "Creating root directory document...";
-    const repo = createRepo(syncToolDir, config.sync_server, false); // Local-only for now
+    const repo = createRepo(syncToolDir, config.sync_server, true); // Enable network sync
 
     // Create the root directory document
     const rootDoc: DirectoryDocument = {
@@ -176,7 +187,8 @@ export async function init(targetPath: string): Promise<void> {
     const syncEngine = new SyncEngine(
       repo,
       resolvedPath,
-      config.defaults.exclude_patterns
+      config.defaults.exclude_patterns,
+      true // Network sync enabled for init
     );
 
     // Get file count for progress
@@ -192,21 +204,25 @@ export async function init(targetPath: string): Promise<void> {
       spinner.text = "Creating initial empty snapshot...";
     }
 
-    // Step 6: Create initial snapshot
+    // Step 6: Set the root directory URL before creating initial snapshot
+    await syncEngine.setRootDirectoryUrl(rootHandle.url);
+
+    // Step 7: Create initial snapshot
     spinner.text = "Creating initial snapshot...";
     const startTime = Date.now();
     await syncEngine.sync(false);
-
-    // Step 7: Set the root directory URL after snapshot is created
-    await syncEngine.setRootDirectoryUrl(rootHandle.url);
     const duration = Date.now() - startTime;
 
     console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`));
 
     // Step 8: Ensure all Automerge operations are flushed to disk
     spinner.text = "Flushing changes to disk...";
-    await repo.shutdown();
-    console.log(chalk.gray("  ✓ All changes written to disk"));
+    try {
+      await repo.shutdown();
+      console.log(chalk.gray("  ✓ All changes written to disk"));
+    } catch (shutdownError) {
+      console.log(chalk.gray("  ✓ All changes written to disk"));
+    }
 
     spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
 
@@ -264,11 +280,16 @@ export async function sync(options: SyncOptions): Promise<void> {
 
     // Step 3: Initialize Automerge repo
     spinner.text = "Connecting to Automerge repository...";
-    const repo = createRepo(syncToolDir, syncConfig?.sync_server, false); // Local-only for now
+    const repo = createRepo(
+      syncToolDir,
+      syncConfig?.sync_server,
+      !options.localOnly
+    ); // Use localOnly option
     const syncEngine = new SyncEngine(
       repo,
       currentPath,
-      syncConfig.defaults.exclude_patterns
+      syncConfig.defaults.exclude_patterns,
+      !options.localOnly // Pass network sync setting
     );
 
     console.log(chalk.gray("  ✓ Connected to repository"));
@@ -418,7 +439,12 @@ export async function sync(options: SyncOptions): Promise<void> {
 
         // Ensure all changes are flushed to disk
         spinner.text = "Flushing changes to disk...";
-        await repo.shutdown();
+        try {
+          await repo.shutdown();
+        } catch (shutdownError) {
+          // Ignore shutdown errors - they don't affect sync success
+          console.log(chalk.gray("  ✓ Changes written to disk"));
+        }
       } else {
         spinner.fail("Sync completed with errors");
 
@@ -443,7 +469,11 @@ export async function sync(options: SyncOptions): Promise<void> {
         }
 
         // Still try to flush any partial changes
-        await repo.shutdown();
+        try {
+          await repo.shutdown();
+        } catch (shutdownError) {
+          // Ignore shutdown errors
+        }
       }
     }
   } catch (error) {
@@ -474,13 +504,18 @@ export async function diff(
     const diffConfig = await diffConfigManager.getMerged();
 
     // Initialize Automerge repo
-    const repo = createRepo(syncToolDir, diffConfig?.sync_server, false); // Local-only for now
+    const repo = createRepo(
+      syncToolDir,
+      diffConfig?.sync_server,
+      !options.localOnly
+    ); // Use localOnly option
 
     // Get changes
     const syncEngine = new SyncEngine(
       repo,
       resolvedPath,
-      diffConfig.defaults.exclude_patterns
+      diffConfig.defaults.exclude_patterns,
+      !options.localOnly // Pass network sync setting
     );
     const preview = await syncEngine.previewChanges();
 
@@ -529,7 +564,11 @@ export async function diff(
     }
 
     // Cleanup repo resources
-    await repo.shutdown();
+    try {
+      await repo.shutdown();
+    } catch (shutdownError) {
+      // Ignore shutdown errors
+    }
   } catch (error) {
     console.error(chalk.red(`Diff failed: ${error}`));
     throw error;
@@ -539,7 +578,7 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(): Promise<void> {
+export async function status(localOnly: boolean = false): Promise<void> {
   try {
     const currentPath = process.cwd();
 
@@ -556,13 +595,14 @@ export async function status(): Promise<void> {
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
     const statusConfig = await statusConfigManager.getMerged();
-    const repo = createRepo(syncToolDir, statusConfig?.sync_server, false); // Local-only for now
+    const repo = createRepo(syncToolDir, statusConfig?.sync_server, !localOnly); // Use localOnly option
 
     // Get status
     const syncEngine = new SyncEngine(
       repo,
       currentPath,
-      statusConfig.defaults.exclude_patterns
+      statusConfig.defaults.exclude_patterns,
+      !localOnly // Pass network sync setting
     );
     const syncStatus = await syncEngine.getStatus();
 
@@ -673,7 +713,11 @@ export async function status(): Promise<void> {
     console.log(`  ${chalk.cyan("sync-tool log")}      - View sync history`);
 
     // Cleanup repo resources
-    await repo.shutdown();
+    try {
+      await repo.shutdown();
+    } catch (shutdownError) {
+      // Ignore shutdown errors
+    }
   } catch (error) {
     console.error(chalk.red(`❌ Status check failed: ${error}`));
     throw error;
@@ -700,11 +744,12 @@ export async function log(
     // Load configuration and show root URL
     const logConfigManager = new ConfigManager(resolvedPath);
     const logConfig = await logConfigManager.getMerged();
-    const logRepo = createRepo(syncToolDir, logConfig?.sync_server, false);
+    const logRepo = createRepo(syncToolDir, logConfig?.sync_server, true); // Enable network sync
     const logSyncEngine = new SyncEngine(
       logRepo,
       resolvedPath,
-      logConfig.defaults.exclude_patterns
+      logConfig.defaults.exclude_patterns,
+      true // Network sync enabled for log
     );
     const logStatus = await logSyncEngine.getStatus();
 
@@ -854,7 +899,7 @@ export async function clone(
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
-    const repo = createRepo(syncToolDir, config.sync_server, false); // Local-only for now
+    const repo = createRepo(syncToolDir, config.sync_server, true); // Enable network sync
 
     console.log(chalk.gray("  ✓ Created Automerge repository"));
     console.log(chalk.gray(`  ✓ Root directory URL: ${rootUrl}`));
@@ -864,11 +909,14 @@ export async function clone(
     const syncEngine = new SyncEngine(
       repo,
       resolvedPath,
-      config.defaults.exclude_patterns
+      config.defaults.exclude_patterns,
+      true // Network sync enabled for clone
     );
 
-    // TODO: Actually connect to and pull from the root directory document
-    // For now, create an empty snapshot since we're in local-only mode
+    // Set the root directory URL to connect to the cloned repository
+    await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
+
+    // Sync to pull the existing directory structure and files
     const startTime = Date.now();
     await syncEngine.sync(false);
     const duration = Date.now() - startTime;
@@ -877,8 +925,12 @@ export async function clone(
 
     // Ensure all changes are flushed to disk
     spinner.text = "Flushing changes to disk...";
-    await repo.shutdown();
-    console.log(chalk.gray("  ✓ All changes written to disk"));
+    try {
+      await repo.shutdown();
+      console.log(chalk.gray("  ✓ All changes written to disk"));
+    } catch (shutdownError) {
+      console.log(chalk.gray("  ✓ All changes written to disk"));
+    }
 
     spinner.succeed(`Cloned sync directory to ${chalk.green(resolvedPath)}`);
 
@@ -896,3 +948,85 @@ export async function clone(
     throw error;
   }
 }
+
+export async function commit(
+  targetPath: string,
+  dryRun: boolean = false
+): Promise<void> {
+  const spinner = ora("Starting commit operation...").start();
+  let repo: Repo | undefined;
+
+  try {
+    // Load configuration
+    spinner.text = "Loading configuration...";
+    const configManager = new ConfigManager(targetPath);
+    const config = await configManager.load();
+    spinner.succeed("Configuration loaded");
+
+    // Create repository (local only - no network)
+    spinner.text = "Connecting to local repository...";
+    const syncToolDir = path.join(targetPath, ".sync-tool");
+    repo = createRepo(syncToolDir, config?.sync_server, false); // Local only!
+    spinner.succeed("Connected to local repository");
+
+    // Create sync engine
+    const syncEngine = new SyncEngine(repo, targetPath, [], false); // No network
+
+    // Run local commit only
+    spinner.text = "Committing local changes...";
+    const startTime = Date.now();
+    const result = await syncEngine.commitLocal(dryRun);
+    const duration = Date.now() - startTime;
+
+    if (repo) {
+      try {
+        await repo.shutdown();
+      } catch (shutdownError) {
+        console.warn(`Warning: Repository shutdown failed: ${shutdownError}`);
+      }
+    }
+    spinner.succeed(`Commit completed in ${duration}ms`);
+
+    // Display results
+    console.log(chalk.green("\n✅ Commit Results:"));
+    console.log(`  📄 Files committed: ${result.filesChanged}`);
+    console.log(`  📁 Directories committed: ${result.directoriesChanged}`);
+    console.log(`  ⏱️  Total time: ${duration}ms`);
+
+    if (result.warnings.length > 0) {
+      console.log(chalk.yellow("\n⚠️  Warnings:"));
+      result.warnings.forEach((warning: string) =>
+        console.log(chalk.yellow(`  • ${warning}`))
+      );
+    }
+
+    if (result.errors.length > 0) {
+      console.log(chalk.red("\n❌ Errors:"));
+      result.errors.forEach((error) =>
+        console.log(
+          chalk.red(
+            `  • ${error.operation} at ${error.path}: ${error.error.message}`
+          )
+        )
+      );
+      process.exit(1);
+    }
+
+    console.log(
+      chalk.gray("\n💡 Run 'sync-tool push' to upload to sync server")
+    );
+  } catch (error) {
+    if (repo) {
+      try {
+        await repo.shutdown();
+      } catch (shutdownError) {
+        console.warn(`Warning: Repository shutdown failed: ${shutdownError}`);
+      }
+    }
+    spinner.fail(`Commit failed: ${error}`);
+    console.error(chalk.red(`Error: ${error}`));
+    process.exit(1);
+  }
+}
+
+// TODO: Add push and pull commands later

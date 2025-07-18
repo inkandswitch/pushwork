@@ -77,6 +77,7 @@ export interface CommandOptions {
   nameOnly?: boolean;
   oneline?: boolean;
   remote?: string;
+  localOnly?: boolean;
 }
 
 /**
@@ -99,6 +100,7 @@ export interface CloneOptions extends CommandOptions {
 export interface SyncOptions extends CommandOptions {
   dryRun: boolean;
   force?: boolean;
+  localOnly?: boolean;
 }
 
 /**
