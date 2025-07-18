@@ -228,8 +228,8 @@ describe("Sync Flow Integration", () => {
     it("should handle corrupted snapshot files", async () => {
       const configManager = new ConfigManager(tmpDir);
 
-      // Create .sync-tool directory
-      const syncToolDir = path.join(tmpDir, ".sync-tool");
+      // Create .pushwork directory
+      const syncToolDir = path.join(tmpDir, ".pushwork");
       await fs.mkdir(syncToolDir);
 
       // Write corrupted snapshot

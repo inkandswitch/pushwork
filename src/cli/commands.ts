@@ -99,14 +99,14 @@ export async function init(
     await ensureDirectoryExists(resolvedPath);
 
     // Check if already initialized
-    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
       spinner.fail("Directory already initialized for sync");
       return;
     }
 
     // Step 2: Create sync directories
-    spinner.text = "Creating .sync-tool directory...";
+    spinner.text = "Creating .pushwork directory...";
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
@@ -123,7 +123,7 @@ export async function init(
       sync_server_storage_id: defaultStorageId,
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -209,7 +209,7 @@ export async function init(
     console.log(`  🔗 Sync server: ${chalk.blue(defaultSyncServer)}`);
     console.log(
       `\n${chalk.green("Initialization complete!")} Run ${chalk.cyan(
-        "sync-tool sync"
+        "pushwork sync"
       )} to start syncing.`
     );
   } catch (error) {
@@ -229,10 +229,10 @@ export async function sync(options: SyncOptions): Promise<void> {
 
     // Step 1: Validation
     spinner.text = "Validating sync setup...";
-    const syncToolDir = path.join(currentPath, ".sync-tool");
+    const syncToolDir = path.join(currentPath, ".pushwork");
     if (!(await pathExists(syncToolDir))) {
       spinner.fail(
-        'Directory not initialized for sync. Run "sync-tool init" first.'
+        'Directory not initialized for sync. Run "pushwork init" first.'
       );
       return;
     }
@@ -466,7 +466,7 @@ export async function diff(
     const resolvedPath = path.resolve(targetPath);
 
     // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (!(await pathExists(syncToolDir))) {
       console.log(chalk.red("Directory not initialized for sync"));
       return;
@@ -554,10 +554,10 @@ export async function status(localOnly: boolean = false): Promise<void> {
     const currentPath = process.cwd();
 
     // Check if initialized
-    const syncToolDir = path.join(currentPath, ".sync-tool");
+    const syncToolDir = path.join(currentPath, ".pushwork");
     if (!(await pathExists(syncToolDir))) {
       console.log(chalk.red("❌ Directory not initialized for sync"));
-      console.log(`   Run ${chalk.cyan("sync-tool init .")} to get started`);
+      console.log(`   Run ${chalk.cyan("pushwork init .")} to get started`);
       return;
     }
 
@@ -587,7 +587,7 @@ export async function status(localOnly: boolean = false): Promise<void> {
     // Directory information
     console.log(`\n${chalk.bold("📁 Directory Information:")}`);
     console.log(`  📂 Path: ${chalk.blue(currentPath)}`);
-    console.log(`  🔧 Config: ${path.join(currentPath, ".sync-tool")}`);
+    console.log(`  🔧 Config: ${path.join(currentPath, ".pushwork")}`);
 
     // Show root directory URL if available
     if (syncStatus.snapshot?.rootDirectoryUrl) {
@@ -617,7 +617,7 @@ export async function status(localOnly: boolean = false): Promise<void> {
       console.log(`\n${chalk.bold("⏱️  Sync Timing:")}`);
       console.log(`  🕐 Last sync: ${chalk.yellow("Never synced")}`);
       console.log(
-        `  💡 Run ${chalk.cyan("sync-tool sync")} to perform initial sync`
+        `  💡 Run ${chalk.cyan("pushwork sync")} to perform initial sync`
       );
     }
 
@@ -628,7 +628,7 @@ export async function status(localOnly: boolean = false): Promise<void> {
         `  📄 Pending changes: ${chalk.yellow(syncStatus.changeCount)}`
       );
       console.log(`  🔄 Status: ${chalk.yellow("Sync needed")}`);
-      console.log(`  💡 Run ${chalk.cyan("sync-tool diff")} to see details`);
+      console.log(`  💡 Run ${chalk.cyan("pushwork diff")} to see details`);
     } else {
       console.log(`  📄 Pending changes: ${chalk.green("None")}`);
       console.log(`  ✅ Status: ${chalk.green("Up to date")}`);
@@ -675,15 +675,15 @@ export async function status(localOnly: boolean = false): Promise<void> {
     console.log(`\n${chalk.bold("🚀 Quick Actions:")}`);
     if (syncStatus.hasChanges) {
       console.log(
-        `  ${chalk.cyan("sync-tool diff")}     - View pending changes`
+        `  ${chalk.cyan("pushwork diff")}     - View pending changes`
       );
-      console.log(`  ${chalk.cyan("sync-tool sync")}     - Apply changes`);
+      console.log(`  ${chalk.cyan("pushwork sync")}     - Apply changes`);
     } else {
       console.log(
-        `  ${chalk.cyan("sync-tool sync")}     - Check for remote changes`
+        `  ${chalk.cyan("pushwork sync")}     - Check for remote changes`
       );
     }
-    console.log(`  ${chalk.cyan("sync-tool log")}      - View sync history`);
+    console.log(`  ${chalk.cyan("pushwork log")}      - View sync history`);
 
     // Cleanup repo resources
     try {
@@ -708,7 +708,7 @@ export async function log(
     const resolvedPath = path.resolve(targetPath);
 
     // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (!(await pathExists(syncToolDir))) {
       console.log(chalk.red("Directory not initialized for sync"));
       return;
@@ -775,7 +775,7 @@ export async function checkout(
     const resolvedPath = path.resolve(targetPath);
 
     // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (!(await pathExists(syncToolDir))) {
       console.log(chalk.red("Directory not initialized for sync"));
       return;
@@ -826,7 +826,7 @@ export async function clone(
     }
 
     // Check if already initialized
-    const syncToolDir = path.join(resolvedPath, ".sync-tool");
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
       if (!options.force) {
         spinner.fail(
@@ -841,7 +841,7 @@ export async function clone(
     console.log(chalk.gray("  ✓ Target directory prepared"));
 
     // Step 2: Create sync directories
-    spinner.text = "Creating .sync-tool directory...";
+    spinner.text = "Creating .pushwork directory...";
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
@@ -854,7 +854,7 @@ export async function clone(
       sync_server: "wss://sync3.automerge.org",
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -917,7 +917,7 @@ export async function clone(
     console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
     console.log(
       `\n${chalk.green("Clone complete!")} Run ${chalk.cyan(
-        "sync-tool sync"
+        "pushwork sync"
       )} to stay in sync.`
     );
   } catch (error) {
@@ -991,7 +991,7 @@ export async function commit(
     }
 
     console.log(
-      chalk.gray("\n💡 Run 'sync-tool push' to upload to sync server")
+      chalk.gray("\n💡 Run 'pushwork push' to upload to sync server")
     );
   } catch (error) {
     if (repo) {

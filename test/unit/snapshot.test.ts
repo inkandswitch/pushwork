@@ -359,7 +359,7 @@ describe("SnapshotManager", () => {
       await snapshotManager.backup();
 
       // Check that backup file exists
-      const syncToolDir = path.join(tmpDir, ".sync-tool");
+      const syncToolDir = path.join(tmpDir, ".pushwork");
       const files = await fs.readdir(syncToolDir);
       const backupFiles = files.filter((f) =>
         f.startsWith("snapshot.json.backup.")

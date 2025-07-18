@@ -149,7 +149,7 @@ function isExcluded(
   for (const pattern of excludePatterns) {
     // Handle different pattern types
     if (pattern.startsWith(".") && !pattern.includes("*")) {
-      // Directory pattern like ".sync-tool" or ".git"
+      // Directory pattern like ".pushwork" or ".git"
       if (
         relativePath.startsWith(pattern) ||
         relativePath.includes(`/${pattern}/`) ||

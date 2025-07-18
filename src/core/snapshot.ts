@@ -13,7 +13,7 @@ import { pathExists, ensureDirectoryExists } from "../utils";
  */
 export class SnapshotManager {
   private static readonly SNAPSHOT_FILENAME = "snapshot.json";
-  private static readonly SYNC_TOOL_DIR = ".sync-tool";
+  private static readonly SYNC_TOOL_DIR = ".pushwork";
 
   constructor(private rootPath: string) {}
 

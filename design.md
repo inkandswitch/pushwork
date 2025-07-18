@@ -170,41 +170,41 @@ When a path changes type (text↔binary↔directory):
 
 ### Commands
 
-**sync-tool init \<path\> [\--remote=\<repo-id\>]**
+**pushwork init \<path\> [\--remote=\<repo-id\>]**
 
 - Initialize sync in directory
 - Create initial Automerge documents
 - Set up local state tracking
 
-**sync-tool sync [\--dry-run]**
+**pushwork sync [\--dry-run]**
 
 - Run full bidirectional sync
 - With --dry-run: show what would be done without applying changes
 
-**sync-tool diff [\--tool=\<external-tool\>] [\<path\>]**
+**pushwork diff [\--tool=\<external-tool\>] [\<path\>]**
 
 - Show local changes since last sync
 - Materializes snapshot state and runs standard diff
 - Optional external tool support (meld, beyond compare, etc.)
 
-**sync-tool status**
+**pushwork status**
 
 - Show sync state summary
 - Pending changes, last sync time, conflict indicators
 
-**sync-tool log [\--oneline] [\<path\>]**
+**pushwork log [\--oneline] [\<path\>]**
 
 - Show sync history
 - Per-file history with --path option
 
-**sync-tool checkout \<sync-id\> [\<path\>]**
+**pushwork checkout \<sync-id\> [\<path\>]**
 
 - Restore directory to state from previous sync
 - Limited to sync boundaries (not arbitrary timestamps)
 
 ### Configuration
 
-**Global config:** `~/.sync-tool/config`
+**Global config:** `~/.pushwork/config`
 
 ```toml
 [defaults]
@@ -220,7 +220,7 @@ move_detection_threshold = 0.8
 prompt_threshold = 0.5
 ```
 
-**Per-directory config:** `<directory>/.sync-tool/config`
+**Per-directory config:** `<directory>/.pushwork/config`
 
 - Overrides global settings
 - Repository-specific settings
@@ -269,23 +269,23 @@ prompt_threshold = 0.5
 
 ---
 
-# sync-tool(1) Manual Page
+# pushwork(1) Manual Page
 
 ## NAME
 
-sync-tool - bidirectional directory synchronization using Automerge CRDTs
+pushwork - bidirectional directory synchronization using Automerge CRDTs
 
 ## SYNOPSIS
 
-**sync-tool** _command_ [*options*] [*path*]
+**pushwork** _command_ [*options*] [*path*]
 
 ## DESCRIPTION
 
-sync-tool keeps a local directory synchronized with Automerge documents, enabling conflict-free collaboration across multiple devices and users. Files can be edited locally or remotely with automatic merge resolution.
+pushwork keeps a local directory synchronized with Automerge documents, enabling conflict-free collaboration across multiple devices and users. Files can be edited locally or remotely with automatic merge resolution.
 
 ## COMMANDS
 
-### sync-tool init [--remote=REPO] PATH
+### pushwork init [--remote=REPO] PATH
 
 Initialize sync in directory PATH. Creates Automerge documents for existing files and sets up local state tracking.
 
@@ -293,7 +293,7 @@ Initialize sync in directory PATH. Creates Automerge documents for existing file
 
 - `--remote=REPO` - Specify remote Automerge repository ID
 
-### sync-tool sync [--dry-run]
+### pushwork sync [--dry-run]
 
 Run full bidirectional synchronization. Pushes local changes and pulls remote changes.
 
@@ -301,7 +301,7 @@ Run full bidirectional synchronization. Pushes local changes and pulls remote ch
 
 - `--dry-run` - Show what would be done without applying changes
 
-### sync-tool diff [--tool=TOOL] [--name-only] [PATH]
+### pushwork diff [--tool=TOOL] [--name-only] [PATH]
 
 Show changes in working directory since last sync.
 
@@ -311,11 +311,11 @@ Show changes in working directory since last sync.
 - `--name-only` - Show only changed file names
 - `PATH` - Limit diff to specific path
 
-### sync-tool status
+### pushwork status
 
 Show sync status summary including pending changes and last sync time.
 
-### sync-tool log [--oneline] [PATH]
+### pushwork log [--oneline] [PATH]
 
 Show sync history. With PATH, show history for specific file or directory.
 
@@ -323,13 +323,13 @@ Show sync history. With PATH, show history for specific file or directory.
 
 - `--oneline` - Compact one-line per sync format
 
-### sync-tool checkout SYNC-ID [PATH]
+### pushwork checkout SYNC-ID [PATH]
 
 Restore directory to state from previous sync identified by SYNC-ID.
 
 ## CONFIGURATION
 
-### Global: ~/.sync-tool/config
+### Global: ~/.pushwork/config
 
 ```toml
 [defaults]
@@ -343,44 +343,44 @@ external_tool = "meld"
 move_detection_threshold = 0.8
 ```
 
-### Per-directory: .sync-tool/config
+### Per-directory: .pushwork/config
 
 Repository-specific overrides of global configuration.
 
 ## FILES
 
-- `~/.sync-tool/config` - Global configuration
-- `<directory>/.sync-tool/config` - Per-directory configuration
-- `<directory>/.sync-tool/snapshot` - Local sync state
-- `<directory>/.sync-tool/history/` - Sync history storage
+- `~/.pushwork/config` - Global configuration
+- `<directory>/.pushwork/config` - Per-directory configuration
+- `<directory>/.pushwork/snapshot` - Local sync state
+- `<directory>/.pushwork/history/` - Sync history storage
 
 ## EXAMPLES
 
 Initialize sync in current directory:
 
 ```bash
-sync-tool init . --remote=abc123
+pushwork init . --remote=abc123
 ```
 
 Show local changes:
 
 ```bash
-sync-tool diff
-sync-tool diff --tool=meld src/
+pushwork diff
+pushwork diff --tool=meld src/
 ```
 
 Sync with remote:
 
 ```bash
-sync-tool sync
-sync-tool sync --dry-run  # preview changes
+pushwork sync
+pushwork sync --dry-run  # preview changes
 ```
 
 View history and restore:
 
 ```bash
-sync-tool log
-sync-tool checkout sync-456 important.txt
+pushwork log
+pushwork checkout sync-456 important.txt
 ```
 
 ## EXIT STATUS

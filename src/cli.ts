@@ -16,7 +16,7 @@ import {
 const program = new Command();
 
 program
-  .name("sync-tool")
+  .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
   .version("1.0.0");
 
@@ -37,8 +37,8 @@ program
     "after",
     `
 Examples:
-  sync-tool init ./my-folder
-  sync-tool init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  pushwork init ./my-folder
+  pushwork init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
   
 Note: Custom sync server options must always be used together.`
   )

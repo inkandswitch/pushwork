@@ -16,7 +16,7 @@ describe("Exclude Patterns", () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(tmpdir(), "sync-test-"));
-    syncToolDir = path.join(tmpDir, ".sync-tool");
+    syncToolDir = path.join(tmpDir, ".pushwork");
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
@@ -27,8 +27,8 @@ describe("Exclude Patterns", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("should exclude .sync-tool directory from filesystem listing", async () => {
-    // Create files both inside and outside .sync-tool directory
+  it("should exclude .pushwork directory from filesystem listing", async () => {
+    // Create files both inside and outside .pushwork directory
     await writeFileContent(
       path.join(tmpDir, "regular-file.txt"),
       "regular content"
@@ -46,7 +46,7 @@ describe("Exclude Patterns", () => {
       '{"test": true}'
     );
 
-    // Create nested directory with file inside .sync-tool
+    // Create nested directory with file inside .pushwork
     const nestedDir = path.join(syncToolDir, "nested");
     await ensureDirectoryExists(nestedDir);
     await writeFileContent(
@@ -55,17 +55,17 @@ describe("Exclude Patterns", () => {
     );
 
     // Test listDirectory with exclude patterns
-    const excludePatterns = [".sync-tool"];
+    const excludePatterns = [".pushwork"];
     const entries = await listDirectory(tmpDir, true, excludePatterns);
 
-    // Verify that .sync-tool files are excluded
+    // Verify that .pushwork files are excluded
     const filePaths = entries.map((entry) => path.relative(tmpDir, entry.path));
 
     expect(filePaths).toContain("regular-file.txt");
     expect(filePaths).toContain("another-file.md");
-    expect(filePaths).not.toContain(".sync-tool/snapshot.json");
-    expect(filePaths).not.toContain(".sync-tool/config.json");
-    expect(filePaths).not.toContain(".sync-tool/nested/internal.log");
+    expect(filePaths).not.toContain(".pushwork/snapshot.json");
+    expect(filePaths).not.toContain(".pushwork/config.json");
+    expect(filePaths).not.toContain(".pushwork/nested/internal.log");
   });
 
   it("should exclude files matching glob patterns", async () => {
@@ -84,7 +84,7 @@ describe("Exclude Patterns", () => {
     );
 
     // Test listDirectory with various exclude patterns
-    const excludePatterns = ["*.tmp", "*.log", "node_modules", ".sync-tool"];
+    const excludePatterns = ["*.tmp", "*.log", "node_modules", ".pushwork"];
     const entries = await listDirectory(tmpDir, true, excludePatterns);
 
     // Verify correct files are included/excluded
@@ -106,7 +106,7 @@ describe("Exclude Patterns", () => {
       sync_server: "wss://test.server.com",
       sync_enabled: true,
       defaults: {
-        exclude_patterns: [".git", "*.tmp", ".sync-tool", "*.env"],
+        exclude_patterns: [".git", "*.tmp", ".pushwork", "*.env"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -124,8 +124,8 @@ describe("Exclude Patterns", () => {
     // Get merged config
     const mergedConfig = await configManager.getMerged();
 
-    // Verify .sync-tool is in the exclude patterns
-    expect(mergedConfig.defaults.exclude_patterns).toContain(".sync-tool");
+    // Verify .pushwork is in the exclude patterns
+    expect(mergedConfig.defaults.exclude_patterns).toContain(".pushwork");
     expect(mergedConfig.defaults.exclude_patterns).toContain("*.env");
     expect(mergedConfig.defaults.exclude_patterns).toContain(".git");
 
@@ -147,6 +147,6 @@ describe("Exclude Patterns", () => {
 
     expect(filePaths).toContain("include.txt");
     expect(filePaths).not.toContain("secret.env");
-    expect(filePaths).not.toContain(".sync-tool/snapshot.json");
+    expect(filePaths).not.toContain(".pushwork/snapshot.json");
   });
 });
