@@ -123,6 +123,7 @@ export class ConfigManager {
     // Create default configuration
     const defaultConfig: DirectoryConfig = {
       sync_enabled: true,
+      sync_server_storage_id: "3760df37-a4c6-4f66-9ecd-732039a9385d",
       defaults: {
         exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
         large_file_threshold: "100MB",
@@ -163,6 +164,13 @@ export class ConfigManager {
 
     if ("sync_server" in override && override.sync_server !== undefined) {
       merged.sync_server = override.sync_server;
+    }
+
+    if (
+      "sync_server_storage_id" in override &&
+      override.sync_server_storage_id !== undefined
+    ) {
+      merged.sync_server_storage_id = override.sync_server_storage_id;
     }
 
     if ("sync_enabled" in override && override.sync_enabled !== undefined) {
@@ -213,6 +221,7 @@ export class ConfigManager {
       ],
       large_file_threshold: "100MB",
       sync_server: "wss://sync3.automerge.org",
+      sync_server_storage_id: "3760df37-a4c6-4f66-9ecd-732039a9385d",
       diff: {
         show_binary: false,
       },

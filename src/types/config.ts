@@ -3,6 +3,7 @@
  */
 export interface GlobalConfig {
   sync_server?: string;
+  sync_server_storage_id?: string;
   exclude_patterns?: string[];
   large_file_threshold?: string;
   diff?: {
@@ -49,6 +50,7 @@ export interface SyncSettings {
  */
 export interface DirectoryConfig {
   sync_server?: string;
+  sync_server_storage_id?: string;
   sync_enabled: boolean;
   root_directory_url?: string; // AutomergeUrl of the root directory document
   defaults: {

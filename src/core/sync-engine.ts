@@ -45,17 +45,20 @@ export class SyncEngine {
   private moveDetector: MoveDetector;
   private networkSyncEnabled: boolean = true;
   private handlesToWaitOn: DocHandle<unknown>[] = [];
+  private syncServerStorageId?: string;
 
   constructor(
     private repo: Repo,
     private rootPath: string,
     excludePatterns: string[] = [],
-    networkSyncEnabled: boolean = true
+    networkSyncEnabled: boolean = true,
+    syncServerStorageId?: string
   ) {
     this.snapshotManager = new SnapshotManager(rootPath);
     this.changeDetector = new ChangeDetector(repo, rootPath, excludePatterns);
     this.moveDetector = new MoveDetector();
     this.networkSyncEnabled = networkSyncEnabled;
+    this.syncServerStorageId = syncServerStorageId;
   }
 
   /**
@@ -259,7 +262,10 @@ export class SyncEngine {
           );
 
           if (this.handlesToWaitOn.length > 0) {
-            await waitForSync(this.handlesToWaitOn, getSyncServerStorageId());
+            await waitForSync(
+              this.handlesToWaitOn,
+              getSyncServerStorageId(this.syncServerStorageId)
+            );
           } else {
             console.log("⚠️  No documents to wait for network sync");
           }

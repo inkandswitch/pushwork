@@ -27,6 +27,7 @@ import { ConfigManager } from "../config";
 function createRepo(
   syncToolDir: string,
   syncServer?: string,
+  syncServerStorageId?: string,
   enableNetwork: boolean = true // Enable network by default
 ): Repo {
   const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
@@ -46,11 +47,13 @@ function createRepo(
   const repo = new Repo(repoConfig);
 
   // Subscribe to the sync server storage for network sync
-  if (enableNetwork && syncServer) {
-    const syncServerStorageId =
-      "3760df37-a4c6-4f66-9ecd-732039a9385d" as StorageId;
-    repo.subscribeToRemotes([syncServerStorageId]);
-    console.log(chalk.gray(`  ✓ Subscribed to sync server storage`));
+  if (enableNetwork && syncServer && syncServerStorageId) {
+    repo.subscribeToRemotes([syncServerStorageId as StorageId]);
+    console.log(
+      chalk.gray(
+        `  ✓ Subscribed to sync server storage: ${syncServerStorageId}`
+      )
+    );
   }
 
   return repo;
@@ -120,7 +123,11 @@ async function showContentDiff(change: DetectedChange): Promise<void> {
 /**
  * Initialize sync in a directory
  */
-export async function init(targetPath: string): Promise<void> {
+export async function init(
+  targetPath: string,
+  syncServer?: string,
+  syncServerStorageId?: string
+): Promise<void> {
   const spinner = ora("Starting initialization...").start();
 
   try {
@@ -147,8 +154,12 @@ export async function init(targetPath: string): Promise<void> {
     // Step 3: Configuration setup
     spinner.text = "Setting up configuration...";
     const configManager = new ConfigManager(resolvedPath);
+    const defaultSyncServer = syncServer || "wss://sync3.automerge.org";
+    const defaultStorageId =
+      syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
     const config: DirectoryConfig = {
-      sync_server: "wss://sync3.automerge.org",
+      sync_server: defaultSyncServer,
+      sync_server_storage_id: defaultStorageId,
       sync_enabled: true,
       defaults: {
         exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
@@ -167,11 +178,17 @@ export async function init(targetPath: string): Promise<void> {
     await configManager.save(config);
 
     console.log(chalk.gray("  ✓ Saved configuration"));
-    console.log(chalk.gray("  ✓ Sync server: wss://sync3.automerge.org"));
+    console.log(chalk.gray(`  ✓ Sync server: ${defaultSyncServer}`));
+    console.log(chalk.gray(`  ✓ Storage ID: ${defaultStorageId}`));
 
     // Step 4: Initialize Automerge repo and create root directory document
     spinner.text = "Creating root directory document...";
-    const repo = createRepo(syncToolDir, config.sync_server, true); // Enable network sync
+    const repo = createRepo(
+      syncToolDir,
+      config.sync_server,
+      config.sync_server_storage_id,
+      true
+    ); // Enable network sync
 
     // Create the root directory document
     const rootDoc: DirectoryDocument = {
@@ -188,7 +205,8 @@ export async function init(targetPath: string): Promise<void> {
       repo,
       resolvedPath,
       config.defaults.exclude_patterns,
-      true // Network sync enabled for init
+      true, // Network sync enabled for init
+      config.sync_server_storage_id
     );
 
     // Get file count for progress
@@ -228,12 +246,9 @@ export async function init(targetPath: string): Promise<void> {
 
     console.log(`\n${chalk.bold("🎉 Sync Directory Created!")}`);
     console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
-    console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
-    console.log(`  📄 Files processed: ${chalk.yellow(fileCount)}`);
-    console.log(`\n${chalk.bold("📋 Share this URL with collaborators:")}`);
-    console.log(`  ${chalk.cyan(rootHandle.url)}`);
+    console.log(`  🔗 Sync server: ${chalk.blue(defaultSyncServer)}`);
     console.log(
-      `\n${chalk.green("Ready to sync!")} Run ${chalk.cyan(
+      `\n${chalk.green("Initialization complete!")} Run ${chalk.cyan(
         "sync-tool sync"
       )} to start syncing.`
     );
@@ -283,6 +298,8 @@ export async function sync(options: SyncOptions): Promise<void> {
     const repo = createRepo(
       syncToolDir,
       syncConfig?.sync_server,
+      syncConfig?.sync_server_storage_id ||
+        "3760df37-a4c6-4f66-9ecd-732039a9385d",
       !options.localOnly
     ); // Use localOnly option
     const syncEngine = new SyncEngine(
@@ -507,6 +524,8 @@ export async function diff(
     const repo = createRepo(
       syncToolDir,
       diffConfig?.sync_server,
+      diffConfig?.sync_server_storage_id ||
+        "3760df37-a4c6-4f66-9ecd-732039a9385d",
       !options.localOnly
     ); // Use localOnly option
 
@@ -595,7 +614,13 @@ export async function status(localOnly: boolean = false): Promise<void> {
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
     const statusConfig = await statusConfigManager.getMerged();
-    const repo = createRepo(syncToolDir, statusConfig?.sync_server, !localOnly); // Use localOnly option
+    const repo = createRepo(
+      syncToolDir,
+      statusConfig?.sync_server,
+      statusConfig?.sync_server_storage_id ||
+        "3760df37-a4c6-4f66-9ecd-732039a9385d",
+      !localOnly
+    ); // Use localOnly option
 
     // Get status
     const syncEngine = new SyncEngine(
@@ -744,7 +769,13 @@ export async function log(
     // Load configuration and show root URL
     const logConfigManager = new ConfigManager(resolvedPath);
     const logConfig = await logConfigManager.getMerged();
-    const logRepo = createRepo(syncToolDir, logConfig?.sync_server, true); // Enable network sync
+    const logRepo = createRepo(
+      syncToolDir,
+      logConfig?.sync_server,
+      logConfig?.sync_server_storage_id ||
+        "3760df37-a4c6-4f66-9ecd-732039a9385d",
+      true
+    ); // Enable network sync
     const logSyncEngine = new SyncEngine(
       logRepo,
       resolvedPath,
@@ -899,7 +930,12 @@ export async function clone(
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
-    const repo = createRepo(syncToolDir, config.sync_server, true); // Enable network sync
+    const repo = createRepo(
+      syncToolDir,
+      config.sync_server,
+      config.sync_server_storage_id || "3760df37-a4c6-4f66-9ecd-732039a9385d",
+      true
+    ); // Enable network sync
 
     console.log(chalk.gray("  ✓ Created Automerge repository"));
     console.log(chalk.gray(`  ✓ Root directory URL: ${rootUrl}`));
@@ -966,7 +1002,12 @@ export async function commit(
     // Create repository (local only - no network)
     spinner.text = "Connecting to local repository...";
     const syncToolDir = path.join(targetPath, ".sync-tool");
-    repo = createRepo(syncToolDir, config?.sync_server, false); // Local only!
+    repo = createRepo(
+      syncToolDir,
+      config?.sync_server,
+      config?.sync_server_storage_id || "3760df37-a4c6-4f66-9ecd-732039a9385d",
+      false
+    ); // Local only!
     spinner.succeed("Connected to local repository");
 
     // Create sync engine

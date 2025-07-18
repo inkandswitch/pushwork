@@ -25,9 +25,50 @@ program
   .command("init")
   .description("Initialize sync in directory")
   .argument("<path>", "Directory path to initialize")
+  .option(
+    "--sync-server <url>",
+    "Custom sync server URL (must be used with --sync-server-storage-id)"
+  )
+  .option(
+    "--sync-server-storage-id <id>",
+    "Custom sync server storage ID (must be used with --sync-server)"
+  )
+  .addHelpText(
+    "after",
+    `
+Examples:
+  sync-tool init ./my-folder
+  sync-tool init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  
+Note: Custom sync server options must always be used together.`
+  )
   .action(async (path: string, options) => {
     try {
-      await init(path);
+      // Validate that both sync server options are provided together
+      const hasSyncServer = !!options.syncServer;
+      const hasSyncServerStorageId = !!options.syncServerStorageId;
+
+      if (hasSyncServer && !hasSyncServerStorageId) {
+        console.error(
+          chalk.red("Error: --sync-server requires --sync-server-storage-id")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
+      if (hasSyncServerStorageId && !hasSyncServer) {
+        console.error(
+          chalk.red("Error: --sync-server-storage-id requires --sync-server")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
+      await init(path, options.syncServer, options.syncServerStorageId);
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
       process.exit(1);
