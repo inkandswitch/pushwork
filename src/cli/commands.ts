@@ -1,8 +1,6 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import { Repo, StorageId, AutomergeUrl } from "@automerge/automerge-repo";
-import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
-import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import chalk from "chalk";
 import ora from "ora";
 import * as diffLib from "diff";
@@ -20,44 +18,7 @@ import { SyncEngine } from "../core";
 import { DetectedChange } from "../core/change-detection";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
-
-/**
- * Create Automerge repo with optional network connectivity
- */
-function createRepo(
-  syncToolDir: string,
-  syncServer?: string,
-  syncServerStorageId?: string,
-  enableNetwork: boolean = true // Enable network by default
-): Repo {
-  const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
-
-  const repoConfig: any = { storage };
-
-  // Add network adapter only if explicitly enabled and sync server is configured
-  if (enableNetwork && syncServer) {
-    const networkAdapter = new BrowserWebSocketClientAdapter(syncServer);
-    repoConfig.network = [networkAdapter];
-    repoConfig.enableRemoteHeadsGossiping = true;
-    console.log(chalk.gray(`  ✓ Network sync enabled: ${syncServer}`));
-  } else {
-    console.log(chalk.gray("  ✓ Local-only mode (network sync disabled)"));
-  }
-
-  const repo = new Repo(repoConfig);
-
-  // Subscribe to the sync server storage for network sync
-  if (enableNetwork && syncServer && syncServerStorageId) {
-    repo.subscribeToRemotes([syncServerStorageId as StorageId]);
-    console.log(
-      chalk.gray(
-        `  ✓ Subscribed to sync server storage: ${syncServerStorageId}`
-      )
-    );
-  }
-
-  return repo;
-}
+import { createConfiguredRepo } from "../utils/repo-factory";
 
 /**
  * Show actual content diff for a changed file
@@ -183,12 +144,11 @@ export async function init(
 
     // Step 4: Initialize Automerge repo and create root directory document
     spinner.text = "Creating root directory document...";
-    const repo = createRepo(
-      syncToolDir,
-      config.sync_server,
-      config.sync_server_storage_id,
-      true
-    ); // Enable network sync
+    const repo = await createConfiguredRepo(resolvedPath, {
+      enableNetwork: true,
+      syncServer: syncServer,
+      syncServerStorageId: syncServerStorageId,
+    });
 
     // Create the root directory document
     const rootDoc: DirectoryDocument = {
@@ -295,13 +255,9 @@ export async function sync(options: SyncOptions): Promise<void> {
 
     // Step 3: Initialize Automerge repo
     spinner.text = "Connecting to Automerge repository...";
-    const repo = createRepo(
-      syncToolDir,
-      syncConfig?.sync_server,
-      syncConfig?.sync_server_storage_id ||
-        "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      !options.localOnly
-    ); // Use localOnly option
+    const repo = await createConfiguredRepo(currentPath, {
+      enableNetwork: !options.localOnly,
+    });
     const syncEngine = new SyncEngine(
       repo,
       currentPath,
@@ -521,13 +477,9 @@ export async function diff(
     const diffConfig = await diffConfigManager.getMerged();
 
     // Initialize Automerge repo
-    const repo = createRepo(
-      syncToolDir,
-      diffConfig?.sync_server,
-      diffConfig?.sync_server_storage_id ||
-        "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      !options.localOnly
-    ); // Use localOnly option
+    const repo = await createConfiguredRepo(resolvedPath, {
+      enableNetwork: !options.localOnly,
+    });
 
     // Get changes
     const syncEngine = new SyncEngine(
@@ -614,13 +566,9 @@ export async function status(localOnly: boolean = false): Promise<void> {
     // Initialize Automerge repo
     const statusConfigManager = new ConfigManager(currentPath);
     const statusConfig = await statusConfigManager.getMerged();
-    const repo = createRepo(
-      syncToolDir,
-      statusConfig?.sync_server,
-      statusConfig?.sync_server_storage_id ||
-        "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      !localOnly
-    ); // Use localOnly option
+    const repo = await createConfiguredRepo(currentPath, {
+      enableNetwork: !localOnly,
+    });
 
     // Get status
     const syncEngine = new SyncEngine(
@@ -769,13 +717,9 @@ export async function log(
     // Load configuration and show root URL
     const logConfigManager = new ConfigManager(resolvedPath);
     const logConfig = await logConfigManager.getMerged();
-    const logRepo = createRepo(
-      syncToolDir,
-      logConfig?.sync_server,
-      logConfig?.sync_server_storage_id ||
-        "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      true
-    ); // Enable network sync
+    const logRepo = await createConfiguredRepo(resolvedPath, {
+      enableNetwork: true,
+    });
     const logSyncEngine = new SyncEngine(
       logRepo,
       resolvedPath,
@@ -930,12 +874,9 @@ export async function clone(
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
-    const repo = createRepo(
-      syncToolDir,
-      config.sync_server,
-      config.sync_server_storage_id || "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      true
-    ); // Enable network sync
+    const repo = await createConfiguredRepo(resolvedPath, {
+      enableNetwork: true,
+    });
 
     console.log(chalk.gray("  ✓ Created Automerge repository"));
     console.log(chalk.gray(`  ✓ Root directory URL: ${rootUrl}`));
@@ -1001,13 +942,9 @@ export async function commit(
 
     // Create repository (local only - no network)
     spinner.text = "Connecting to local repository...";
-    const syncToolDir = path.join(targetPath, ".sync-tool");
-    repo = createRepo(
-      syncToolDir,
-      config?.sync_server,
-      config?.sync_server_storage_id || "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      false
-    ); // Local only!
+    repo = await createConfiguredRepo(targetPath, {
+      enableNetwork: false,
+    });
     spinner.succeed("Connected to local repository");
 
     // Create sync engine
