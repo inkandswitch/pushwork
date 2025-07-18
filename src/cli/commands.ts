@@ -152,6 +152,7 @@ export async function init(
 
     // Create the root directory document
     const rootDoc: DirectoryDocument = {
+      "@patchwork": { type: "folder" },
       docs: [],
     };
     const rootHandle = repo.create(rootDoc);

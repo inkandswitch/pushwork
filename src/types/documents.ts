@@ -13,6 +13,7 @@ export interface DirectoryEntry {
  * Directory document structure
  */
 export interface DirectoryDocument {
+  "@patchwork": { type: "folder" };
   docs: DirectoryEntry[];
 }
 
@@ -20,6 +21,7 @@ export interface DirectoryDocument {
  * File document structure
  */
 export interface FileDocument {
+  "@patchwork": { type: "file" };
   name: string;
   extension: string;
   mimeType: string;

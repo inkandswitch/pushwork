@@ -556,6 +556,7 @@ export class SyncEngine {
 
     // Create initial document structure
     const fileDoc: FileDocument = {
+      "@patchwork": { type: "file" },
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
       mimeType: getMimeType(change.path),
@@ -774,6 +775,7 @@ export class SyncEngine {
 
     // CREATE: Directory doesn't exist, create new one
     const dirDoc: DirectoryDocument = {
+      "@patchwork": { type: "folder" },
       docs: [],
     };
 
