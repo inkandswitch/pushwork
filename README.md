@@ -1,65 +1,125 @@
-# Sync Tool
+# Pushwork
 
-A bidirectional file synchronization system using Automerge CRDTs for conflict-free collaboration.
+A bidirectional file synchronization system using Automerge CRDTs for conflict-free collaborative editing.
 
-## Features
+## Overview
 
-- **Bidirectional Sync**: Keep local directories in sync with Automerge documents
-- **Conflict-Free**: Automatic conflict resolution using Automerge CRDTs
-- **Move Detection**: Intelligent detection of file moves based on content similarity
-- **Incremental Sync**: Only sync changed files for efficiency
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-- **CLI Interface**: Full-featured command-line interface
+Pushwork enables real-time collaboration on directories and files using **Conflict-free Replicated Data Types (CRDTs)**. Unlike traditional sync tools that require manual conflict resolution, Pushwork automatically merges changes from multiple users while preserving everyone's work.
 
-## Installation
+## ✨ Key Features
+
+- **🔄 Bidirectional Sync**: Keep local directories synchronized with remote Automerge repositories
+- **🚫 Conflict-Free**: Automatic conflict resolution using Automerge CRDTs - no merge conflicts ever
+- **📱 Real-time Collaboration**: Multiple users can edit the same files simultaneously
+- **🧠 Intelligent Move Detection**: Detects file renames and moves based on content similarity
+- **⚡ Incremental Sync**: Only synchronizes changed files for maximum efficiency
+- **🌐 Network Resilient**: Works offline and gracefully handles network interruptions
+- **🖥️ Cross-Platform**: Runs on Windows, macOS, and Linux
+- **🛠️ Rich CLI**: Full-featured command-line interface with comprehensive tooling
+
+## 🚀 Quick Start
+
+### Installation
+
+Currently, install from source:
 
 ```bash
-npm install -g pushwork
+pnpm install
+pnpm run build
+pnpm link
 ```
 
-## Quick Start
+### Basic Usage
 
-1. Initialize sync in a directory:
+1. **Initialize a new repository:**
 
 ```bash
-pushwork init . --remote=your-repo-id
+pushwork init ./my-project
 ```
 
-2. Run initial sync:
+2. **Clone an existing repository:**
+
+```bash
+pushwork clone <automerge-url> ./cloned-project
+```
+
+3. **Sync changes:**
 
 ```bash
 pushwork sync
 ```
 
-3. Check status:
+4. **Check status:**
 
 ```bash
 pushwork status
 ```
 
-## Commands
+## 📚 Commands
 
-### `pushwork init <path> --remote=<repo-id>`
+### `init <path> [options]`
 
-Initialize sync in a directory with a remote Automerge repository.
+Initialize sync in a directory, creating a new Automerge repository.
 
 ```bash
-pushwork init ./my-project --remote=abc123def456
+# Initialize with default sync server
+pushwork init ./my-project
+
+# Initialize with custom sync server
+pushwork init ./my-project \
+  --sync-server ws://localhost:3030 \
+  --sync-server-storage-id your-storage-id
 ```
 
-### `pushwork sync [--dry-run]`
+**Options:**
 
-Run bidirectional synchronization.
+- `--sync-server <url>`: Custom sync server URL (requires storage-id)
+- `--sync-server-storage-id <id>`: Custom sync server storage ID (requires server)
+
+### `clone <url> <path> [options]`
+
+Clone an existing synced directory from an Automerge URL.
 
 ```bash
-# Preview changes without applying
+# Clone from default sync server
+pushwork clone automerge:abc123... ./cloned-project
+
+# Clone with custom sync server
+pushwork clone automerge:abc123... ./cloned-project \
+  --sync-server ws://localhost:3030 \
+  --sync-server-storage-id your-storage-id
+
+# Force overwrite existing directory
+pushwork clone automerge:abc123... ./existing-dir --force
+```
+
+**Options:**
+
+- `--force`: Overwrite existing directory
+- `--sync-server <url>`: Custom sync server URL
+- `--sync-server-storage-id <id>`: Custom sync server storage ID
+
+### `sync [options]`
+
+Run bidirectional synchronization between local files and remote repository.
+
+```bash
+# Preview changes without applying them
 pushwork sync --dry-run
 
-# Apply changes
+# Apply all changes
 pushwork sync
+
+# Verbose output
+pushwork sync --verbose
 ```
 
-### `pushwork diff [path] [--tool=<tool>] [--name-only]`
+**Options:**
+
+- `--dry-run`: Preview changes without applying them
+- `--verbose`: Show detailed progress information
+
+### `diff [path] [options]`
 
 Show differences between local and remote state.
 
@@ -70,62 +130,116 @@ pushwork diff
 # Show changes for specific path
 pushwork diff src/
 
-# Use external diff tool
-pushwork diff --tool=meld
-
 # Show only changed file names
 pushwork diff --name-only
+
+# Use external diff tool
+pushwork diff --tool meld
 ```
 
-### `pushwork status`
+**Options:**
 
-Show sync status and pending changes.
+- `--tool <tool>`: Use external diff tool (meld, vimdiff, etc.)
+- `--name-only`: Show only changed file names
+
+### `status`
+
+Show current sync status and repository information.
 
 ```bash
 pushwork status
 ```
 
-### `pushwork log [path] [--oneline]`
+### `log [path] [options]`
 
-Show sync history.
+Show sync history for the repository or specific files.
 
 ```bash
-# Show full history
+# Show repository history
 pushwork log
 
-# Compact format
+# Compact one-line format
 pushwork log --oneline
 
 # History for specific path
 pushwork log src/important-file.txt
 ```
 
-### `pushwork checkout <sync-id> [path]`
+**Options:**
 
-Restore files to state from previous sync.
+- `--oneline`: Compact one-line per sync format
+- `--since <date>`: Show syncs since date
+- `--limit <n>`: Limit number of syncs shown (default: 10)
+
+### `url [path]`
+
+Show the Automerge root URL for sharing with others.
+
+```bash
+# Get URL for current directory
+pushwork url
+
+# Get URL for specific directory
+pushwork url ./my-project
+```
+
+### `commit [path] [options]`
+
+Commit local changes without network sync (useful for offline work).
+
+```bash
+# Commit all changes
+pushwork commit
+
+# Preview what would be committed
+pushwork commit --dry-run
+
+# Commit specific directory
+pushwork commit ./src
+```
+
+**Options:**
+
+- `--dry-run`: Show what would be committed without applying changes
+
+### `checkout <sync-id> [path] [options]`
+
+Restore directory to state from previous sync (not yet implemented).
 
 ```bash
 # Restore entire directory
 pushwork checkout sync-123
 
-# Restore specific file
-pushwork checkout sync-123 important-file.txt
+# Force checkout even with uncommitted changes
+pushwork checkout sync-123 --force
 ```
 
-## Configuration
+## ⚙️ Configuration
 
-### Global Configuration
+### Default Configuration
 
-Located at `~/.pushwork/config.json`:
+Pushwork uses sensible defaults:
+
+- **Sync Server**: `wss://sync3.automerge.org`
+- **Storage ID**: `3760df37-a4c6-4f66-9ecd-732039a9385d`
+- **Excluded Patterns**: `.git`, `node_modules`, `*.tmp`, `.pushwork`
+- **Large File Threshold**: 100MB
+- **Move Detection Threshold**: 80% similarity
+
+### Directory Configuration
+
+Configuration is stored in `.pushwork/config.json`:
 
 ```json
 {
+  "sync_server": "wss://sync3.automerge.org",
+  "sync_server_storage_id": "3760df37-a4c6-4f66-9ecd-732039a9385d",
+  "sync_enabled": true,
   "defaults": {
-    "exclude_patterns": [".git", "node_modules", "*.tmp"],
+    "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
     "large_file_threshold": "100MB"
   },
   "diff": {
-    "external_tool": "meld",
     "show_binary": false
   },
   "sync": {
@@ -137,48 +251,38 @@ Located at `~/.pushwork/config.json`:
 }
 ```
 
-### Per-Directory Configuration
+## 🔧 How It Works
 
-Located at `<directory>/.pushwork/config.json`:
+### CRDT-Based Conflict Resolution
 
-```json
-{
-  "remote_repo": "your-repo-id",
-  "sync_enabled": true,
-  "defaults": {
-    "exclude_patterns": [".env", "dist/"]
-  }
-}
-```
+Pushwork uses **Automerge CRDTs** to automatically resolve conflicts:
 
-## How It Works
+- **Text Files**: Character-level merging preserves all changes
+- **Binary Files**: Last-writer-wins with automatic convergence
+- **Directory Structure**: Additive merging supports simultaneous file creation
+- **File Moves**: Intelligent detection prevents data loss during renames
 
-### Two-Phase Sync
+### Two-Phase Sync Process
 
 1. **Push Phase**: Apply local changes to Automerge documents
 2. **Pull Phase**: Apply remote changes to local filesystem
+3. **Convergence**: All repositories eventually reach identical state
 
 ### Change Detection
 
-- Content-based comparison using Automerge document heads
-- No reliance on file timestamps
-- Detects creates, updates, deletes, and moves
+- **Content-Based**: Uses Automerge document heads, not timestamps
+- **Efficient**: Only processes actually changed files
+- **Reliable**: Works across time zones and file system differences
+- **Resumable**: Interrupted syncs can be safely resumed
 
-### Move Detection
+### Move Detection Algorithm
 
 - Compares content similarity between deleted and created files
-- Auto-applies moves above 80% similarity
-- Prompts user for moves between 50-80% similarity
-- Configurable thresholds
+- **Auto-apply**: Moves with >80% similarity (configurable)
+- **User prompt**: Moves with 50-80% similarity (configurable)
+- **Ignore**: Moves with <50% similarity
 
-### Conflict Resolution
-
-- Automerge CRDTs provide automatic conflict resolution
-- Text files: line-by-line merging
-- Binary files: last-writer-wins with conflict markers
-- Directory structure: additive merging
-
-## Architecture
+## 📁 Architecture
 
 ### Document Schema
 
@@ -186,13 +290,11 @@ Located at `<directory>/.pushwork/config.json`:
 
 ```typescript
 {
+  "@patchwork": { type: "file" };
   name: string;
   extension: string;
   mimeType: string;
   contents: Text | Uint8Array;
-  metadata: {
-    permissions: number;
-  }
 }
 ```
 
@@ -200,6 +302,7 @@ Located at `<directory>/.pushwork/config.json`:
 
 ```typescript
 {
+  "@patchwork": { type: "folder" };
   docs: Array<{
     name: string;
     type: "file" | "folder";
@@ -208,61 +311,150 @@ Located at `<directory>/.pushwork/config.json`:
 }
 ```
 
-### Local State
+### Local State Management
 
-- Snapshot tracking at `.pushwork/snapshot.json`
-- Maps filesystem paths to Automerge document URLs and heads
-- Enables efficient change detection and resumable syncs
+- **Snapshot File**: `.pushwork/snapshot.json` tracks sync state
+- **Path Mapping**: Links filesystem paths to Automerge document URLs
+- **Head Tracking**: Enables efficient change detection
+- **Configuration**: `.pushwork/config.json` stores sync settings
 
-## Development
+### Network Architecture
+
+- **Sync Server**: Handles real-time synchronization between clients
+- **Storage ID**: Isolates different collaboration groups
+- **WebSocket Connection**: Provides real-time updates
+- **Graceful Degradation**: Works offline with manual sync
+
+## 🧪 Testing
+
+### Running Tests
+
+```bash
+# Build the project
+npm run build
+
+# Run unit tests
+npm test
+
+# Run integration tests
+./test/run-tests.sh
+
+# Test conflict resolution
+./test/integration/conflict-resolution-test.sh
+
+# Test clone functionality
+./test/integration/clone-test.sh
+```
+
+### Test Coverage
+
+- **Unit Tests**: Core functionality and utilities
+- **Integration Tests**: End-to-end sync scenarios
+- **Conflict Resolution**: CRDT merging behavior
+- **Clone Operations**: Repository sharing workflows
+
+## 🛠️ Development
 
 ### Prerequisites
 
 - Node.js 18+
 - TypeScript 5+
+- pnpm (recommended) or npm
 
-### Setup
+### Development Setup
 
 ```bash
-git clone https://github.com/your-org/pushwork
+git clone <repository-url>
 cd pushwork
 npm install
 npm run build
+
+# Development mode
+npm run dev
+
+# Watch mode for testing
+npm run test:watch
 ```
 
-### Testing
+### Project Structure
+
+```
+src/
+├── cli/           # Command-line interface
+├── core/          # Core sync engine
+├── config/        # Configuration management
+├── types/         # TypeScript type definitions
+└── utils/         # Shared utilities
+
+test/
+├── unit/          # Unit tests
+└── integration/   # Integration tests
+```
+
+## 🤝 Real-World Collaboration Example
 
 ```bash
-# Unit tests
-npm test
+# Alice initializes a project
+alice$ pushwork init ./shared-docs
+alice$ echo "Hello World" > shared-docs/readme.txt
+alice$ pushwork sync
+alice$ pushwork url
+# automerge:2V4w7zv8zkJYJxJsKaYhZ5NPjxA1
 
-# Integration tests
-npm run test:integration
+# Bob clones Alice's project
+bob$ pushwork clone automerge:2V4w7zv8zkJYJxJsKaYhZ5NPjxA1 ./bobs-copy
 
-# Coverage
-npm run test:coverage
+# Both edit the same file simultaneously
+alice$ echo "Alice's changes" >> shared-docs/readme.txt
+bob$ echo "Bob's changes" >> bobs-copy/readme.txt
+
+# Both sync - no conflicts!
+alice$ pushwork sync
+bob$ pushwork sync
+alice$ pushwork sync  # Gets Bob's changes
+
+# Final result contains both changes merged automatically
+alice$ cat shared-docs/readme.txt
+Hello World
+Alice's changes
+Bob's changes
 ```
 
-### Building
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**WebSocket Connection Errors**: Usually safe to ignore during shutdown
+
+**"Directory not initialized"**: Run `pushwork init .` first
+
+**Network Sync Timeout**: Check internet connection and sync server status
+
+**File Permission Errors**: Ensure write access to target directory
+
+### Debug Mode
 
 ```bash
-npm run build
+# Enable verbose logging
+pushwork sync --verbose
+
+# Preview changes without applying
+pushwork sync --dry-run
+
+# Check repository status
+pushwork status
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## License
+## 📄 License
 
 MIT License - see LICENSE file for details.
 
-## Support
+## 🔗 Links
 
-- Issues: [GitHub Issues](https://github.com/your-org/pushwork/issues)
-- Documentation: [Wiki](https://github.com/your-org/pushwork/wiki)
-- Community: [Discussions](https://github.com/your-org/pushwork/discussions)
+- **Issues**: Report bugs and request features
+- **Documentation**: Additional guides and tutorials
+- **Automerge**: Learn more about CRDT technology
+
+---
+
+**🚀 Ready to collaborate conflict-free? Get started with `pushwork init`!**
