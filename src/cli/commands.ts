@@ -78,6 +78,62 @@ export async function setupCommandContext(
 }
 
 /**
+ * Safely shutdown a repository with proper error handling
+ */
+export async function safeRepoShutdown(
+  repo: Repo,
+  context?: string
+): Promise<void> {
+  try {
+    await repo.shutdown();
+  } catch (shutdownError) {
+    // WebSocket errors during shutdown are common and non-critical
+    // Only warn about unexpected shutdown errors
+    const errorMessage =
+      shutdownError instanceof Error
+        ? shutdownError.message
+        : String(shutdownError);
+    if (
+      !errorMessage.includes("WebSocket") &&
+      !errorMessage.includes("connection was established")
+    ) {
+      console.warn(
+        `Warning: Repository shutdown failed${
+          context ? ` (${context})` : ""
+        }: ${shutdownError}`
+      );
+    }
+  }
+}
+
+/**
+ * Common progress message helpers
+ */
+export const ProgressMessages = {
+  // Setup messages
+  directoryFound: () => console.log(chalk.gray("  ✓ Sync directory found")),
+  configLoaded: () => console.log(chalk.gray("  ✓ Configuration loaded")),
+  repoConnected: () => console.log(chalk.gray("  ✓ Connected to repository")),
+
+  // Configuration display
+  syncServer: (server: string) =>
+    console.log(chalk.gray(`  ✓ Sync server: ${server}`)),
+  storageId: (id: string) => console.log(chalk.gray(`  ✓ Storage ID: ${id}`)),
+  rootUrl: (url: string) => console.log(chalk.gray(`  ✓ Root URL: ${url}`)),
+
+  // Operation completion
+  changesWritten: () =>
+    console.log(chalk.gray("  ✓ All changes written to disk")),
+  syncCompleted: (duration: number) =>
+    console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`)),
+  directoryStructureCreated: () =>
+    console.log(chalk.gray("  ✓ Created sync directory structure")),
+  configSaved: () => console.log(chalk.gray("  ✓ Saved configuration")),
+  repoCreated: () =>
+    console.log(chalk.gray("  ✓ Created Automerge repository")),
+};
+
+/**
  * Show actual content diff for a changed file
  */
 async function showContentDiff(change: DetectedChange): Promise<void> {
@@ -167,7 +223,7 @@ export async function init(
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-    console.log(chalk.gray("  ✓ Created sync directory structure"));
+    ProgressMessages.directoryStructureCreated();
 
     // Step 3: Configuration setup
     spinner.text = "Setting up configuration...";
@@ -195,9 +251,9 @@ export async function init(
     };
     await configManager.save(config);
 
-    console.log(chalk.gray("  ✓ Saved configuration"));
-    console.log(chalk.gray(`  ✓ Sync server: ${defaultSyncServer}`));
-    console.log(chalk.gray(`  ✓ Storage ID: ${defaultStorageId}`));
+    ProgressMessages.configSaved();
+    ProgressMessages.syncServer(defaultSyncServer);
+    ProgressMessages.storageId(defaultStorageId);
 
     // Step 4: Initialize Automerge repo and create root directory document
     spinner.text = "Creating root directory document...";
@@ -214,8 +270,8 @@ export async function init(
     };
     const rootHandle = repo.create(rootDoc);
 
-    console.log(chalk.gray("  ✓ Created Automerge repository"));
-    console.log(chalk.gray(`  ✓ Root directory URL: ${rootHandle.url}`));
+    ProgressMessages.repoCreated();
+    ProgressMessages.rootUrl(rootHandle.url);
 
     // Step 5: Scan existing files
     spinner.text = "Scanning existing files...";
@@ -249,16 +305,12 @@ export async function init(
     await syncEngine.sync(false);
     const duration = Date.now() - startTime;
 
-    console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`));
+    ProgressMessages.syncCompleted(duration);
 
     // Step 8: Ensure all Automerge operations are flushed to disk
     spinner.text = "Flushing changes to disk...";
-    try {
-      await repo.shutdown();
-      console.log(chalk.gray("  ✓ All changes written to disk"));
-    } catch (shutdownError) {
-      console.log(chalk.gray("  ✓ All changes written to disk"));
-    }
+    await safeRepoShutdown(repo, "init");
+    ProgressMessages.changesWritten();
 
     spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
 
@@ -288,21 +340,17 @@ export async function sync(options: SyncOptions): Promise<void> {
     const { repo, syncEngine, config, workingDir } =
       await setupCommandContext();
 
-    console.log(chalk.gray("  ✓ Sync directory found"));
-    console.log(chalk.gray("  ✓ Configuration loaded"));
-    console.log(
-      chalk.gray(
-        `  ✓ Sync server: ${config?.sync_server || "wss://sync3.automerge.org"}`
-      )
+    ProgressMessages.directoryFound();
+    ProgressMessages.configLoaded();
+    ProgressMessages.syncServer(
+      config?.sync_server || "wss://sync3.automerge.org"
     );
-    console.log(chalk.gray("  ✓ Connected to repository"));
+    ProgressMessages.repoConnected();
 
     // Show root directory URL for context
     const syncStatus = await syncEngine.getStatus();
     if (syncStatus.snapshot?.rootDirectoryUrl) {
-      console.log(
-        chalk.gray(`  ✓ Root URL: ${syncStatus.snapshot.rootDirectoryUrl}`)
-      );
+      ProgressMessages.rootUrl(syncStatus.snapshot.rootDirectoryUrl);
     }
 
     if (options.dryRun) {
@@ -442,12 +490,8 @@ export async function sync(options: SyncOptions): Promise<void> {
 
         // Ensure all changes are flushed to disk
         spinner.text = "Flushing changes to disk...";
-        try {
-          await repo.shutdown();
-        } catch (shutdownError) {
-          // Ignore shutdown errors - they don't affect sync success
-          console.log(chalk.gray("  ✓ Changes written to disk"));
-        }
+        await safeRepoShutdown(repo, "sync");
+        ProgressMessages.changesWritten();
       } else {
         spinner.fail("Sync completed with errors");
 
@@ -472,11 +516,7 @@ export async function sync(options: SyncOptions): Promise<void> {
         }
 
         // Still try to flush any partial changes
-        try {
-          await repo.shutdown();
-        } catch (shutdownError) {
-          // Ignore shutdown errors
-        }
+        await safeRepoShutdown(repo, "sync-error");
       }
     }
   } catch (error) {
@@ -542,11 +582,7 @@ export async function diff(
     }
 
     // Cleanup repo resources
-    try {
-      await repo.shutdown();
-    } catch (shutdownError) {
-      // Ignore shutdown errors
-    }
+    await safeRepoShutdown(repo, "diff");
   } catch (error) {
     console.error(chalk.red(`Diff failed: ${error}`));
     throw error;
@@ -671,11 +707,7 @@ export async function status(): Promise<void> {
     console.log(`  ${chalk.cyan("pushwork log")}      - View sync history`);
 
     // Cleanup repo resources
-    try {
-      await repo.shutdown();
-    } catch (shutdownError) {
-      // Ignore shutdown errors
-    }
+    await safeRepoShutdown(repo, "status");
   } catch (error) {
     console.error(chalk.red(`❌ Status check failed: ${error}`));
     throw error;
@@ -726,7 +758,7 @@ export async function log(
     }
 
     // Cleanup repo resources
-    await logRepo.shutdown();
+    await safeRepoShutdown(logRepo, "log");
   } catch (error) {
     console.error(chalk.red(`Log failed: ${error}`));
     throw error;
@@ -809,7 +841,7 @@ export async function clone(
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-    console.log(chalk.gray("  ✓ Created sync directory structure"));
+    ProgressMessages.directoryStructureCreated();
 
     // Step 3: Configuration setup
     spinner.text = "Setting up configuration...";
@@ -837,9 +869,9 @@ export async function clone(
     };
     await configManager.save(config);
 
-    console.log(chalk.gray("  ✓ Saved configuration"));
-    console.log(chalk.gray(`  ✓ Sync server: ${defaultSyncServer}`));
-    console.log(chalk.gray(`  ✓ Storage ID: ${defaultStorageId}`));
+    ProgressMessages.configSaved();
+    ProgressMessages.syncServer(defaultSyncServer);
+    ProgressMessages.storageId(defaultStorageId);
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
@@ -849,8 +881,8 @@ export async function clone(
       syncServerStorageId: options.syncServerStorageId,
     });
 
-    console.log(chalk.gray("  ✓ Created Automerge repository"));
-    console.log(chalk.gray(`  ✓ Root directory URL: ${rootUrl}`));
+    ProgressMessages.repoCreated();
+    ProgressMessages.rootUrl(rootUrl);
 
     // Step 5: Initialize sync engine and pull existing structure
     spinner.text = "Downloading directory structure...";
@@ -874,12 +906,8 @@ export async function clone(
 
     // Ensure all changes are flushed to disk
     spinner.text = "Flushing changes to disk...";
-    try {
-      await repo.shutdown();
-      console.log(chalk.gray("  ✓ All changes written to disk"));
-    } catch (shutdownError) {
-      console.log(chalk.gray("  ✓ All changes written to disk"));
-    }
+    await safeRepoShutdown(repo, "clone");
+    ProgressMessages.changesWritten();
 
     spinner.succeed(`Cloned sync directory to ${chalk.green(resolvedPath)}`);
 
@@ -964,11 +992,7 @@ export async function commit(
     const duration = Date.now() - startTime;
 
     if (repo) {
-      try {
-        await repo.shutdown();
-      } catch (shutdownError) {
-        console.warn(`Warning: Repository shutdown failed: ${shutdownError}`);
-      }
+      await safeRepoShutdown(repo, "commit");
     }
     spinner.succeed(`Commit completed in ${duration}ms`);
 
@@ -1002,11 +1026,7 @@ export async function commit(
     );
   } catch (error) {
     if (repo) {
-      try {
-        await repo.shutdown();
-      } catch (shutdownError) {
-        console.warn(`Warning: Repository shutdown failed: ${shutdownError}`);
-      }
+      await safeRepoShutdown(repo, "commit-error");
     }
     spinner.fail(`Commit failed: ${error}`);
     console.error(chalk.red(`Error: ${error}`));

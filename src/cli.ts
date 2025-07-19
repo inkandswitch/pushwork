@@ -14,6 +14,22 @@ import {
   url,
 } from "./cli/commands";
 
+/**
+ * Wrapper for command actions with consistent error handling
+ */
+function withErrorHandling<T extends any[], R>(
+  fn: (...args: T) => Promise<R>
+): (...args: T) => Promise<void> {
+  return async (...args: T): Promise<void> => {
+    try {
+      await fn(...args);
+    } catch (error) {
+      console.error(chalk.red(`Error: ${error}`));
+      process.exit(1);
+    }
+  };
+}
+
 const program = new Command();
 
 program
@@ -43,8 +59,8 @@ Examples:
   
 Note: Custom sync server options must always be used together.`
   )
-  .action(async (path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (path: string, options) => {
       // Validate that both sync server options are provided together
       const hasSyncServer = !!options.syncServer;
       const hasSyncServerStorageId = !!options.syncServerStorageId;
@@ -70,11 +86,8 @@ Note: Custom sync server options must always be used together.`
       }
 
       await init(path, options.syncServer, options.syncServerStorageId);
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Clone command
 program
@@ -101,8 +114,8 @@ Examples:
   
 Note: Custom sync server options must always be used together.`
   )
-  .action(async (url: string, path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (url: string, path: string, options) => {
       // Validate that both sync server options are provided together
       const hasSyncServer = !!options.syncServer;
       const hasSyncServerStorageId = !!options.syncServerStorageId;
@@ -134,11 +147,8 @@ Note: Custom sync server options must always be used together.`
         syncServer: options.syncServer,
         syncServerStorageId: options.syncServerStorageId,
       });
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Commit command
 program
@@ -146,14 +156,11 @@ program
   .description("Commit local changes (no network sync)")
   .argument("[path]", "Directory path to commit", ".")
   .option("--dry-run", "Show what would be committed without applying changes")
-  .action(async (path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (path: string, options) => {
       await commit(path, options.dryRun || false);
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Sync command
 program
@@ -161,17 +168,14 @@ program
   .description("Run full bidirectional synchronization")
   .option("--dry-run", "Show what would be done without applying changes")
   .option("-v, --verbose", "Verbose output")
-  .action(async (options) => {
-    try {
+  .action(
+    withErrorHandling(async (options) => {
       await sync({
         dryRun: options.dryRun || false,
         verbose: options.verbose || false,
       });
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Diff command
 program
@@ -180,32 +184,26 @@ program
   .argument("[path]", "Limit diff to specific path", ".")
   .option("--tool <tool>", "Use external diff tool (meld, vimdiff, etc.)")
   .option("--name-only", "Show only changed file names")
-  .action(async (path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (path: string, options) => {
       await diff(path, {
         tool: options.tool,
         nameOnly: options.nameOnly || false,
         dryRun: false,
         verbose: false,
       });
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Status command
 program
   .command("status")
   .description("Show sync status summary")
-  .action(async (options) => {
-    try {
+  .action(
+    withErrorHandling(async (options) => {
       await status();
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Log command
 program
@@ -215,8 +213,8 @@ program
   .option("--oneline", "Compact one-line per sync format")
   .option("--since <date>", "Show syncs since date")
   .option("--limit <n>", "Limit number of syncs shown", "10")
-  .action(async (path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (path: string, options) => {
       await log(path, {
         oneline: options.oneline || false,
         since: options.since,
@@ -224,11 +222,8 @@ program
         dryRun: false,
         verbose: false,
       });
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Checkout command
 program
@@ -237,18 +232,15 @@ program
   .argument("<sync-id>", "Sync ID to restore to")
   .argument("[path]", "Specific path to restore", ".")
   .option("-f, --force", "Force checkout even if there are uncommitted changes")
-  .action(async (syncId: string, path: string, options) => {
-    try {
+  .action(
+    withErrorHandling(async (syncId: string, path: string, options) => {
       await checkout(syncId, path, {
         force: options.force || false,
         dryRun: false,
         verbose: false,
       });
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // URL command
 program
@@ -264,14 +256,11 @@ Examples:
   
 Note: This command outputs only the URL, making it useful for scripts.`
   )
-  .action(async (path: string) => {
-    try {
+  .action(
+    withErrorHandling(async (path: string) => {
       await url(path);
-    } catch (error) {
-      console.error(chalk.red(`Error: ${error}`));
-      process.exit(1);
-    }
-  });
+    })
+  );
 
 // Global error handler
 process.on("unhandledRejection", (reason, promise) => {
