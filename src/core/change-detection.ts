@@ -1,4 +1,4 @@
-import { AutomergeUrl, Repo } from "@automerge/automerge-repo";
+import { AutomergeUrl, Repo, UrlHeads } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   ChangeType,
@@ -29,8 +29,8 @@ export interface DetectedChange {
   fileType: FileType;
   localContent: string | Uint8Array | null;
   remoteContent: string | Uint8Array | null;
-  localHead?: string;
-  remoteHead?: string;
+  localHead?: UrlHeads;
+  remoteHead?: UrlHeads;
 }
 
 /**
@@ -399,33 +399,11 @@ export class ChangeDetector {
    */
   private async getContentAtHead(
     url: AutomergeUrl,
-    head: string
+    heads: UrlHeads
   ): Promise<string | Uint8Array | null> {
-    try {
-      console.log(`📄 Getting content at head for: ${url}`);
-      const handle = await this.repo.find<FileDocument>(url);
-      console.log(`📄 Handle obtained for: ${url}`);
-
-      const doc = await handle.doc();
-      console.log(`📄 Document loaded for: ${url}, exists: ${!!doc}`);
-
-      if (!doc) return null;
-
-      // For now, just return current content since head-specific retrieval
-      // requires more complex implementation in Automerge 3
-      const fileDoc = doc as FileDocument;
-      console.log(
-        `📄 Content retrieved for: ${url}, length: ${
-          fileDoc.contents?.length || 0
-        }`
-      );
-      return fileDoc.contents as string | Uint8Array;
-    } catch (error) {
-      console.warn(
-        `❌ Failed to get content at head ${head} for ${url}: ${error}`
-      );
-      return null;
-    }
+    const handle = await this.repo.find<FileDocument>(url);
+    const doc = await handle.view(heads).doc();
+    return doc?.contents as string | Uint8Array;
   }
 
   /**
@@ -462,19 +440,8 @@ export class ChangeDetector {
   /**
    * Get current head of Automerge document
    */
-  private async getCurrentRemoteHead(url: AutomergeUrl): Promise<string> {
-    try {
-      const handle = await this.repo.find<FileDocument>(url);
-      const doc = await handle.doc();
-
-      if (!doc) return "";
-
-      const heads = A.getHeads(doc);
-      return heads[0] || "";
-    } catch (error) {
-      console.warn(`Failed to get current remote head: ${error}`);
-      return "";
-    }
+  private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
+    return (await this.repo.find<FileDocument>(url)).heads();
   }
 
   /**

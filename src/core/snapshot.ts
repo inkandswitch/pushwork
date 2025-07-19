@@ -1,3 +1,7 @@
+/**
+ * pvh TODO: the files & directories could be unified into a single map of entries with a type field
+ */
+
 import * as fs from "fs/promises";
 import * as path from "path";
 import {
