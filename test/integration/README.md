@@ -12,6 +12,7 @@ From the project root directory:
 
 # Run specific test suites
 ./test/run-tests.sh clone     # Clone functionality tests
+./test/run-tests.sh conflict  # CRDT conflict resolution tests
 ./test/run-tests.sh full      # Full integration tests
 ./test/run-tests.sh unit      # Unit tests
 ```
@@ -73,15 +74,49 @@ Focused test suite specifically for clone functionality:
 2. Cloned Directory Status - Operations in cloned repos
 3. Configuration Comparison - Verify settings propagation
 
+### 4. CRDT Conflict Resolution Test (`conflict-resolution-test.sh`)
+
+Specialized test demonstrating pushwork's CRDT-based conflict resolution:
+
+**Features Tested:**
+
+- ✅ Create repository with initial document
+- ✅ Clone repository to second location
+- ✅ Make simultaneous conflicting edits on both sides
+- ✅ Verify CRDT text merging preserves ALL changes
+- ✅ Validate that no data is lost during conflicts
+- ✅ Confirm true collaborative editing capabilities
+
+**Test Scenario:**
+
+1. Alice creates a document with baseline content
+2. Bob clones Alice's repository
+3. Both users make different additions to the same file simultaneously
+4. Alice syncs her changes first
+5. Bob syncs his changes (CRDT merging occurs)
+6. Final sync rounds ensure eventual consistency
+7. **Result**: Bob's repository contains BOTH Alice's AND Bob's changes
+8. **Demonstrates**: True CRDT collaborative editing without data loss
+
+**Key Findings:**
+
+- Pushwork uses character-level CRDT text merging
+- Both users' contributions are preserved automatically
+- No manual conflict resolution required
+- Repositories eventually converge to consistent state
+
 ## Test Configuration
 
 ### Required Dependencies
 
 - **Node.js** - For running pushwork CLI
 - **npm** - For building the project
-- **jq** - For JSON parsing in shell tests
 
-Install jq:
+### Optional Dependencies
+
+- **jq** - For advanced JSON parsing in configuration tests (tests will be skipped if not available)
+
+Install jq (optional):
 
 ```bash
 # macOS

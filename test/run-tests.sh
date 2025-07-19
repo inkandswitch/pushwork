@@ -38,6 +38,7 @@ show_usage() {
     echo "Test Types:"
     echo "  full        Run comprehensive integration tests (default)"
     echo "  clone       Run focused clone functionality tests"
+    echo "  conflict    Run CRDT conflict resolution tests"
     echo "  unit        Run unit tests"
     echo "  help        Show this help message"
     echo ""
@@ -45,6 +46,7 @@ show_usage() {
     echo "  $0              # Run full integration tests"
     echo "  $0 full         # Run full integration tests"
     echo "  $0 clone        # Run clone-specific tests"
+    echo "  $0 conflict     # Run CRDT conflict resolution tests"
     echo "  $0 unit         # Run unit tests"
     echo ""
 }
@@ -69,8 +71,8 @@ check_dependencies() {
     
     # Check if jq is available (optional for some tests)
     if ! command -v jq &> /dev/null; then
-        log_warning "jq is not installed - some tests may be skipped"
-        echo "To install jq:"
+        log_warning "jq is not installed - some configuration tests may be skipped"
+        echo "To install jq (optional):"
         echo "  macOS: brew install jq"
         echo "  Ubuntu/Debian: apt-get install jq"
         echo "  Other: https://stedolan.github.io/jq/download/"
@@ -118,6 +120,18 @@ run_clone_tests() {
     fi
 }
 
+# Run conflict resolution tests
+run_conflict_tests() {
+    log_info "Running conflict resolution tests..."
+    
+    if [ -f "test/integration/conflict-resolution-test.sh" ]; then
+        ./test/integration/conflict-resolution-test.sh
+    else
+        log_error "Conflict resolution test script not found"
+        exit 1
+    fi
+}
+
 # Run full integration tests
 run_full_tests() {
     log_info "Running full integration tests..."
@@ -157,6 +171,9 @@ main() {
             ;;
         "clone")
             run_clone_tests
+            ;;
+        "conflict")
+            run_conflict_tests
             ;;
         "full")
             run_full_tests

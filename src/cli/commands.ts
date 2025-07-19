@@ -934,6 +934,50 @@ export async function clone(
   }
 }
 
+/**
+ * Get the root URL for the current pushwork repository
+ */
+export async function url(targetPath = "."): Promise<void> {
+  try {
+    const resolvedPath = path.resolve(targetPath);
+
+    // Check if initialized
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
+    if (!(await pathExists(syncToolDir))) {
+      console.error(chalk.red("Directory not initialized for sync"));
+      console.error(`Run ${chalk.cyan("pushwork init .")} to get started`);
+      process.exit(1);
+    }
+
+    // Load the snapshot directly to get the URL without all the verbose output
+    const snapshotPath = path.join(syncToolDir, "snapshot.json");
+    if (!(await pathExists(snapshotPath))) {
+      console.error(chalk.red("No snapshot found"));
+      console.error(
+        chalk.gray("The repository may not be properly initialized")
+      );
+      process.exit(1);
+    }
+
+    const snapshotData = await fs.readFile(snapshotPath, "utf-8");
+    const snapshot = JSON.parse(snapshotData);
+
+    if (snapshot.rootDirectoryUrl) {
+      // Output just the URL for easy use in scripts
+      console.log(snapshot.rootDirectoryUrl);
+    } else {
+      console.error(chalk.red("No root URL found in snapshot"));
+      console.error(
+        chalk.gray("The repository may not be properly initialized")
+      );
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(chalk.red(`Failed to get URL: ${error}`));
+    process.exit(1);
+  }
+}
+
 export async function commit(
   targetPath: string,
   dryRun: boolean = false

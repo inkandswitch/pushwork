@@ -11,6 +11,7 @@ import {
   log,
   checkout,
   commit,
+  url,
 } from "./cli/commands";
 
 const program = new Command();
@@ -248,6 +249,29 @@ program
         dryRun: false,
         verbose: false,
       });
+    } catch (error) {
+      console.error(chalk.red(`Error: ${error}`));
+      process.exit(1);
+    }
+  });
+
+// URL command
+program
+  .command("url")
+  .description("Show the Automerge root URL for this repository")
+  .argument("[path]", "Directory path", ".")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork url           # Show URL for current directory
+  pushwork url ./repo    # Show URL for specific directory
+  
+Note: This command outputs only the URL, making it useful for scripts.`
+  )
+  .action(async (path: string) => {
+    try {
+      await url(path);
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
       process.exit(1);

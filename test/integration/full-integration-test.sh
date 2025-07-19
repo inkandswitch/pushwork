@@ -219,10 +219,10 @@ test_clone_functionality() {
     # First, we need a valid URL to clone from the initialized directory
     cd test-init-default
     
-    if [ -f .pushwork/snapshot.json ] && command -v jq &> /dev/null; then
-        ROOT_URL=$(jq -r '.rootDirectoryUrl' .pushwork/snapshot.json)
+    if [ -f .pushwork/snapshot.json ]; then
+        ROOT_URL=$($PUSHWORK_CMD url .)
         
-        if [ "$ROOT_URL" != "null" ] && [ -n "$ROOT_URL" ]; then
+        if [ -n "$ROOT_URL" ]; then
             cd ..
             
             # Test clone with default settings
@@ -245,10 +245,10 @@ test_clone_functionality() {
             run_test "clone with only sync-server (should fail)" "$PUSHWORK_CMD clone $ROOT_URL test-fail --sync-server $CUSTOM_SYNC_SERVER" 1
             run_test "clone with only storage-id (should fail)" "$PUSHWORK_CMD clone $ROOT_URL test-fail --sync-server-storage-id $CUSTOM_STORAGE_ID" 1
         else
-            log_warning "No valid root URL found in snapshot, skipping clone tests"
+            log_warning "No valid root URL found, skipping clone tests"
         fi
     else
-        log_warning "jq not available or snapshot missing, skipping clone tests"
+        log_warning "Snapshot missing - repository not properly initialized, skipping clone tests"
     fi
     
     cd ..
