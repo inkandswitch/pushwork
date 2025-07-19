@@ -850,8 +850,12 @@ export async function clone(
     // Step 3: Configuration setup
     spinner.text = "Setting up configuration...";
     const configManager = new ConfigManager(resolvedPath);
+    const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
+    const defaultStorageId =
+      options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
     const config: DirectoryConfig = {
-      sync_server: "wss://sync3.automerge.org",
+      sync_server: defaultSyncServer,
+      sync_server_storage_id: defaultStorageId,
       sync_enabled: true,
       defaults: {
         exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
@@ -870,12 +874,15 @@ export async function clone(
     await configManager.save(config);
 
     console.log(chalk.gray("  ✓ Saved configuration"));
-    console.log(chalk.gray("  ✓ Sync server: wss://sync3.automerge.org"));
+    console.log(chalk.gray(`  ✓ Sync server: ${defaultSyncServer}`));
+    console.log(chalk.gray(`  ✓ Storage ID: ${defaultStorageId}`));
 
     // Step 4: Initialize Automerge repo and connect to root directory
     spinner.text = "Connecting to root directory document...";
     const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
+      syncServer: options.syncServer,
+      syncServerStorageId: options.syncServerStorageId,
     });
 
     console.log(chalk.gray("  ✓ Created Automerge repository"));
@@ -887,7 +894,8 @@ export async function clone(
       repo,
       resolvedPath,
       config.defaults.exclude_patterns,
-      true // Network sync enabled for clone
+      true, // Network sync enabled for clone
+      defaultStorageId
     );
 
     // Set the root directory URL to connect to the cloned repository
@@ -914,7 +922,7 @@ export async function clone(
     console.log(`\n${chalk.bold("📂 Directory Cloned!")}`);
     console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
     console.log(`  🔗 Root URL: ${chalk.cyan(rootUrl)}`);
-    console.log(`  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")}`);
+    console.log(`  🔗 Sync server: ${chalk.blue(defaultSyncServer)}`);
     console.log(
       `\n${chalk.green("Clone complete!")} Run ${chalk.cyan(
         "pushwork sync"

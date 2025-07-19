@@ -82,12 +82,56 @@ program
   .argument("<url>", "AutomergeUrl of root directory to clone")
   .argument("<path>", "Target directory path")
   .option("--force", "Overwrite existing directory")
+  .option(
+    "--sync-server <url>",
+    "Custom sync server URL (must be used with --sync-server-storage-id)"
+  )
+  .option(
+    "--sync-server-storage-id <id>",
+    "Custom sync server storage ID (must be used with --sync-server)"
+  )
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork clone automerge:abc123 ./my-clone
+  pushwork clone automerge:abc123 ./my-clone --force
+  pushwork clone automerge:abc123 ./my-clone --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  
+Note: Custom sync server options must always be used together.`
+  )
   .action(async (url: string, path: string, options) => {
     try {
+      // Validate that both sync server options are provided together
+      const hasSyncServer = !!options.syncServer;
+      const hasSyncServerStorageId = !!options.syncServerStorageId;
+
+      if (hasSyncServer && !hasSyncServerStorageId) {
+        console.error(
+          chalk.red("Error: --sync-server requires --sync-server-storage-id")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
+      if (hasSyncServerStorageId && !hasSyncServer) {
+        console.error(
+          chalk.red("Error: --sync-server-storage-id requires --sync-server")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
       await clone(url, path, {
         force: options.force || false,
         dryRun: false,
         verbose: false,
+        syncServer: options.syncServer,
+        syncServerStorageId: options.syncServerStorageId,
       });
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
