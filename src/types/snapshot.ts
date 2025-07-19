@@ -1,4 +1,4 @@
-import { AutomergeUrl } from "@automerge/automerge-repo";
+import { AutomergeUrl, UrlHeads } from "@automerge/automerge-repo";
 
 /**
  * Tracked file entry in the sync snapshot
@@ -6,7 +6,7 @@ import { AutomergeUrl } from "@automerge/automerge-repo";
 export interface SnapshotFileEntry {
   path: string; // Full filesystem path for mapping
   url: AutomergeUrl; // Automerge document URL
-  head: string; // Document head at last sync
+  head: UrlHeads; // Document head at last sync
   extension: string; // File extension
   mimeType: string; // MIME type
 }
@@ -17,7 +17,7 @@ export interface SnapshotFileEntry {
 export interface SnapshotDirectoryEntry {
   path: string; // Full filesystem path for mapping
   url: AutomergeUrl; // Automerge document URL
-  head: string; // Document head at last sync
+  head: UrlHeads; // Document head at last sync
   entries: string[]; // List of child entry names
 }
 

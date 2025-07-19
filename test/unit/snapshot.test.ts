@@ -7,6 +7,7 @@ import {
   SnapshotFileEntry,
   SnapshotDirectoryEntry,
 } from "../../src/types";
+import { UrlHeads } from "@automerge/automerge-repo";
 
 describe("SnapshotManager", () => {
   let tmpDir: string;
@@ -68,7 +69,7 @@ describe("SnapshotManager", () => {
       const fileEntry: SnapshotFileEntry = {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:test-url" as any,
-        head: "test-head",
+        head: ["test-head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       };
@@ -89,7 +90,7 @@ describe("SnapshotManager", () => {
       const dirEntry: SnapshotDirectoryEntry = {
         path: path.join(tmpDir, "subdir"),
         url: "automerge:dir-url" as any,
-        head: "dir-head",
+        head: ["dir-head"] as UrlHeads,
         entries: ["file1.txt", "file2.txt"],
       };
 
@@ -117,7 +118,7 @@ describe("SnapshotManager", () => {
       const fileEntry: SnapshotFileEntry = {
         path: "/test/path/test.txt",
         url: "automerge:test-url" as any,
-        head: "test-head",
+        head: ["test-head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       };
@@ -140,7 +141,7 @@ describe("SnapshotManager", () => {
       const fileEntry1: SnapshotFileEntry = {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:test-url" as any,
-        head: "old-head",
+        head: ["old-head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       };
@@ -148,7 +149,7 @@ describe("SnapshotManager", () => {
       const fileEntry2: SnapshotFileEntry = {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:test-url" as any,
-        head: "new-head",
+        head: ["new-head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       };
@@ -168,7 +169,7 @@ describe("SnapshotManager", () => {
       const fileEntry: SnapshotFileEntry = {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:test-url" as any,
-        head: "test-head",
+        head: ["test-head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       };
@@ -196,7 +197,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "file1.txt", {
         path: path.join(tmpDir, "file1.txt"),
         url: "automerge:url1" as any,
-        head: "head1",
+        head: ["head1"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -204,7 +205,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "file2.txt", {
         path: path.join(tmpDir, "file2.txt"),
         url: "automerge:url2" as any,
-        head: "head2",
+        head: ["head2"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -219,14 +220,14 @@ describe("SnapshotManager", () => {
       snapshotManager.updateDirectoryEntry(snapshot, "dir1", {
         path: path.join(tmpDir, "dir1"),
         url: "automerge:url1" as any,
-        head: "head1",
+        head: ["head1"] as UrlHeads,
         entries: [],
       });
 
       snapshotManager.updateDirectoryEntry(snapshot, "dir2", {
         path: path.join(tmpDir, "dir2"),
         url: "automerge:url2" as any,
-        head: "head2",
+        head: ["head2"] as UrlHeads,
         entries: [],
       });
 
@@ -242,7 +243,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "test.txt", {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:url" as any,
-        head: "head",
+        head: ["head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -257,7 +258,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateDirectoryEntry(snapshot, "subdir", {
         path: path.join(tmpDir, "subdir"),
         url: "automerge:url" as any,
-        head: "head",
+        head: ["head"] as UrlHeads,
         entries: [],
       });
 
@@ -273,7 +274,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "file1.txt", {
         path: path.join(tmpDir, "file1.txt"),
         url: "automerge:url1" as any,
-        head: "head1",
+        head: ["head1"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -281,7 +282,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateDirectoryEntry(snapshot, "dir1", {
         path: path.join(tmpDir, "dir1"),
         url: "automerge:url2" as any,
-        head: "head2",
+        head: ["head2"] as UrlHeads,
         entries: [],
       });
 
@@ -330,7 +331,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "conflict", {
         path: path.join(tmpDir, "conflict"),
         url: "automerge:url1" as any,
-        head: "head1",
+        head: ["head1"] as UrlHeads,
         extension: "",
         mimeType: "text/plain",
       });
@@ -338,7 +339,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateDirectoryEntry(snapshot, "conflict", {
         path: path.join(tmpDir, "conflict"),
         url: "automerge:url2" as any,
-        head: "head2",
+        head: ["head2"] as UrlHeads,
         entries: [],
       });
 
@@ -359,7 +360,7 @@ describe("SnapshotManager", () => {
       await snapshotManager.backup();
 
       // Check that backup file exists
-      const syncToolDir = path.join(tmpDir, ".sync-tool");
+      const syncToolDir = path.join(tmpDir, ".pushwork");
       const files = await fs.readdir(syncToolDir);
       const backupFiles = files.filter((f) =>
         f.startsWith("snapshot.json.backup.")
@@ -380,7 +381,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(originalSnapshot, "test.txt", {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:url" as any,
-        head: "head",
+        head: ["head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -403,7 +404,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateFileEntry(snapshot, "test.txt", {
         path: path.join(tmpDir, "test.txt"),
         url: "automerge:url" as any,
-        head: "head",
+        head: ["head"] as UrlHeads,
         extension: "txt",
         mimeType: "text/plain",
       });
@@ -411,7 +412,7 @@ describe("SnapshotManager", () => {
       snapshotManager.updateDirectoryEntry(snapshot, "subdir", {
         path: path.join(tmpDir, "subdir"),
         url: "automerge:url" as any,
-        head: "head",
+        head: ["head"] as UrlHeads,
         entries: [],
       });
 

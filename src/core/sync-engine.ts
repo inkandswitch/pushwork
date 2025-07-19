@@ -3,6 +3,7 @@ import {
   Repo,
   updateText,
   DocHandle,
+  UrlHeads,
 } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
@@ -176,8 +177,6 @@ export class SyncEngine {
    * Run full bidirectional sync
    */
   async sync(dryRun = false): Promise<SyncResult> {
-    console.log(`🚀 Starting sync process (dryRun: ${dryRun})`);
-
     const result: SyncResult = {
       success: false,
       filesChanged: 0,
@@ -191,50 +190,36 @@ export class SyncEngine {
 
     try {
       // Load current snapshot
-      console.log(`📸 Loading current snapshot...`);
       let snapshot = await this.snapshotManager.load();
       if (!snapshot) {
-        console.log(`📸 No snapshot found, creating empty one`);
         snapshot = this.snapshotManager.createEmpty();
-      } else {
-        console.log(`📸 Snapshot loaded with ${snapshot.files.size} files`);
-        if (snapshot.rootDirectoryUrl) {
-          console.log(`🔗 Root directory URL: ${snapshot.rootDirectoryUrl}`);
-        }
       }
 
       // Backup snapshot before starting
       if (!dryRun) {
-        console.log(`💾 Backing up snapshot...`);
         await this.snapshotManager.backup();
       }
 
       // Detect all changes
-      console.log(`🔍 Detecting changes...`);
       const changes = await this.changeDetector.detectChanges(snapshot);
-      console.log(`🔍 Found ${changes.length} changes`);
 
       // Detect moves
-      console.log(`📦 Detecting moves...`);
       const { moves, remainingChanges } = await this.moveDetector.detectMoves(
         changes,
         snapshot,
         this.rootPath
       );
-      console.log(
-        `📦 Found ${moves.length} moves, ${remainingChanges.length} remaining changes`
-      );
+
+      if (changes.length > 0) {
+        console.log(`🔄 Syncing ${changes.length} changes...`);
+      }
 
       // Phase 1: Push local changes to remote
-      console.log(`⬆️  Phase 1: Pushing local changes...`);
       const phase1Result = await this.pushLocalChanges(
         remainingChanges,
         moves,
         snapshot,
         dryRun
-      );
-      console.log(
-        `⬆️  Phase 1 complete: ${phase1Result.filesChanged} files changed`
       );
 
       result.filesChanged += phase1Result.filesChanged;
@@ -251,23 +236,14 @@ export class SyncEngine {
             const rootHandle = await this.repo.find<DirectoryDocument>(
               snapshot.rootDirectoryUrl
             );
-            console.log(
-              `🏗️  Adding root directory to sync wait: ${snapshot.rootDirectoryUrl}`
-            );
             this.handlesToWaitOn.push(rootHandle);
           }
-
-          console.log(
-            `🔄 Total handles to wait for: ${this.handlesToWaitOn.length}`
-          );
 
           if (this.handlesToWaitOn.length > 0) {
             await waitForSync(
               this.handlesToWaitOn,
               getSyncServerStorageId(this.syncServerStorageId)
             );
-          } else {
-            console.log("⚠️  No documents to wait for network sync");
           }
         } catch (error) {
           console.error(`❌ Network sync failed: ${error}`);
@@ -275,9 +251,18 @@ export class SyncEngine {
         }
       }
 
-      // Phase 2: Pull remote changes to local
+      // Re-detect remote changes after network sync to ensure fresh state
+      // This fixes race conditions where we detect changes before server propagation
+      const freshChanges = await this.changeDetector.detectChanges(snapshot);
+      const freshRemoteChanges = freshChanges.filter(
+        (c) =>
+          c.changeType === ChangeType.REMOTE_ONLY ||
+          c.changeType === ChangeType.BOTH_CHANGED
+      );
+
+      // Phase 2: Pull remote changes to local using fresh detection
       const phase2Result = await this.pullRemoteChanges(
-        remainingChanges,
+        freshRemoteChanges,
         snapshot,
         dryRun
       );
@@ -422,7 +407,13 @@ export class SyncEngine {
     if (!change.localContent) {
       // File was deleted locally
       if (snapshotEntry) {
-        await this.deleteRemoteFile(snapshotEntry.url, dryRun);
+        console.log(`🗑️  ${change.path}`);
+        await this.deleteRemoteFile(
+          snapshotEntry.url,
+          dryRun,
+          snapshot,
+          change.path
+        );
         // Remove from directory document
         await this.removeFileFromDirectory(snapshot, change.path, dryRun);
         if (!dryRun) {
@@ -434,29 +425,34 @@ export class SyncEngine {
 
     if (!snapshotEntry) {
       // New file
-      const url = await this.createRemoteFile(change, dryRun);
-      if (!dryRun && url) {
-        // Add to appropriate directory document (maintains hierarchy)
-        await this.addFileToDirectory(snapshot, change.path, url, dryRun);
+      console.log(`➕ ${change.path}`);
+      const handle = await this.createRemoteFile(change, dryRun);
+      if (!dryRun && handle) {
+        await this.addFileToDirectory(
+          snapshot,
+          change.path,
+          handle.url,
+          dryRun
+        );
 
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
           path: normalizePath(this.rootPath + "/" + change.path),
-          url,
-          head: await this.getCurrentRemoteHead(url),
+          url: handle.url,
+          head: handle.heads(),
           extension: getFileExtension(change.path),
           mimeType: getEnhancedMimeType(change.path),
         });
       }
     } else {
       // Update existing file
+      console.log(`📝 ${change.path}`);
       await this.updateRemoteFile(
         snapshotEntry.url,
         change.localContent,
-        dryRun
+        dryRun,
+        snapshot,
+        change.path
       );
-      if (!dryRun) {
-        snapshotEntry.head = await this.getCurrentRemoteHead(snapshotEntry.url);
-      }
     }
   }
 
@@ -470,8 +466,15 @@ export class SyncEngine {
   ): Promise<void> {
     const localPath = normalizePath(this.rootPath + "/" + change.path);
 
+    if (!change.remoteHead) {
+      throw new Error(
+        `No remote head found for remote change to${change.path}`
+      );
+    }
+
     if (!change.remoteContent) {
       // File was deleted remotely
+      console.log(`🗑️  ${change.path}`);
       if (!dryRun) {
         await removePath(localPath);
         this.snapshotManager.removeFileEntry(snapshot, change.path);
@@ -480,6 +483,12 @@ export class SyncEngine {
     }
 
     // Create or update local file
+    if (change.changeType === ChangeType.REMOTE_ONLY) {
+      console.log(`⬇️  ${change.path}`);
+    } else {
+      console.log(`🔀 ${change.path}`);
+    }
+
     if (!dryRun) {
       await writeFileContent(localPath, change.remoteContent);
 
@@ -487,7 +496,7 @@ export class SyncEngine {
       const snapshotEntry = snapshot.files.get(change.path);
       if (snapshotEntry) {
         // Update existing entry
-        snapshotEntry.head = change.remoteHead || snapshotEntry.head;
+        snapshotEntry.head = change.remoteHead;
       } else {
         // Create new snapshot entry for newly discovered remote file
         // We need to find the remote file's URL from the directory hierarchy
@@ -502,9 +511,7 @@ export class SyncEngine {
               this.snapshotManager.updateFileEntry(snapshot, change.path, {
                 path: localPath,
                 url: fileEntry.url,
-                head:
-                  change.remoteHead ||
-                  (await this.getCurrentRemoteHead(fileEntry.url)),
+                head: change.remoteHead,
                 extension: getFileExtension(change.path),
                 mimeType: getEnhancedMimeType(change.path),
               });
@@ -549,7 +556,7 @@ export class SyncEngine {
   private async createRemoteFile(
     change: DetectedChange,
     dryRun: boolean
-  ): Promise<AutomergeUrl | null> {
+  ): Promise<DocHandle<FileDocument> | null> {
     if (dryRun || !change.localContent) return null;
 
     const isText = this.isTextContent(change.localContent);
@@ -567,21 +574,19 @@ export class SyncEngine {
     };
 
     const handle = this.repo.create(fileDoc);
-    console.log(`🔄 Created file document: ${handle.url} for ${change.path}`);
 
     // For text files, use updateText to set the content properly
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
         updateText(doc, ["contents"], change.localContent as string);
       });
-      console.log(`📝 Updated text content for ${change.path}`);
     }
 
     // Always track newly created files for network sync
     // (they always represent a change that needs to sync)
     this.handlesToWaitOn.push(handle);
 
-    return handle.url;
+    return handle;
   }
 
   /**
@@ -590,35 +595,45 @@ export class SyncEngine {
   private async updateRemoteFile(
     url: AutomergeUrl,
     content: string | Uint8Array,
-    dryRun: boolean
+    dryRun: boolean,
+    snapshot: SyncSnapshot,
+    filePath: string
   ): Promise<void> {
     if (dryRun) return;
 
     const handle = await this.repo.find<FileDocument>(url);
 
     // Check if content actually changed before tracking for sync
-    const currentDoc = await handle.doc();
-    const currentContent = currentDoc?.contents;
+    const doc = await handle.doc();
+    const currentContent = doc?.contents;
     const contentChanged = !isContentEqual(content, currentContent);
 
     if (!contentChanged) {
-      console.log(`📝 No content change for ${url}, skipping sync tracking`);
       return;
     }
 
-    console.log(`📝 Content changed for ${url}, tracking for sync`);
+    const snapshotEntry = snapshot.files.get(filePath);
+    const heads = snapshotEntry?.head;
 
-    handle.change((doc: FileDocument) => {
+    if (!heads) {
+      throw new Error(`No heads found for ${url}`);
+    }
+
+    handle.changeAt(heads, (doc: FileDocument) => {
       const isText = this.isTextContent(content);
-
       if (isText && typeof content === "string") {
-        // Use updateText for text content to get proper CRDT merging
         updateText(doc, ["contents"], content);
       } else {
-        // Direct assignment for binary content
         doc.contents = content;
       }
     });
+
+    if (!dryRun) {
+      snapshot.files.set(filePath, {
+        ...snapshotEntry,
+        head: handle.heads(),
+      });
+    }
 
     // Only track files that actually changed content
     this.handlesToWaitOn.push(handle);
@@ -629,7 +644,9 @@ export class SyncEngine {
    */
   private async deleteRemoteFile(
     url: AutomergeUrl,
-    dryRun: boolean
+    dryRun: boolean,
+    snapshot?: SyncSnapshot,
+    filePath?: string
   ): Promise<void> {
     if (dryRun) return;
 
@@ -637,9 +654,20 @@ export class SyncEngine {
     // They become orphaned and will be garbage collected
     // For now, we just mark them as deleted by clearing content
     const handle = await this.repo.find<FileDocument>(url);
-    handle.change((doc: FileDocument) => {
-      doc.contents = "";
-    });
+    // const doc = await handle.doc(); // no longer needed
+    let heads;
+    if (snapshot && filePath) {
+      heads = snapshot.files.get(filePath)?.head;
+    }
+    if (heads) {
+      handle.changeAt(heads, (doc: FileDocument) => {
+        doc.contents = "";
+      });
+    } else {
+      handle.change((doc: FileDocument) => {
+        doc.contents = "";
+      });
+    }
   }
 
   /**
@@ -671,34 +699,37 @@ export class SyncEngine {
     const dirHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
 
     let didChange = false;
-
-    dirHandle.change((doc: DirectoryDocument) => {
-      // Check if entry already exists
-      const existingIndex = doc.docs.findIndex(
-        (entry) => entry.name === fileName && entry.type === "file"
-      );
-      if (existingIndex === -1) {
-        doc.docs.push({
-          name: fileName,
-          type: "file",
-          url: fileUrl,
-        });
-        console.log(
-          `✅ Added ${fileName} to directory ${
-            directoryPath || "root"
-          }. Total entries: ${doc.docs.length}`
+    const snapshotEntry = snapshot.directories.get(directoryPath);
+    const heads = snapshotEntry?.head;
+    if (heads) {
+      dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
+        const existingIndex = doc.docs.findIndex(
+          (entry) => entry.name === fileName && entry.type === "file"
         );
-        didChange = true;
-      } else {
-        console.log(
-          `⚠️  File ${fileName} already exists in directory ${
-            directoryPath || "root"
-          }`
+        if (existingIndex === -1) {
+          doc.docs.push({
+            name: fileName,
+            type: "file",
+            url: fileUrl,
+          });
+          didChange = true;
+        }
+      });
+    } else {
+      dirHandle.change((doc: DirectoryDocument) => {
+        const existingIndex = doc.docs.findIndex(
+          (entry) => entry.name === fileName && entry.type === "file"
         );
-      }
-    });
-
-    // Only track directory handle if we actually made changes
+        if (existingIndex === -1) {
+          doc.docs.push({
+            name: fileName,
+            type: "file",
+            url: fileUrl,
+          });
+          didChange = true;
+        }
+      });
+    }
     if (didChange) {
       this.handlesToWaitOn.push(dirHandle);
     }
@@ -750,16 +781,12 @@ export class SyncEngine {
         );
 
         if (existingDirEntry) {
-          console.log(
-            `📁 REUSING existing directory ${currentDirName} at ${existingDirEntry.url}`
-          );
-
           // Update snapshot with discovered directory
           if (!dryRun) {
             this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
               path: normalizePath(this.rootPath + "/" + directoryPath),
               url: existingDirEntry.url,
-              head: "", // Directory documents don't have meaningful heads for our purposes
+              head: existingDirEntry.head,
               entries: [],
             });
           }
@@ -780,9 +807,6 @@ export class SyncEngine {
     };
 
     const dirHandle = this.repo.create(dirDoc);
-    console.log(
-      `📁 Created NEW directory document: ${dirHandle.url} for ${directoryPath}`
-    );
 
     // Add this directory to its parent
     const parentHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
@@ -800,16 +824,7 @@ export class SyncEngine {
           type: "folder",
           url: dirHandle.url,
         });
-        console.log(
-          `📁 Added NEW directory ${currentDirName} to parent ${
-            parentPath || "root"
-          }`
-        );
         didChange = true;
-      } else {
-        console.log(
-          `⚠️  Directory ${currentDirName} was added by another process`
-        );
       }
     });
 
@@ -824,7 +839,7 @@ export class SyncEngine {
       this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
         path: normalizePath(this.rootPath + "/" + directoryPath),
         url: dirHandle.url,
-        head: "", // Directory documents don't have meaningful heads for our purposes
+        head: dirHandle.heads(),
         entries: [],
       });
     }
@@ -866,20 +881,37 @@ export class SyncEngine {
 
       // Track this handle for network sync waiting
       this.handlesToWaitOn.push(dirHandle);
-
-      dirHandle.change((doc: DirectoryDocument) => {
-        // Find the index of the entry to remove
-        const indexToRemove = doc.docs.findIndex(
-          (entry) => entry.name === fileName && entry.type === "file"
-        );
-        if (indexToRemove !== -1) {
-          // Use splice to mutate the array in place
-          doc.docs.splice(indexToRemove, 1);
-          console.log(
-            `🗑️  Removed ${fileName} from directory ${directoryPath || "root"}`
+      const snapshotEntry = snapshot.directories.get(directoryPath);
+      const heads = snapshotEntry?.head;
+      if (heads) {
+        dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
+          const indexToRemove = doc.docs.findIndex(
+            (entry) => entry.name === fileName && entry.type === "file"
           );
-        }
-      });
+          if (indexToRemove !== -1) {
+            doc.docs.splice(indexToRemove, 1);
+            console.log(
+              `🗑️  Removed ${fileName} from directory ${
+                directoryPath || "root"
+              }`
+            );
+          }
+        });
+      } else {
+        dirHandle.change((doc: DirectoryDocument) => {
+          const indexToRemove = doc.docs.findIndex(
+            (entry) => entry.name === fileName && entry.type === "file"
+          );
+          if (indexToRemove !== -1) {
+            doc.docs.splice(indexToRemove, 1);
+            console.log(
+              `🗑️  Removed ${fileName} from directory ${
+                directoryPath || "root"
+              }`
+            );
+          }
+        });
+      }
     } catch (error) {
       console.warn(
         `Failed to remove ${fileName} from directory ${
@@ -887,23 +919,6 @@ export class SyncEngine {
         }: ${error}`
       );
       throw error;
-    }
-  }
-
-  /**
-   * Get current head of remote document
-   */
-  private async getCurrentRemoteHead(url: AutomergeUrl): Promise<string> {
-    try {
-      const handle = await this.repo.find<FileDocument>(url);
-      const doc = await handle.doc();
-
-      if (!doc) return "";
-
-      const heads = A.getHeads(doc);
-      return heads[0] || "";
-    } catch {
-      return "";
     }
   }
 

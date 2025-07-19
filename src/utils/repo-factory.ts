@@ -21,7 +21,7 @@ export async function createRepo(
   const configManager = new ConfigManager(workingDir);
   const config = await configManager.getMerged();
 
-  const syncToolDir = path.join(workingDir, ".sync-tool");
+  const syncToolDir = path.join(workingDir, ".pushwork");
   const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
 
   const repoConfig: any = { storage };

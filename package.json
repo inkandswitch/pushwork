@@ -1,10 +1,10 @@
 {
-  "name": "sync-tool",
+  "name": "pushwork",
   "version": "1.0.0",
   "description": "Bidirectional directory synchronization using Automerge CRDTs",
   "main": "dist/index.js",
   "bin": {
-    "sync-tool": "./dist/cli.js"
+    "pushwork": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

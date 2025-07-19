@@ -94,6 +94,8 @@ export interface InitOptions extends CommandOptions {
  */
 export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
+  syncServer?: string; // Custom sync server URL
+  syncServerStorageId?: string; // Custom sync server storage ID
 }
 
 /**

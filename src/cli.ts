@@ -11,12 +11,13 @@ import {
   log,
   checkout,
   commit,
+  url,
 } from "./cli/commands";
 
 const program = new Command();
 
 program
-  .name("sync-tool")
+  .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
   .version("1.0.0");
 
@@ -37,8 +38,8 @@ program
     "after",
     `
 Examples:
-  sync-tool init ./my-folder
-  sync-tool init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  pushwork init ./my-folder
+  pushwork init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
   
 Note: Custom sync server options must always be used together.`
   )
@@ -82,12 +83,56 @@ program
   .argument("<url>", "AutomergeUrl of root directory to clone")
   .argument("<path>", "Target directory path")
   .option("--force", "Overwrite existing directory")
+  .option(
+    "--sync-server <url>",
+    "Custom sync server URL (must be used with --sync-server-storage-id)"
+  )
+  .option(
+    "--sync-server-storage-id <id>",
+    "Custom sync server storage ID (must be used with --sync-server)"
+  )
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork clone automerge:abc123 ./my-clone
+  pushwork clone automerge:abc123 ./my-clone --force
+  pushwork clone automerge:abc123 ./my-clone --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  
+Note: Custom sync server options must always be used together.`
+  )
   .action(async (url: string, path: string, options) => {
     try {
+      // Validate that both sync server options are provided together
+      const hasSyncServer = !!options.syncServer;
+      const hasSyncServerStorageId = !!options.syncServerStorageId;
+
+      if (hasSyncServer && !hasSyncServerStorageId) {
+        console.error(
+          chalk.red("Error: --sync-server requires --sync-server-storage-id")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
+      if (hasSyncServerStorageId && !hasSyncServer) {
+        console.error(
+          chalk.red("Error: --sync-server-storage-id requires --sync-server")
+        );
+        console.error(
+          chalk.yellow("Both arguments must be provided together.")
+        );
+        process.exit(1);
+      }
+
       await clone(url, path, {
         force: options.force || false,
         dryRun: false,
         verbose: false,
+        syncServer: options.syncServer,
+        syncServerStorageId: options.syncServerStorageId,
       });
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
@@ -204,6 +249,29 @@ program
         dryRun: false,
         verbose: false,
       });
+    } catch (error) {
+      console.error(chalk.red(`Error: ${error}`));
+      process.exit(1);
+    }
+  });
+
+// URL command
+program
+  .command("url")
+  .description("Show the Automerge root URL for this repository")
+  .argument("[path]", "Directory path", ".")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork url           # Show URL for current directory
+  pushwork url ./repo    # Show URL for specific directory
+  
+Note: This command outputs only the URL, making it useful for scripts.`
+  )
+  .action(async (path: string) => {
+    try {
+      await url(path);
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
       process.exit(1);

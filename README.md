@@ -14,7 +14,7 @@ A bidirectional file synchronization system using Automerge CRDTs for conflict-f
 ## Installation
 
 ```bash
-npm install -g sync-tool
+npm install -g pushwork
 ```
 
 ## Quick Start
@@ -22,101 +22,101 @@ npm install -g sync-tool
 1. Initialize sync in a directory:
 
 ```bash
-sync-tool init . --remote=your-repo-id
+pushwork init . --remote=your-repo-id
 ```
 
 2. Run initial sync:
 
 ```bash
-sync-tool sync
+pushwork sync
 ```
 
 3. Check status:
 
 ```bash
-sync-tool status
+pushwork status
 ```
 
 ## Commands
 
-### `sync-tool init <path> --remote=<repo-id>`
+### `pushwork init <path> --remote=<repo-id>`
 
 Initialize sync in a directory with a remote Automerge repository.
 
 ```bash
-sync-tool init ./my-project --remote=abc123def456
+pushwork init ./my-project --remote=abc123def456
 ```
 
-### `sync-tool sync [--dry-run]`
+### `pushwork sync [--dry-run]`
 
 Run bidirectional synchronization.
 
 ```bash
 # Preview changes without applying
-sync-tool sync --dry-run
+pushwork sync --dry-run
 
 # Apply changes
-sync-tool sync
+pushwork sync
 ```
 
-### `sync-tool diff [path] [--tool=<tool>] [--name-only]`
+### `pushwork diff [path] [--tool=<tool>] [--name-only]`
 
 Show differences between local and remote state.
 
 ```bash
 # Show all changes
-sync-tool diff
+pushwork diff
 
 # Show changes for specific path
-sync-tool diff src/
+pushwork diff src/
 
 # Use external diff tool
-sync-tool diff --tool=meld
+pushwork diff --tool=meld
 
 # Show only changed file names
-sync-tool diff --name-only
+pushwork diff --name-only
 ```
 
-### `sync-tool status`
+### `pushwork status`
 
 Show sync status and pending changes.
 
 ```bash
-sync-tool status
+pushwork status
 ```
 
-### `sync-tool log [path] [--oneline]`
+### `pushwork log [path] [--oneline]`
 
 Show sync history.
 
 ```bash
 # Show full history
-sync-tool log
+pushwork log
 
 # Compact format
-sync-tool log --oneline
+pushwork log --oneline
 
 # History for specific path
-sync-tool log src/important-file.txt
+pushwork log src/important-file.txt
 ```
 
-### `sync-tool checkout <sync-id> [path]`
+### `pushwork checkout <sync-id> [path]`
 
 Restore files to state from previous sync.
 
 ```bash
 # Restore entire directory
-sync-tool checkout sync-123
+pushwork checkout sync-123
 
 # Restore specific file
-sync-tool checkout sync-123 important-file.txt
+pushwork checkout sync-123 important-file.txt
 ```
 
 ## Configuration
 
 ### Global Configuration
 
-Located at `~/.sync-tool/config.json`:
+Located at `~/.pushwork/config.json`:
 
 ```json
 {
@@ -139,7 +139,7 @@ Located at `~/.sync-tool/config.json`:
 
 ### Per-Directory Configuration
 
-Located at `<directory>/.sync-tool/config.json`:
+Located at `<directory>/.pushwork/config.json`:
 
 ```json
 {
@@ -210,7 +210,7 @@ Located at `<directory>/.sync-tool/config.json`:
 
 ### Local State
 
-- Snapshot tracking at `.sync-tool/snapshot.json`
+- Snapshot tracking at `.pushwork/snapshot.json`
 - Maps filesystem paths to Automerge document URLs and heads
 - Enables efficient change detection and resumable syncs
 
@@ -224,8 +224,8 @@ Located at `<directory>/.sync-tool/config.json`:
 ### Setup
 
 ```bash
-git clone https://github.com/your-org/sync-tool
-cd sync-tool
+git clone https://github.com/your-org/pushwork
+cd pushwork
 npm install
 npm run build
 ```
@@ -263,6 +263,6 @@ MIT License - see LICENSE file for details.
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/your-org/sync-tool/issues)
-- Documentation: [Wiki](https://github.com/your-org/sync-tool/wiki)
-- Community: [Discussions](https://github.com/your-org/sync-tool/discussions)
+- Issues: [GitHub Issues](https://github.com/your-org/pushwork/issues)
+- Documentation: [Wiki](https://github.com/your-org/pushwork/wiki)
+- Community: [Discussions](https://github.com/your-org/pushwork/discussions)

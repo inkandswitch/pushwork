@@ -1,4 +1,4 @@
-import { AutomergeUrl, Repo } from "@automerge/automerge-repo";
+import { AutomergeUrl, Repo, UrlHeads } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   ChangeType,
@@ -29,8 +29,8 @@ export interface DetectedChange {
   fileType: FileType;
   localContent: string | Uint8Array | null;
   remoteContent: string | Uint8Array | null;
-  localHead?: string;
-  remoteHead?: string;
+  localHead?: UrlHeads;
+  remoteHead?: UrlHeads;
 }
 
 /**
@@ -47,35 +47,23 @@ export class ChangeDetector {
    * Detect all changes between local filesystem and snapshot
    */
   async detectChanges(snapshot: SyncSnapshot): Promise<DetectedChange[]> {
-    console.log(`🔍 Starting change detection...`);
     const changes: DetectedChange[] = [];
 
     // Get current filesystem state
-    console.log(`📁 Scanning current filesystem state...`);
     const currentFiles = await this.getCurrentFilesystemState();
-    console.log(`📁 Found ${currentFiles.size} current files`);
 
     // Check for local changes (new, modified, deleted files)
-    console.log(`🏠 Detecting local changes...`);
     const localChanges = await this.detectLocalChanges(snapshot, currentFiles);
-    console.log(`🏠 Found ${localChanges.length} local changes`);
     changes.push(...localChanges);
 
     // Check for remote changes (changes in Automerge documents)
-    console.log(`🌐 Detecting remote changes...`);
     const remoteChanges = await this.detectRemoteChanges(snapshot);
-    console.log(`🌐 Found ${remoteChanges.length} remote changes`);
     changes.push(...remoteChanges);
 
     // Check for new remote documents not in snapshot (critical for clone scenarios)
-    console.log(`🆕 Discovering new remote documents...`);
     const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot);
-    console.log(`🆕 Found ${newRemoteDocuments.length} new remote documents`);
     changes.push(...newRemoteDocuments);
 
-    console.log(
-      `🔍 Change detection complete: ${changes.length} total changes`
-    );
     return changes;
   }
 
@@ -232,15 +220,8 @@ export class ChangeDetector {
 
     // If no root directory URL, nothing to discover
     if (!snapshot.rootDirectoryUrl) {
-      console.log(
-        "🔍 No root directory URL, skipping remote document discovery"
-      );
       return changes;
     }
-
-    console.log(
-      `🔍 Discovering remote documents from: ${snapshot.rootDirectoryUrl}`
-    );
 
     try {
       // Recursively traverse the directory hierarchy
@@ -249,10 +230,6 @@ export class ChangeDetector {
         "",
         snapshot,
         changes
-      );
-
-      console.log(
-        `🔍 Discovery complete: found ${changes.length} new remote documents`
       );
     } catch (error) {
       console.warn(`❌ Failed to discover remote documents: ${error}`);
@@ -275,25 +252,14 @@ export class ChangeDetector {
       const dirDoc = await dirHandle.doc();
 
       if (!dirDoc) {
-        console.warn(`⚠️  Directory document not found: ${directoryUrl}`);
         return;
       }
-
-      console.log(
-        `📁 Directory ${currentPath || "root"} has ${
-          dirDoc.docs.length
-        } entries`
-      );
 
       // Process each entry in the directory
       for (const entry of dirDoc.docs) {
         const entryPath = currentPath
           ? `${currentPath}/${entry.name}`
           : entry.name;
-
-        console.log(
-          `📄 Checking entry: ${entry.name} (${entry.type}) -> ${entry.url}`
-        );
 
         if (entry.type === "file") {
           // Check if this file is already tracked in the snapshot
@@ -302,8 +268,6 @@ export class ChangeDetector {
           );
 
           if (!existingEntry) {
-            console.log(`🆕 New remote file discovered: ${entryPath}`);
-
             // This is a new remote file not in our snapshot
             const remoteContent = await this.getCurrentRemoteContent(entry.url);
             const localContent = await this.getLocalContent(entryPath);
@@ -313,10 +277,6 @@ export class ChangeDetector {
               ? ChangeType.BOTH_CHANGED
               : ChangeType.REMOTE_ONLY;
 
-            console.log(
-              `  📝 Change type: ${changeType}, has local: ${!!localContent}, has remote: ${!!remoteContent}`
-            );
-
             changes.push({
               path: entryPath,
               changeType,
@@ -325,12 +285,9 @@ export class ChangeDetector {
               remoteContent,
               remoteHead: await this.getCurrentRemoteHead(entry.url),
             });
-          } else {
-            console.log(`✅ File ${entryPath} already tracked in snapshot`);
           }
         } else if (entry.type === "folder") {
           // Recursively process subdirectory
-          console.log(`📁 Recursing into subdirectory: ${entryPath}`);
           await this.discoverRemoteDocumentsRecursive(
             entry.url,
             entryPath,
@@ -399,33 +356,11 @@ export class ChangeDetector {
    */
   private async getContentAtHead(
     url: AutomergeUrl,
-    head: string
+    heads: UrlHeads
   ): Promise<string | Uint8Array | null> {
-    try {
-      console.log(`📄 Getting content at head for: ${url}`);
-      const handle = await this.repo.find<FileDocument>(url);
-      console.log(`📄 Handle obtained for: ${url}`);
-
-      const doc = await handle.doc();
-      console.log(`📄 Document loaded for: ${url}, exists: ${!!doc}`);
-
-      if (!doc) return null;
-
-      // For now, just return current content since head-specific retrieval
-      // requires more complex implementation in Automerge 3
-      const fileDoc = doc as FileDocument;
-      console.log(
-        `📄 Content retrieved for: ${url}, length: ${
-          fileDoc.contents?.length || 0
-        }`
-      );
-      return fileDoc.contents as string | Uint8Array;
-    } catch (error) {
-      console.warn(
-        `❌ Failed to get content at head ${head} for ${url}: ${error}`
-      );
-      return null;
-    }
+    const handle = await this.repo.find<FileDocument>(url);
+    const doc = await handle.view(heads).doc();
+    return doc?.contents as string | Uint8Array;
   }
 
   /**
@@ -435,21 +370,12 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      console.log(`🌐 Getting current remote content for: ${url}`);
       const handle = await this.repo.find<FileDocument>(url);
-      console.log(`🌐 Handle obtained for: ${url}`);
-
       const doc = await handle.doc();
-      console.log(`🌐 Document loaded for: ${url}, exists: ${!!doc}`);
 
       if (!doc) return null;
 
       const fileDoc = doc as FileDocument;
-      console.log(
-        `🌐 Content retrieved for: ${url}, length: ${
-          fileDoc.contents?.length || 0
-        }`
-      );
       return fileDoc.contents as string | Uint8Array;
     } catch (error) {
       console.warn(
@@ -462,19 +388,8 @@ export class ChangeDetector {
   /**
    * Get current head of Automerge document
    */
-  private async getCurrentRemoteHead(url: AutomergeUrl): Promise<string> {
-    try {
-      const handle = await this.repo.find<FileDocument>(url);
-      const doc = await handle.doc();
-
-      if (!doc) return "";
-
-      const heads = A.getHeads(doc);
-      return heads[0] || "";
-    } catch (error) {
-      console.warn(`Failed to get current remote head: ${error}`);
-      return "";
-    }
+  private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
+    return (await this.repo.find<FileDocument>(url)).heads();
   }
 
   /**

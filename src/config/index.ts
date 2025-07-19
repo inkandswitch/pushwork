@@ -5,12 +5,12 @@ import { GlobalConfig, DirectoryConfig } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
 
 /**
- * Configuration manager for sync-tool
+ * Configuration manager for pushwork
  */
 export class ConfigManager {
-  private static readonly GLOBAL_CONFIG_DIR = ".sync-tool";
+  private static readonly GLOBAL_CONFIG_DIR = ".pushwork";
   private static readonly CONFIG_FILENAME = "config.json";
-  private static readonly LOCAL_CONFIG_DIR = ".sync-tool";
+  private static readonly LOCAL_CONFIG_DIR = ".pushwork";
 
   constructor(private workingDir?: string) {}
 
@@ -125,7 +125,7 @@ export class ConfigManager {
       sync_enabled: true,
       sync_server_storage_id: "3760df37-a4c6-4f66-9ecd-732039a9385d",
       defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".sync-tool"],
+        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
         large_file_threshold: "100MB",
       },
       diff: {
@@ -217,7 +217,7 @@ export class ConfigManager {
         "node_modules",
         "*.tmp",
         ".DS_Store",
-        ".sync-tool",
+        ".pushwork",
       ],
       large_file_threshold: "100MB",
       sync_server: "wss://sync3.automerge.org",
