@@ -567,7 +567,7 @@ export class SyncEngine {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
       mimeType: getMimeType(change.path),
-      contents: isText ? "" : change.localContent, // Empty string for text, actual content for binary
+      content: isText ? "" : change.localContent, // Empty string for text, actual content for binary
       metadata: {
         permissions: 0o644,
       },
@@ -578,7 +578,7 @@ export class SyncEngine {
     // For text files, use updateText to set the content properly
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
-        updateText(doc, ["contents"], change.localContent as string);
+        updateText(doc, ["content"], change.localContent as string);
       });
     }
 
@@ -605,7 +605,7 @@ export class SyncEngine {
 
     // Check if content actually changed before tracking for sync
     const doc = await handle.doc();
-    const currentContent = doc?.contents;
+    const currentContent = doc?.content;
     const contentChanged = !isContentEqual(content, currentContent);
 
     if (!contentChanged) {
@@ -622,9 +622,9 @@ export class SyncEngine {
     handle.changeAt(heads, (doc: FileDocument) => {
       const isText = this.isTextContent(content);
       if (isText && typeof content === "string") {
-        updateText(doc, ["contents"], content);
+        updateText(doc, ["content"], content);
       } else {
-        doc.contents = content;
+        doc.content = content;
       }
     });
 
@@ -661,11 +661,11 @@ export class SyncEngine {
     }
     if (heads) {
       handle.changeAt(heads, (doc: FileDocument) => {
-        doc.contents = "";
+        doc.content = "";
       });
     } else {
       handle.change((doc: FileDocument) => {
-        doc.contents = "";
+        doc.content = "";
       });
     }
   }

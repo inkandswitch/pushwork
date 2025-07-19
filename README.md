@@ -294,7 +294,7 @@ Pushwork uses **Automerge CRDTs** to automatically resolve conflicts:
   name: string;
   extension: string;
   mimeType: string;
-  contents: Text | Uint8Array;
+  content: Text | Uint8Array;
 }
 ```
 

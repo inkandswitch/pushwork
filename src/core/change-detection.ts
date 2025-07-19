@@ -360,7 +360,7 @@ export class ChangeDetector {
   ): Promise<string | Uint8Array | null> {
     const handle = await this.repo.find<FileDocument>(url);
     const doc = await handle.view(heads).doc();
-    return doc?.contents as string | Uint8Array;
+    return doc?.content as string | Uint8Array;
   }
 
   /**
@@ -376,7 +376,7 @@ export class ChangeDetector {
       if (!doc) return null;
 
       const fileDoc = doc as FileDocument;
-      return fileDoc.contents as string | Uint8Array;
+      return fileDoc.content as string | Uint8Array;
     } catch (error) {
       console.warn(
         `❌ Failed to get current remote content for ${url}: ${error}`

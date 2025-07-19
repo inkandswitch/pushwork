@@ -25,7 +25,7 @@ export interface FileDocument {
   name: string;
   extension: string;
   mimeType: string;
-  contents: string | Uint8Array;
+  content: string | Uint8Array;
   metadata: {
     permissions: number;
   };
