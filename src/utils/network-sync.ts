@@ -22,19 +22,27 @@ export async function waitForSync(
     return;
   }
 
-  console.log(`🔄 Waiting for ${handlesToWaitOn.length} documents to sync...`);
-  console.log(`📡 Using sync server storage ID: ${syncServerStorageId}`);
+  // Debug logging only in verbose mode (can be controlled via env var later)
+  const verbose = false;
 
-  // Debug: Log document URLs and initial heads
-  handlesToWaitOn.forEach((handle, i) => {
-    const localHeads = handle.heads();
-    const syncInfo = handle.getSyncInfo(syncServerStorageId);
-    const remoteHeads = syncInfo?.lastHeads;
-    console.log(`  📄 Document ${i + 1}: ${handle.url}`);
-    console.log(`    🏠 Local heads: ${JSON.stringify(localHeads)}`);
-    console.log(`    🌐 Remote heads: ${JSON.stringify(remoteHeads)}`);
-    console.log(`    ✅ Already synced: ${A.equals(localHeads, remoteHeads)}`);
-  });
+  if (verbose) {
+    console.log(
+      `🔄 Waiting for ${handlesToWaitOn.length} documents to sync...`
+    );
+    console.log(`📡 Using sync server storage ID: ${syncServerStorageId}`);
+
+    handlesToWaitOn.forEach((handle, i) => {
+      const localHeads = handle.heads();
+      const syncInfo = handle.getSyncInfo(syncServerStorageId);
+      const remoteHeads = syncInfo?.lastHeads;
+      console.log(`  📄 Document ${i + 1}: ${handle.url}`);
+      console.log(`    🏠 Local heads: ${JSON.stringify(localHeads)}`);
+      console.log(`    🌐 Remote heads: ${JSON.stringify(remoteHeads)}`);
+      console.log(
+        `    ✅ Already synced: ${A.equals(localHeads, remoteHeads)}`
+      );
+    });
+  }
 
   const promises = handlesToWaitOn.map(
     (handle, index) =>
@@ -58,14 +66,18 @@ export async function waitForSync(
           const syncInfo = handle.getSyncInfo(syncServerStorageId);
           const remoteHeads = syncInfo?.lastHeads;
 
-          console.log(`🔍 Checking sync for ${handle.url}:`);
-          console.log(`  Local heads: ${JSON.stringify(newHeads)}`);
-          console.log(`  Remote heads: ${JSON.stringify(remoteHeads)}`);
-          console.log(`  Heads equal: ${A.equals(newHeads, remoteHeads)}`);
+          if (verbose) {
+            console.log(`🔍 Checking sync for ${handle.url}:`);
+            console.log(`  Local heads: ${JSON.stringify(newHeads)}`);
+            console.log(`  Remote heads: ${JSON.stringify(remoteHeads)}`);
+            console.log(`  Heads equal: ${A.equals(newHeads, remoteHeads)}`);
+          }
 
           // If the remote heads are already up to date, we can resolve immediately
           if (A.equals(newHeads, remoteHeads)) {
-            console.log(`✅ Document ${index + 1} synced: ${handle.url}`);
+            if (verbose) {
+              console.log(`✅ Document ${index + 1} synced: ${handle.url}`);
+            }
             clearTimeout(timeout);
             resolve();
             return true;
@@ -86,37 +98,45 @@ export async function waitForSync(
           storageId: StorageId;
           heads: any;
         }) => {
-          console.log(`📡 Received remote heads event for ${handle.url}:`);
-          console.log(`  Event storage ID: ${storageId}`);
-          console.log(`  Expected storage ID: ${syncServerStorageId}`);
-          console.log(`  Event heads: ${JSON.stringify(heads)}`);
-          console.log(
-            `  Current local heads: ${JSON.stringify(handle.heads())}`
-          );
+          if (verbose) {
+            console.log(`📡 Received remote heads event for ${handle.url}:`);
+            console.log(`  Event storage ID: ${storageId}`);
+            console.log(`  Expected storage ID: ${syncServerStorageId}`);
+            console.log(`  Event heads: ${JSON.stringify(heads)}`);
+            console.log(
+              `  Current local heads: ${JSON.stringify(handle.heads())}`
+            );
+          }
 
           if (
             storageId === syncServerStorageId &&
             A.equals(handle.heads(), heads)
           ) {
-            console.log(
-              `✅ Document ${index + 1} synced via event: ${handle.url}`
-            );
+            if (verbose) {
+              console.log(
+                `✅ Document ${index + 1} synced via event: ${handle.url}`
+              );
+            }
             clearTimeout(timeout);
             handle.off("remote-heads", onRemoteHeads);
             resolve();
-          } else {
+          } else if (verbose) {
             console.log(`❌ Heads/storage mismatch for ${handle.url}`);
           }
         };
 
-        console.log(`👂 Listening for remote-heads events on ${handle.url}`);
+        if (verbose) {
+          console.log(`👂 Listening for remote-heads events on ${handle.url}`);
+        }
         handle.on("remote-heads", onRemoteHeads);
       })
   );
 
   try {
     await Promise.all(promises);
-    console.log("✅ All documents synced to network");
+    if (verbose) {
+      console.log("✅ All documents synced to network");
+    }
   } catch (error) {
     console.error(`❌ Sync wait failed: ${error}`);
     throw error;

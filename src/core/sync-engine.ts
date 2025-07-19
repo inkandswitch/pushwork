@@ -177,8 +177,6 @@ export class SyncEngine {
    * Run full bidirectional sync
    */
   async sync(dryRun = false): Promise<SyncResult> {
-    console.log(`🚀 Starting sync process (dryRun: ${dryRun})`);
-
     const result: SyncResult = {
       success: false,
       filesChanged: 0,
@@ -192,50 +190,36 @@ export class SyncEngine {
 
     try {
       // Load current snapshot
-      console.log(`📸 Loading current snapshot...`);
       let snapshot = await this.snapshotManager.load();
       if (!snapshot) {
-        console.log(`📸 No snapshot found, creating empty one`);
         snapshot = this.snapshotManager.createEmpty();
-      } else {
-        console.log(`📸 Snapshot loaded with ${snapshot.files.size} files`);
-        if (snapshot.rootDirectoryUrl) {
-          console.log(`🔗 Root directory URL: ${snapshot.rootDirectoryUrl}`);
-        }
       }
 
       // Backup snapshot before starting
       if (!dryRun) {
-        console.log(`💾 Backing up snapshot...`);
         await this.snapshotManager.backup();
       }
 
       // Detect all changes
-      console.log(`🔍 Detecting changes...`);
       const changes = await this.changeDetector.detectChanges(snapshot);
-      console.log(`🔍 Found ${changes.length} changes`);
 
       // Detect moves
-      console.log(`📦 Detecting moves...`);
       const { moves, remainingChanges } = await this.moveDetector.detectMoves(
         changes,
         snapshot,
         this.rootPath
       );
-      console.log(
-        `📦 Found ${moves.length} moves, ${remainingChanges.length} remaining changes`
-      );
+
+      if (changes.length > 0) {
+        console.log(`🔄 Syncing ${changes.length} changes...`);
+      }
 
       // Phase 1: Push local changes to remote
-      console.log(`⬆️  Phase 1: Pushing local changes...`);
       const phase1Result = await this.pushLocalChanges(
         remainingChanges,
         moves,
         snapshot,
         dryRun
-      );
-      console.log(
-        `⬆️  Phase 1 complete: ${phase1Result.filesChanged} files changed`
       );
 
       result.filesChanged += phase1Result.filesChanged;
@@ -252,23 +236,14 @@ export class SyncEngine {
             const rootHandle = await this.repo.find<DirectoryDocument>(
               snapshot.rootDirectoryUrl
             );
-            console.log(
-              `🏗️  Adding root directory to sync wait: ${snapshot.rootDirectoryUrl}`
-            );
             this.handlesToWaitOn.push(rootHandle);
           }
-
-          console.log(
-            `🔄 Total handles to wait for: ${this.handlesToWaitOn.length}`
-          );
 
           if (this.handlesToWaitOn.length > 0) {
             await waitForSync(
               this.handlesToWaitOn,
               getSyncServerStorageId(this.syncServerStorageId)
             );
-          } else {
-            console.log("⚠️  No documents to wait for network sync");
           }
         } catch (error) {
           console.error(`❌ Network sync failed: ${error}`);
@@ -278,14 +253,12 @@ export class SyncEngine {
 
       // Re-detect remote changes after network sync to ensure fresh state
       // This fixes race conditions where we detect changes before server propagation
-      console.log(`🔄 Re-detecting remote changes with fresh sync state...`);
       const freshChanges = await this.changeDetector.detectChanges(snapshot);
       const freshRemoteChanges = freshChanges.filter(
         (c) =>
           c.changeType === ChangeType.REMOTE_ONLY ||
           c.changeType === ChangeType.BOTH_CHANGED
       );
-      console.log(`🔄 Found ${freshRemoteChanges.length} fresh remote changes`);
 
       // Phase 2: Pull remote changes to local using fresh detection
       const phase2Result = await this.pullRemoteChanges(
@@ -434,6 +407,7 @@ export class SyncEngine {
     if (!change.localContent) {
       // File was deleted locally
       if (snapshotEntry) {
+        console.log(`🗑️  ${change.path}`);
         await this.deleteRemoteFile(
           snapshotEntry.url,
           dryRun,
@@ -451,6 +425,7 @@ export class SyncEngine {
 
     if (!snapshotEntry) {
       // New file
+      console.log(`➕ ${change.path}`);
       const handle = await this.createRemoteFile(change, dryRun);
       if (!dryRun && handle) {
         await this.addFileToDirectory(
@@ -470,6 +445,7 @@ export class SyncEngine {
       }
     } else {
       // Update existing file
+      console.log(`📝 ${change.path}`);
       await this.updateRemoteFile(
         snapshotEntry.url,
         change.localContent,
@@ -498,6 +474,7 @@ export class SyncEngine {
 
     if (!change.remoteContent) {
       // File was deleted remotely
+      console.log(`🗑️  ${change.path}`);
       if (!dryRun) {
         await removePath(localPath);
         this.snapshotManager.removeFileEntry(snapshot, change.path);
@@ -506,6 +483,12 @@ export class SyncEngine {
     }
 
     // Create or update local file
+    if (change.changeType === ChangeType.REMOTE_ONLY) {
+      console.log(`⬇️  ${change.path}`);
+    } else {
+      console.log(`🔀 ${change.path}`);
+    }
+
     if (!dryRun) {
       await writeFileContent(localPath, change.remoteContent);
 
@@ -590,14 +573,12 @@ export class SyncEngine {
     };
 
     const handle = this.repo.create(fileDoc);
-    console.log(`🔄 Created file document: ${handle.url} for ${change.path}`);
 
     // For text files, use updateText to set the content properly
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
         updateText(doc, ["contents"], change.localContent as string);
       });
-      console.log(`📝 Updated text content for ${change.path}`);
     }
 
     // Always track newly created files for network sync
@@ -627,11 +608,8 @@ export class SyncEngine {
     const contentChanged = !isContentEqual(content, currentContent);
 
     if (!contentChanged) {
-      console.log(`📝 No content change for ${url}, skipping sync tracking`);
       return;
     }
-
-    console.log(`📝 Content changed for ${url}, tracking for sync`);
 
     const snapshotEntry = snapshot.files.get(filePath);
     const heads = snapshotEntry?.head;
@@ -733,18 +711,7 @@ export class SyncEngine {
             type: "file",
             url: fileUrl,
           });
-          console.log(
-            `✅ Added ${fileName} to directory ${
-              directoryPath || "root"
-            }. Total entries: ${doc.docs.length}`
-          );
           didChange = true;
-        } else {
-          console.log(
-            `⚠️  File ${fileName} already exists in directory ${
-              directoryPath || "root"
-            }`
-          );
         }
       });
     } else {
@@ -758,18 +725,7 @@ export class SyncEngine {
             type: "file",
             url: fileUrl,
           });
-          console.log(
-            `✅ Added ${fileName} to directory ${
-              directoryPath || "root"
-            }. Total entries: ${doc.docs.length}`
-          );
           didChange = true;
-        } else {
-          console.log(
-            `⚠️  File ${fileName} already exists in directory ${
-              directoryPath || "root"
-            }`
-          );
         }
       });
     }
@@ -824,10 +780,6 @@ export class SyncEngine {
         );
 
         if (existingDirEntry) {
-          console.log(
-            `📁 REUSING existing directory ${currentDirName} at ${existingDirEntry.url}`
-          );
-
           // Update snapshot with discovered directory
           if (!dryRun) {
             this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
@@ -853,9 +805,6 @@ export class SyncEngine {
     };
 
     const dirHandle = this.repo.create(dirDoc);
-    console.log(
-      `📁 Created NEW directory document: ${dirHandle.url} for ${directoryPath}`
-    );
 
     // Add this directory to its parent
     const parentHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
@@ -873,16 +822,7 @@ export class SyncEngine {
           type: "folder",
           url: dirHandle.url,
         });
-        console.log(
-          `📁 Added NEW directory ${currentDirName} to parent ${
-            parentPath || "root"
-          }`
-        );
         didChange = true;
-      } else {
-        console.log(
-          `⚠️  Directory ${currentDirName} was added by another process`
-        );
       }
     });
 
