@@ -24,7 +24,6 @@ import {
   removePath,
   movePath,
   ensureDirectoryExists,
-  getMimeType,
   getFileExtension,
   normalizePath,
   getRelativePath,
@@ -566,7 +565,7 @@ export class SyncEngine {
       "@patchwork": { type: "file" },
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
-      mimeType: getMimeType(change.path),
+      mimeType: getEnhancedMimeType(change.path),
       content: isText ? "" : change.localContent, // Empty string for text, actual content for binary
       metadata: {
         permissions: 0o644,

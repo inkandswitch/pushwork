@@ -79,7 +79,7 @@ export async function isTextFile(filePath: string): Promise<boolean> {
 export async function readFileContent(
   filePath: string
 ): Promise<string | Uint8Array> {
-  const isText = await isTextFile(filePath);
+  const isText = await isEnhancedTextFile(filePath);
 
   if (isText) {
     return await fs.readFile(filePath, "utf8");

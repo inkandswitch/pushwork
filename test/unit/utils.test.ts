@@ -122,6 +122,50 @@ describe("File System Utilities", () => {
       expect(result).toBe(content);
     });
 
+    it("should read TypeScript files as strings", async () => {
+      const filePath = path.join(tmpDir, "component.ts");
+      const content = "interface User { name: string; age: number; }";
+      await fs.writeFile(filePath, content);
+
+      const result = await readFileContent(filePath);
+
+      expect(typeof result).toBe("string");
+      expect(result).toBe(content);
+    });
+
+    it("should read TSX files as strings", async () => {
+      const filePath = path.join(tmpDir, "Component.tsx");
+      const content = "export const App = () => <div>Hello World</div>;";
+      await fs.writeFile(filePath, content);
+
+      const result = await readFileContent(filePath);
+
+      expect(typeof result).toBe("string");
+      expect(result).toBe(content);
+    });
+
+    it("should read Vue files as strings", async () => {
+      const filePath = path.join(tmpDir, "App.vue");
+      const content = "<template><div>{{ message }}</div></template>";
+      await fs.writeFile(filePath, content);
+
+      const result = await readFileContent(filePath);
+
+      expect(typeof result).toBe("string");
+      expect(result).toBe(content);
+    });
+
+    it("should read SCSS files as strings", async () => {
+      const filePath = path.join(tmpDir, "styles.scss");
+      const content = "$primary: #007bff; .btn { color: $primary; }";
+      await fs.writeFile(filePath, content);
+
+      const result = await readFileContent(filePath);
+
+      expect(typeof result).toBe("string");
+      expect(result).toBe(content);
+    });
+
     it("should read binary files as Uint8Array", async () => {
       const filePath = path.join(tmpDir, "test.bin");
       const binaryContent = Buffer.from([0x00, 0x01, 0x02, 0x03]);

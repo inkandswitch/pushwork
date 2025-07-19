@@ -9,6 +9,15 @@ const CUSTOM_MIME_TYPES: Record<string, string> = {
   ".ts": "text/typescript",
   ".tsx": "text/tsx",
 
+  // Config file formats
+  ".json": "application/json",
+  ".yaml": "text/yaml",
+  ".yml": "text/yaml",
+  ".toml": "application/toml",
+  ".ini": "text/plain",
+  ".conf": "text/plain",
+  ".config": "text/plain",
+
   // Vue.js single file components
   ".vue": "text/vue",
 
@@ -45,12 +54,6 @@ const CUSTOM_MIME_TYPES: Record<string, string> = {
   // Documentation formats
   ".mdx": "text/markdown",
   ".rst": "text/x-rst",
-
-  // Configuration files
-  ".toml": "application/toml",
-  ".ini": "text/plain",
-  ".conf": "text/plain",
-  ".config": "text/plain",
 
   // Docker files
   Dockerfile: "text/plain",

@@ -244,5 +244,23 @@ div { color: blue; }
       expect(enhancedMime).toBe("text/typescript");
       expect(enhancedIsText).toBe(true); // Empty files should be treated as text
     });
+
+    it("should ensure TypeScript files are read as strings (integration test)", async () => {
+      const tsFile = path.join(testDir, "integration.ts");
+      const tsContent = "interface Config { apiUrl: string; timeout: number; }";
+      await fs.writeFile(tsFile, tsContent);
+
+      // Import readFileContent here to test integration
+      const { readFileContent } = await import("../../src/utils");
+
+      const result = await readFileContent(tsFile);
+
+      // Critical: TypeScript files MUST be read as strings
+      expect(typeof result).toBe("string");
+      expect(result).toBe(tsContent);
+
+      // This test would have FAILED before our fix when readFileContent
+      // used isTextFile() instead of isEnhancedTextFile()
+    });
   });
 });

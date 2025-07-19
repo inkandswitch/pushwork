@@ -39,6 +39,7 @@ show_usage() {
     echo "  full        Run comprehensive integration tests (default)"
     echo "  clone       Run focused clone functionality tests"
     echo "  conflict    Run CRDT conflict resolution tests"
+    echo "  deletion    Run deletion sync behavior tests"
     echo "  unit        Run unit tests"
     echo "  help        Show this help message"
     echo ""
@@ -132,6 +133,18 @@ run_conflict_tests() {
     fi
 }
 
+# Run deletion sync tests
+run_deletion_tests() {
+    log_info "Running deletion sync behavior tests..."
+    
+    if [ -f "test/integration/deletion-sync-test-simple.sh" ]; then
+        ./test/integration/deletion-sync-test-simple.sh
+    else
+        log_error "Deletion sync test script not found"
+        exit 1
+    fi
+}
+
 # Run full integration tests
 run_full_tests() {
     log_info "Running full integration tests..."
@@ -174,6 +187,9 @@ main() {
             ;;
         "conflict")
             run_conflict_tests
+            ;;
+        "deletion")
+            run_deletion_tests
             ;;
         "full")
             run_full_tests

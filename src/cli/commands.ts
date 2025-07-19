@@ -37,7 +37,8 @@ export interface CommandContext {
 export async function setupCommandContext(
   workingDir: string = process.cwd(),
   customSyncServer?: string,
-  customStorageId?: string
+  customStorageId?: string,
+  enableNetwork: boolean = true
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
 
@@ -53,19 +54,19 @@ export async function setupCommandContext(
   const configManager = new ConfigManager(resolvedPath);
   const config = await configManager.getMerged();
 
-  // Create repo with network enabled by default (will gracefully degrade if no connectivity)
+  // Create repo with configurable network setting
   const repo = await createRepo(resolvedPath, {
-    enableNetwork: true,
+    enableNetwork,
     syncServer: customSyncServer,
     syncServerStorageId: customStorageId,
   });
 
-  // Create sync engine with network sync enabled
+  // Create sync engine with configurable network sync
   const syncEngine = new SyncEngine(
     repo,
     resolvedPath,
     config.defaults.exclude_patterns,
-    true, // Always enable network sync - will handle failures gracefully
+    enableNetwork,
     config.sync_server_storage_id
   );
 
@@ -533,8 +534,13 @@ export async function diff(
   options: DiffOptions
 ): Promise<void> {
   try {
-    // Setup shared context
-    const { repo, syncEngine } = await setupCommandContext(targetPath);
+    // Setup shared context with network disabled for diff check
+    const { repo, syncEngine } = await setupCommandContext(
+      targetPath,
+      undefined,
+      undefined,
+      false
+    );
     const preview = await syncEngine.previewChanges();
 
     if (options.nameOnly) {
@@ -596,8 +602,13 @@ export async function status(): Promise<void> {
   try {
     const spinner = ora("Loading sync status...").start();
 
-    // Setup shared context
-    const { repo, syncEngine, workingDir } = await setupCommandContext();
+    // Setup shared context with network disabled for status check
+    const { repo, syncEngine, workingDir } = await setupCommandContext(
+      process.cwd(),
+      undefined,
+      undefined,
+      false
+    );
     const syncStatus = await syncEngine.getStatus();
 
     spinner.stop();
@@ -722,12 +733,12 @@ export async function log(
   options: LogOptions
 ): Promise<void> {
   try {
-    // Setup shared context
+    // Setup shared context with network disabled for log check
     const {
       repo: logRepo,
       syncEngine: logSyncEngine,
       workingDir,
-    } = await setupCommandContext(targetPath);
+    } = await setupCommandContext(targetPath, undefined, undefined, false);
     const logStatus = await logSyncEngine.getStatus();
 
     if (logStatus.snapshot?.rootDirectoryUrl) {
@@ -978,9 +989,14 @@ export async function commit(
   let repo: Repo | undefined;
 
   try {
-    // Setup shared context (will always have network enabled now, but commit is local-only operation)
+    // Setup shared context with network disabled for local-only commit
     spinner.text = "Setting up commit context...";
-    const context = await setupCommandContext(targetPath);
+    const context = await setupCommandContext(
+      targetPath,
+      undefined,
+      undefined,
+      false
+    );
     repo = context.repo;
     const syncEngine = context.syncEngine;
     spinner.succeed("Connected to repository");
