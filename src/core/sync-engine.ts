@@ -276,9 +276,20 @@ export class SyncEngine {
         }
       }
 
-      // Phase 2: Pull remote changes to local
+      // Re-detect remote changes after network sync to ensure fresh state
+      // This fixes race conditions where we detect changes before server propagation
+      console.log(`🔄 Re-detecting remote changes with fresh sync state...`);
+      const freshChanges = await this.changeDetector.detectChanges(snapshot);
+      const freshRemoteChanges = freshChanges.filter(
+        (c) =>
+          c.changeType === ChangeType.REMOTE_ONLY ||
+          c.changeType === ChangeType.BOTH_CHANGED
+      );
+      console.log(`🔄 Found ${freshRemoteChanges.length} fresh remote changes`);
+
+      // Phase 2: Pull remote changes to local using fresh detection
       const phase2Result = await this.pullRemoteChanges(
-        remainingChanges,
+        freshRemoteChanges,
         snapshot,
         dryRun
       );
