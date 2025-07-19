@@ -21,6 +21,63 @@ import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 
 /**
+ * Shared context that commands can use
+ */
+export interface CommandContext {
+  repo: Repo;
+  syncEngine: SyncEngine;
+  config: DirectoryConfig;
+  workingDir: string;
+}
+
+/**
+ * Shared pre-action that ensures repository and sync engine are properly initialized
+ * This function always works, with or without network connectivity
+ */
+export async function setupCommandContext(
+  workingDir: string = process.cwd(),
+  customSyncServer?: string,
+  customStorageId?: string
+): Promise<CommandContext> {
+  const resolvedPath = path.resolve(workingDir);
+
+  // Check if initialized
+  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  if (!(await pathExists(syncToolDir))) {
+    throw new Error(
+      'Directory not initialized for sync. Run "pushwork init" first.'
+    );
+  }
+
+  // Load configuration
+  const configManager = new ConfigManager(resolvedPath);
+  const config = await configManager.getMerged();
+
+  // Create repo with network enabled by default (will gracefully degrade if no connectivity)
+  const repo = await createRepo(resolvedPath, {
+    enableNetwork: true,
+    syncServer: customSyncServer,
+    syncServerStorageId: customStorageId,
+  });
+
+  // Create sync engine with network sync enabled
+  const syncEngine = new SyncEngine(
+    repo,
+    resolvedPath,
+    config.defaults.exclude_patterns,
+    true, // Always enable network sync - will handle failures gracefully
+    config.sync_server_storage_id
+  );
+
+  return {
+    repo,
+    syncEngine,
+    config,
+    workingDir: resolvedPath,
+  };
+}
+
+/**
  * Show actual content diff for a changed file
  */
 async function showContentDiff(change: DetectedChange): Promise<void> {
@@ -226,46 +283,18 @@ export async function sync(options: SyncOptions): Promise<void> {
   const spinner = ora("Starting sync operation...").start();
 
   try {
-    const currentPath = process.cwd();
-
-    // Step 1: Validation
-    spinner.text = "Validating sync setup...";
-    const syncToolDir = path.join(currentPath, ".pushwork");
-    if (!(await pathExists(syncToolDir))) {
-      spinner.fail(
-        'Directory not initialized for sync. Run "pushwork init" first.'
-      );
-      return;
-    }
+    // Step 1: Setup shared context
+    spinner.text = "Setting up sync context...";
+    const { repo, syncEngine, config, workingDir } =
+      await setupCommandContext();
 
     console.log(chalk.gray("  ✓ Sync directory found"));
-
-    // Step 2: Load configuration
-    spinner.text = "Loading configuration...";
-    const syncConfigManager = new ConfigManager(currentPath);
-    const syncConfig = await syncConfigManager.getMerged();
-
-    console.log(chalk.gray(`  ✓ Configuration loaded`));
+    console.log(chalk.gray("  ✓ Configuration loaded"));
     console.log(
       chalk.gray(
-        `  ✓ Sync server: ${
-          syncConfig?.sync_server || "wss://sync3.automerge.org"
-        }`
+        `  ✓ Sync server: ${config?.sync_server || "wss://sync3.automerge.org"}`
       )
     );
-
-    // Step 3: Initialize Automerge repo
-    spinner.text = "Connecting to Automerge repository...";
-    const repo = await createRepo(currentPath, {
-      enableNetwork: !options.localOnly,
-    });
-    const syncEngine = new SyncEngine(
-      repo,
-      currentPath,
-      syncConfig.defaults.exclude_patterns,
-      !options.localOnly // Pass network sync setting
-    );
-
     console.log(chalk.gray("  ✓ Connected to repository"));
 
     // Show root directory URL for context
@@ -286,7 +315,7 @@ export async function sync(options: SyncOptions): Promise<void> {
       spinner.succeed("Change analysis completed");
 
       console.log(`\n${chalk.bold("📊 Change Analysis")} (${analysisTime}ms):`);
-      console.log(chalk.gray(`  Directory: ${currentPath}`));
+      console.log(chalk.gray(`  Directory: ${workingDir}`));
       console.log(chalk.gray(`  Analysis time: ${analysisTime}ms`));
 
       if (preview.changes.length === 0 && preview.moves.length === 0) {
@@ -464,31 +493,8 @@ export async function diff(
   options: DiffOptions
 ): Promise<void> {
   try {
-    const resolvedPath = path.resolve(targetPath);
-
-    // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".pushwork");
-    if (!(await pathExists(syncToolDir))) {
-      console.log(chalk.red("Directory not initialized for sync"));
-      return;
-    }
-
-    // Load configuration
-    const diffConfigManager = new ConfigManager(resolvedPath);
-    const diffConfig = await diffConfigManager.getMerged();
-
-    // Initialize Automerge repo
-    const repo = await createRepo(resolvedPath, {
-      enableNetwork: !options.localOnly,
-    });
-
-    // Get changes
-    const syncEngine = new SyncEngine(
-      repo,
-      resolvedPath,
-      diffConfig.defaults.exclude_patterns,
-      !options.localOnly // Pass network sync setting
-    );
+    // Setup shared context
+    const { repo, syncEngine } = await setupCommandContext(targetPath);
     const preview = await syncEngine.previewChanges();
 
     if (options.nameOnly) {
@@ -550,34 +556,12 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(localOnly: boolean = false): Promise<void> {
+export async function status(): Promise<void> {
   try {
-    const currentPath = process.cwd();
-
-    // Check if initialized
-    const syncToolDir = path.join(currentPath, ".pushwork");
-    if (!(await pathExists(syncToolDir))) {
-      console.log(chalk.red("❌ Directory not initialized for sync"));
-      console.log(`   Run ${chalk.cyan("pushwork init .")} to get started`);
-      return;
-    }
-
     const spinner = ora("Loading sync status...").start();
 
-    // Initialize Automerge repo
-    const statusConfigManager = new ConfigManager(currentPath);
-    const statusConfig = await statusConfigManager.getMerged();
-    const repo = await createRepo(currentPath, {
-      enableNetwork: !localOnly,
-    });
-
-    // Get status
-    const syncEngine = new SyncEngine(
-      repo,
-      currentPath,
-      statusConfig.defaults.exclude_patterns,
-      !localOnly // Pass network sync setting
-    );
+    // Setup shared context
+    const { repo, syncEngine, workingDir } = await setupCommandContext();
     const syncStatus = await syncEngine.getStatus();
 
     spinner.stop();
@@ -587,8 +571,8 @@ export async function status(localOnly: boolean = false): Promise<void> {
 
     // Directory information
     console.log(`\n${chalk.bold("📁 Directory Information:")}`);
-    console.log(`  📂 Path: ${chalk.blue(currentPath)}`);
-    console.log(`  🔧 Config: ${path.join(currentPath, ".pushwork")}`);
+    console.log(`  📂 Path: ${chalk.blue(workingDir)}`);
+    console.log(`  🔧 Config: ${path.join(workingDir, ".pushwork")}`);
 
     // Show root directory URL if available
     if (syncStatus.snapshot?.rootDirectoryUrl) {
@@ -638,7 +622,7 @@ export async function status(localOnly: boolean = false): Promise<void> {
     // Configuration
     console.log(`\n${chalk.bold("⚙️  Configuration:")}`);
 
-    const statusConfigManager2 = new ConfigManager(currentPath);
+    const statusConfigManager2 = new ConfigManager(workingDir);
     const statusConfig2 = await statusConfigManager2.load();
 
     if (statusConfig2?.sync_server) {
@@ -706,27 +690,12 @@ export async function log(
   options: LogOptions
 ): Promise<void> {
   try {
-    const resolvedPath = path.resolve(targetPath);
-
-    // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".pushwork");
-    if (!(await pathExists(syncToolDir))) {
-      console.log(chalk.red("Directory not initialized for sync"));
-      return;
-    }
-
-    // Load configuration and show root URL
-    const logConfigManager = new ConfigManager(resolvedPath);
-    const logConfig = await logConfigManager.getMerged();
-    const logRepo = await createRepo(resolvedPath, {
-      enableNetwork: true,
-    });
-    const logSyncEngine = new SyncEngine(
-      logRepo,
-      resolvedPath,
-      logConfig.defaults.exclude_patterns,
-      true // Network sync enabled for log
-    );
+    // Setup shared context
+    const {
+      repo: logRepo,
+      syncEngine: logSyncEngine,
+      workingDir,
+    } = await setupCommandContext(targetPath);
     const logStatus = await logSyncEngine.getStatus();
 
     if (logStatus.snapshot?.rootDirectoryUrl) {
@@ -742,7 +711,7 @@ export async function log(
     console.log(chalk.bold("Sync History:"));
 
     // Check for snapshot files
-    const snapshotPath = path.join(syncToolDir, "snapshot.json");
+    const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
     if (await pathExists(snapshotPath)) {
       const stats = await fs.stat(snapshotPath);
 
@@ -773,14 +742,8 @@ export async function checkout(
   options: CheckoutOptions
 ): Promise<void> {
   try {
-    const resolvedPath = path.resolve(targetPath);
-
-    // Check if initialized
-    const syncToolDir = path.join(resolvedPath, ".pushwork");
-    if (!(await pathExists(syncToolDir))) {
-      console.log(chalk.red("Directory not initialized for sync"));
-      return;
-    }
+    // Setup shared context
+    const { workingDir } = await setupCommandContext(targetPath);
 
     // TODO: Implement checkout functionality
     // This would involve:
@@ -790,7 +753,7 @@ export async function checkout(
 
     console.log(chalk.yellow(`Checkout functionality not yet implemented`));
     console.log(`Would restore to sync: ${syncId}`);
-    console.log(`Target path: ${resolvedPath}`);
+    console.log(`Target path: ${workingDir}`);
   } catch (error) {
     console.error(chalk.red(`Checkout failed: ${error}`));
     throw error;
@@ -987,21 +950,12 @@ export async function commit(
   let repo: Repo | undefined;
 
   try {
-    // Load configuration
-    spinner.text = "Loading configuration...";
-    const configManager = new ConfigManager(targetPath);
-    const config = await configManager.load();
-    spinner.succeed("Configuration loaded");
-
-    // Create repository (local only - no network)
-    spinner.text = "Connecting to local repository...";
-    repo = await createRepo(targetPath, {
-      enableNetwork: false,
-    });
-    spinner.succeed("Connected to local repository");
-
-    // Create sync engine
-    const syncEngine = new SyncEngine(repo, targetPath, [], false); // No network
+    // Setup shared context (will always have network enabled now, but commit is local-only operation)
+    spinner.text = "Setting up commit context...";
+    const context = await setupCommandContext(targetPath);
+    repo = context.repo;
+    const syncEngine = context.syncEngine;
+    spinner.succeed("Connected to repository");
 
     // Run local commit only
     spinner.text = "Committing local changes...";

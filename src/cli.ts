@@ -160,14 +160,12 @@ program
   .command("sync")
   .description("Run full bidirectional synchronization")
   .option("--dry-run", "Show what would be done without applying changes")
-  .option("--local-only", "Disable network sync (local-only mode)")
   .option("-v, --verbose", "Verbose output")
   .action(async (options) => {
     try {
       await sync({
         dryRun: options.dryRun || false,
         verbose: options.verbose || false,
-        localOnly: options.localOnly || false,
       });
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
@@ -182,7 +180,6 @@ program
   .argument("[path]", "Limit diff to specific path", ".")
   .option("--tool <tool>", "Use external diff tool (meld, vimdiff, etc.)")
   .option("--name-only", "Show only changed file names")
-  .option("--local-only", "Disable network sync (local-only mode)")
   .action(async (path: string, options) => {
     try {
       await diff(path, {
@@ -190,7 +187,6 @@ program
         nameOnly: options.nameOnly || false,
         dryRun: false,
         verbose: false,
-        localOnly: options.localOnly || false,
       });
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
@@ -202,10 +198,9 @@ program
 program
   .command("status")
   .description("Show sync status summary")
-  .option("--local-only", "Disable network sync (local-only mode)")
   .action(async (options) => {
     try {
-      await status(options.localOnly || false);
+      await status();
     } catch (error) {
       console.error(chalk.red(`Error: ${error}`));
       process.exit(1);
