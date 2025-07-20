@@ -266,23 +266,29 @@ export class ChangeDetector {
           const existingEntry = snapshot.files.get(entryPath);
 
           if (!existingEntry) {
-            // This is a new remote file not in our snapshot
-            const remoteContent = await this.getCurrentRemoteContent(entry.url);
+            // This is a remote file not in our snapshot
             const localContent = await this.getLocalContent(entryPath);
 
-            // Determine if there's a local file with the same path
-            const changeType = localContent
-              ? ChangeType.BOTH_CHANGED
-              : ChangeType.REMOTE_ONLY;
+            // Only create changes for files that exist locally
+            // Files that don't exist locally AND aren't in snapshot should be ignored
+            // (they were likely deleted and directory documents haven't been cleaned up yet)
+            if (localContent) {
+              // File exists locally but not in snapshot - this is a new local file
+              const remoteContent = await this.getCurrentRemoteContent(
+                entry.url
+              );
 
-            changes.push({
-              path: entryPath,
-              changeType,
-              fileType: await this.getFileTypeFromContent(remoteContent),
-              localContent,
-              remoteContent,
-              remoteHead: await this.getCurrentRemoteHead(entry.url),
-            });
+              changes.push({
+                path: entryPath,
+                changeType: ChangeType.BOTH_CHANGED,
+                fileType: await this.getFileTypeFromContent(remoteContent),
+                localContent,
+                remoteContent,
+                remoteHead: await this.getCurrentRemoteHead(entry.url),
+              });
+            }
+            // If file doesn't exist locally and isn't in snapshot, ignore it
+            // This prevents infinite sync loops with ghost entries from stale directory documents
           }
         } else if (entry.type === "folder") {
           // Recursively process subdirectory

@@ -40,6 +40,7 @@ show_usage() {
     echo "  clone       Run focused clone functionality tests"
     echo "  conflict    Run CRDT conflict resolution tests"
     echo "  deletion    Run deletion sync behavior tests"
+    echo "  deletion-behavior Run comprehensive deletion behavior tests"
     echo "  unit        Run unit tests"
     echo "  help        Show this help message"
     echo ""
@@ -145,6 +146,18 @@ run_deletion_tests() {
     fi
 }
 
+# Run comprehensive deletion behavior tests
+run_deletion_behavior_tests() {
+    log_info "Running comprehensive deletion behavior tests..."
+    
+    if [ -f "test/integration/deletion-behavior-test.sh" ]; then
+        ./test/integration/deletion-behavior-test.sh
+    else
+        log_error "Deletion behavior test script not found"
+        exit 1
+    fi
+}
+
 # Run full integration tests
 run_full_tests() {
     log_info "Running full integration tests..."
@@ -190,6 +203,9 @@ main() {
             ;;
         "deletion")
             run_deletion_tests
+            ;;
+        "deletion-behavior")
+            run_deletion_behavior_tests
             ;;
         "full")
             run_full_tests
