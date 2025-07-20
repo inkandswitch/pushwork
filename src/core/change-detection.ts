@@ -175,7 +175,7 @@ export class ChangeDetector {
         snapshotEntry.url
       );
 
-      if (currentRemoteHead !== snapshotEntry.head) {
+      if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
         // Remote document has changed
         const currentRemoteContent = await this.getCurrentRemoteContent(
           snapshotEntry.url
@@ -263,9 +263,7 @@ export class ChangeDetector {
 
         if (entry.type === "file") {
           // Check if this file is already tracked in the snapshot
-          const existingEntry = Array.from(snapshot.files.values()).find(
-            (snapshotEntry) => snapshotEntry.url === entry.url
-          );
+          const existingEntry = snapshot.files.get(entryPath);
 
           if (!existingEntry) {
             // This is a new remote file not in our snapshot
