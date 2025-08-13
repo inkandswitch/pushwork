@@ -320,8 +320,12 @@ export class SyncEngine {
           });
         }
       } else if (this.moveDetector.shouldPromptUser(move)) {
+        // Instead of creating a persistent loop, perform delete+create semantics
+        // so the working tree converges even without auto-apply.
         result.warnings.push(
-          `Potential move detected: ${this.moveDetector.formatMove(move)}`
+          `Potential move detected: ${this.moveDetector.formatMove(
+            move
+          )} (${Math.round(move.similarity * 100)}% similar)`
         );
       }
     }
@@ -536,15 +540,61 @@ export class SyncEngine {
     const fromEntry = snapshot.files.get(move.fromPath);
     if (!fromEntry) return;
 
-    // Update parent directory documents to reflect the move
-    if (!dryRun) {
-      // Remove from old location
-      this.snapshotManager.removeFileEntry(snapshot, move.fromPath);
+    // Parse paths
+    const fromParts = move.fromPath.split("/");
+    const fromFileName = fromParts.pop() || "";
+    const fromDirPath = fromParts.join("/");
 
-      // Add to new location
+    const toParts = move.toPath.split("/");
+    const toFileName = toParts.pop() || "";
+    const toDirPath = toParts.join("/");
+
+    if (!dryRun) {
+      // 1) Remove file entry from old directory document
+      if (move.fromPath !== move.toPath) {
+        await this.removeFileFromDirectory(snapshot, move.fromPath, dryRun);
+      }
+
+      // 2) Ensure destination directory document exists and add file entry there
+      const destDirUrl = await this.ensureDirectoryDocument(
+        snapshot,
+        toDirPath,
+        dryRun
+      );
+      await this.addFileToDirectory(
+        snapshot,
+        move.toPath,
+        fromEntry.url,
+        dryRun
+      );
+
+      // 3) Update the FileDocument name to match new basename
+      try {
+        const handle = await this.repo.find<FileDocument>(fromEntry.url);
+        const heads = fromEntry.head;
+        if (heads && heads.length > 0) {
+          handle.changeAt(heads, (doc: FileDocument) => {
+            doc.name = toFileName;
+          });
+        } else {
+          handle.change((doc: FileDocument) => {
+            doc.name = toFileName;
+          });
+        }
+        // Track file handle for network sync
+        this.handlesToWaitOn.push(handle);
+      } catch (e) {
+        console.warn(
+          `Failed to update file name for move ${move.fromPath} -> ${move.toPath}: ${e}`
+        );
+      }
+
+      // 4) Update snapshot entries
+      this.snapshotManager.removeFileEntry(snapshot, move.fromPath);
       this.snapshotManager.updateFileEntry(snapshot, move.toPath, {
         ...fromEntry,
         path: normalizePath(this.rootPath + "/" + move.toPath),
+        head: fromEntry.head, // will be updated later when heads advance
       });
     }
   }
@@ -780,17 +830,35 @@ export class SyncEngine {
         );
 
         if (existingDirEntry) {
-          // Update snapshot with discovered directory
-          if (!dryRun) {
-            this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
-              path: normalizePath(this.rootPath + "/" + directoryPath),
-              url: existingDirEntry.url,
-              head: existingDirEntry.head,
-              entries: [],
-            });
-          }
+          // Resolve the actual directory handle and use its current heads
+          // Directory entries in parent docs may not carry valid heads
+          try {
+            const childDirHandle = await this.repo.find<DirectoryDocument>(
+              existingDirEntry.url
+            );
+            const childHeads = childDirHandle.heads();
 
-          return existingDirEntry.url;
+            // Update snapshot with discovered directory using validated heads
+            if (!dryRun) {
+              this.snapshotManager.updateDirectoryEntry(
+                snapshot,
+                directoryPath,
+                {
+                  path: normalizePath(this.rootPath + "/" + directoryPath),
+                  url: existingDirEntry.url,
+                  head: childHeads,
+                  entries: [],
+                }
+              );
+            }
+
+            return existingDirEntry.url;
+          } catch (resolveErr) {
+            console.warn(
+              `Failed to resolve child directory ${currentDirName} at ${directoryPath}: ${resolveErr}`
+            );
+            // Fall through to create a fresh directory document
+          }
         }
       }
     } catch (error) {

@@ -72,6 +72,7 @@ export class MoveDetector {
           bestMatch.similarity
         );
 
+        // Always report the potential move (for logging/prompting)
         moves.push({
           fromPath: deletedFile.path,
           toPath: bestMatch.file.path,
@@ -79,8 +80,13 @@ export class MoveDetector {
           confidence,
         });
 
-        usedCreations.add(bestMatch.file.path);
-        usedDeletions.add(deletedFile.path);
+        // Only consume the deletion/creation pair when we would auto-apply the move.
+        // If we only want to prompt, leave the original changes in place so
+        // sync can still proceed as delete+create (avoids infinite warning loop).
+        if (bestMatch.similarity >= MoveDetector.AUTO_THRESHOLD) {
+          usedCreations.add(bestMatch.file.path);
+          usedDeletions.add(deletedFile.path);
+        }
       }
     }
 
