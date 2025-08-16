@@ -1,0 +1,44 @@
+{
+  "name": "@pushwork/browser-sync",
+  "version": "0.1.0",
+  "description": "Browser folder sync tool for Patchwork",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "push": "pnpm build && patchwork push",
+    "watch": "nodemon --watch src -e js,tsx,ts,css,json --exec 'pnpm build && pnpm push'"
+  },
+  "keywords": [
+    "patchwork",
+    "sync",
+    "filesystem",
+    "browser",
+    "automerge"
+  ],
+  "author": "Pushwork Team",
+  "dependencies": {
+    "@automerge/automerge-repo": "2.0.0-alpha.23",
+    "@automerge/automerge-repo-react-hooks": "2.0.0-alpha.23",
+    "@patchwork/sdk": "file:../../../patchwork/sdk",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "pushwork": "file:../../",
+    "lucide-react": "^0.460.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@vitejs/plugin-react": "^4.3.1",
+    "nodemon": "^3.1.9",
+    "typescript": "^5.2.0",
+    "vite": "^5.3.4",
+    "vite-plugin-css-injected-by-js": "^3.5.2",
+    "vite-plugin-top-level-await": "^1.4.2",
+    "vite-plugin-wasm": "^3.3.0"
+  },
+  "license": "MIT"
+}
