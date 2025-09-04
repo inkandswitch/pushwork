@@ -29,6 +29,8 @@ pnpm run build
 pnpm link
 ```
 
+These steps require pnpm v10.
+
 ### Basic Usage
 
 1. **Initialize a new repository:**
