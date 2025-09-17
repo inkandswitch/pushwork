@@ -268,27 +268,40 @@ export class ChangeDetector {
           if (!existingEntry) {
             // This is a remote file not in our snapshot
             const localContent = await this.getLocalContent(entryPath);
+            const remoteContent = await this.getCurrentRemoteContent(entry.url);
+            const remoteHead = await this.getCurrentRemoteHead(entry.url);
 
-            // Only create changes for files that exist locally
-            // Files that don't exist locally AND aren't in snapshot should be ignored
-            // (they were likely deleted and directory documents haven't been cleaned up yet)
-            if (localContent) {
-              // File exists locally but not in snapshot - this is a new local file
-              const remoteContent = await this.getCurrentRemoteContent(
-                entry.url
-              );
-
+            if (localContent && remoteContent) {
+              // File exists both locally and remotely but not in snapshot
               changes.push({
                 path: entryPath,
                 changeType: ChangeType.BOTH_CHANGED,
                 fileType: await this.getFileTypeFromContent(remoteContent),
                 localContent,
                 remoteContent,
-                remoteHead: await this.getCurrentRemoteHead(entry.url),
+                remoteHead,
+              });
+            } else if (localContent && !remoteContent) {
+              // File exists locally but not remotely (shouldn't happen in this flow)
+              changes.push({
+                path: entryPath,
+                changeType: ChangeType.LOCAL_ONLY,
+                fileType: await this.getFileTypeFromContent(localContent),
+                localContent,
+                remoteContent: null,
+              });
+            } else if (!localContent && remoteContent) {
+              // File exists remotely but not locally - this is what we need for clone!
+              changes.push({
+                path: entryPath,
+                changeType: ChangeType.REMOTE_ONLY,
+                fileType: await this.getFileTypeFromContent(remoteContent),
+                localContent: null,
+                remoteContent,
+                remoteHead,
               });
             }
-            // If file doesn't exist locally and isn't in snapshot, ignore it
-            // This prevents infinite sync loops with ghost entries from stale directory documents
+            // Only ignore if neither local nor remote content exists (ghost entry)
           }
         } else if (entry.type === "folder") {
           // Recursively process subdirectory

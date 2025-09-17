@@ -12,10 +12,9 @@ export const plugins: Plugin<any>[] = [
     icon: "FolderSync",
     supportedDataTypes: ["folder"],
     async load() {
-      const SimpleBrowserSyncTool = (
-        await import("./components/SimpleBrowserSyncTool")
-      ).default;
-      return { EditorComponent: SimpleBrowserSyncTool };
+      const BrowserSyncTool = (await import("./components/BrowserSyncTool"))
+        .default;
+      return { EditorComponent: BrowserSyncTool };
     },
   },
 ];

@@ -20,9 +20,6 @@ dependencies:
   '@automerge/automerge-repo-storage-nodefs':
     specifier: ^2.0.0
     version: 2.1.0
-  browser-fs-access:
-    specifier: ^0.35.0
-    version: 0.35.0
   chalk:
     specifier: ^5.3.0
     version: 5.4.1
@@ -1327,10 +1324,6 @@ packages:
     dependencies:
       fill-range: 7.1.1
     dev: true
-
-  /browser-fs-access@0.35.0:
-    resolution: {integrity: sha512-sLoadumpRfsjprP8XzVjpQc0jK8yqHBx0PtUTGYj2fftT+P/t+uyDAQdMgGAPKD011in/O+YYGh7fIs0oG/viw==}
-    dev: false
 
   /browserslist@4.25.1:
     resolution: {integrity: sha512-KGj0KoOMXLpSNkkEI6Z6mShmQy0bc1I+T7K9N81k4WWMrfz+6fQ6es80B/YLAeRoKvjYE1YSHHOW1qe9xIVzHw==}

@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef } from "react";
+import "../polyfills";
+import React, { useState, useRef, useEffect } from "react";
 import { useDocHandle } from "@automerge/automerge-repo-react-hooks";
 import { EditorProps } from "@patchwork/sdk";
+// Simple browser-only sync - no pushwork imports needed
 import {
   FolderOpen,
   RefreshCw,
@@ -13,13 +15,8 @@ import {
   Upload,
 } from "lucide-react";
 import { FolderDoc, SyncStatus, SyncSettings } from "../types";
-import {
-  createBrowserSync,
-  isFileSystemAccessSupported,
-} from "pushwork/dist/browser";
 
 interface BrowserSyncState {
-  syncInstance: any;
   directoryHandle: any;
   status: SyncStatus;
   settings: SyncSettings;
@@ -36,8 +33,15 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
   docUrl,
 }) => {
   const handle = useDocHandle<FolderDoc>(docUrl);
+
+  // Debug logging
+  console.log("🔍 SimpleBrowserSyncTool initialized with:", {
+    docUrl,
+    handle,
+    doc: handle?.doc(),
+    isReady: handle?.isReady(),
+  });
   const [state, setState] = useState<BrowserSyncState>({
-    syncInstance: null,
     directoryHandle: null,
     status: {
       isConnected: false,
@@ -58,68 +62,43 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
     showSettings: false,
   });
 
-  const autoSyncInterval = useRef<NodeJS.Timeout | null>(null);
-
-  // Initialize sync instance on mount
+  // Monitor document readiness
   useEffect(() => {
-    const initializeSync = async () => {
-      try {
-        const syncInstance = await createBrowserSync({
-          syncServerUrl: state.settings.syncServerUrl,
-          syncServerStorageId: state.settings.syncServerStorageId,
-        });
+    console.log("📡 Handle changed:", {
+      handle,
+      doc: handle?.doc(),
+    });
+  }, [handle]);
 
-        setState((prev) => ({
-          ...prev,
-          syncInstance,
-          status: { ...prev.status, isConnected: true },
-        }));
-      } catch (error) {
-        setState((prev) => ({
-          ...prev,
-          status: {
-            ...prev.status,
-            error: `Failed to initialize sync: ${error}`,
-          },
-        }));
-      }
-    };
+  const isFileSystemAccessSupported = (): boolean => {
+    try {
+      const hasAPI =
+        typeof window !== "undefined" &&
+        typeof (window as any).showDirectoryPicker === "function";
+      // Note: We only need showDirectoryPicker for folder sync, not showFilePicker
 
-    initializeSync();
-  }, []);
+      // File System Access API requires HTTPS or localhost
+      const isSecureContext =
+        window.isSecureContext ||
+        window.location.protocol === "https:" ||
+        window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1";
 
-  // Setup auto-sync if enabled
-  useEffect(() => {
-    if (
-      state.settings.autoSync &&
-      state.syncInstance &&
-      state.directoryHandle
-    ) {
-      autoSyncInterval.current = setInterval(() => {
-        handleSync();
-      }, state.settings.syncInterval * 1000);
-    } else if (autoSyncInterval.current) {
-      clearInterval(autoSyncInterval.current);
-      autoSyncInterval.current = null;
+      return hasAPI && isSecureContext;
+    } catch (error) {
+      console.error("Error checking File System Access API support:", error);
+      return false;
     }
-
-    return () => {
-      if (autoSyncInterval.current) {
-        clearInterval(autoSyncInterval.current);
-      }
-    };
-  }, [
-    state.settings.autoSync,
-    state.settings.syncInterval,
-    state.syncInstance,
-    state.directoryHandle,
-  ]);
+  };
 
   const handleSelectFolder = async () => {
-    if (!state.syncInstance) {
+    if (!isFileSystemAccessSupported()) {
       setState((prev) => ({
         ...prev,
-        status: { ...prev.status, error: "Sync instance not initialized" },
+        status: {
+          ...prev.status,
+          error: "File System Access API not supported",
+        },
       }));
       return;
     }
@@ -130,10 +109,14 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
         status: { ...prev.status, error: null },
       }));
 
-      const directoryHandle = await state.syncInstance.pickFolder();
+      console.log("📁 Opening directory picker...");
+      const directoryHandle = await (window as any).showDirectoryPicker({
+        mode: "readwrite",
+        id: "pushwork-sync-folder",
+      });
 
-      // Get initial file list
-      const statusResult = await state.syncInstance.getStatus();
+      console.log("✅ Directory selected:", directoryHandle.name);
+      console.log("🔍 Directory handle details:", directoryHandle);
 
       setState((prev) => ({
         ...prev,
@@ -141,12 +124,12 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
         status: {
           ...prev.status,
           hasDirectoryAccess: true,
-          filesCount: statusResult.browserState?.rootHandle ? 1 : 0,
+          isConnected: true,
         },
       }));
 
       // Load file list
-      await updateFileList();
+      await updateFileList(directoryHandle);
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -159,23 +142,31 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
     }
   };
 
-  const updateFileList = async () => {
-    if (!state.syncInstance || !state.directoryHandle) return;
+  const updateFileList = async (directoryHandle: any) => {
+    if (!directoryHandle) return;
 
     try {
-      const filesystem = state.syncInstance.filesystem;
-      const entries = await filesystem.listDirectory(
-        state.directoryHandle,
-        true,
-        state.settings.excludePatterns
-      );
+      const files: any[] = [];
 
-      const files = entries.map((entry: any) => ({
-        name: entry.path,
-        type: entry.type === "directory" ? "directory" : "file",
-        size: entry.size,
-        lastModified: entry.mtime,
-      }));
+      // Simple directory listing without recursion for demo
+      for await (const [name, handle] of directoryHandle.entries()) {
+        if (handle.kind === "file") {
+          const file = await handle.getFile();
+          files.push({
+            name,
+            type: "file",
+            size: file.size,
+            lastModified: new Date(file.lastModified),
+          });
+        } else if (handle.kind === "directory") {
+          files.push({
+            name,
+            type: "directory",
+            size: 0,
+            lastModified: new Date(),
+          });
+        }
+      }
 
       setState((prev) => ({
         ...prev,
@@ -188,7 +179,7 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
   };
 
   const handleSync = async () => {
-    if (!state.syncInstance || !state.directoryHandle) {
+    if (!state.directoryHandle) {
       setState((prev) => ({
         ...prev,
         status: { ...prev.status, error: "No folder selected" },
@@ -202,7 +193,63 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
     }));
 
     try {
-      const result = await state.syncInstance.sync();
+      console.log("🔄 Starting simple browser sync...");
+      console.log("📁 Directory handle:", state.directoryHandle);
+      console.log("📄 Patchwork doc URL:", docUrl);
+
+      if (!handle?.doc()) {
+        throw new Error("No Patchwork document available");
+      }
+
+      // Read files from the directory using File System Access API
+      const entries: Array<{
+        name: string;
+        type: "file" | "folder";
+        url?: string;
+      }> = [];
+
+      for await (const [name, entryHandle] of state.directoryHandle.entries()) {
+        console.log(`📂 Found: ${name} (${entryHandle.kind})`);
+
+        if (entryHandle.kind === "file") {
+          entries.push({
+            name,
+            type: "file",
+            url: `file://${name}`, // Placeholder URL - in real implementation would create actual Automerge file docs
+          });
+        } else {
+          entries.push({
+            name,
+            type: "folder",
+            url: `folder://${name}`, // Placeholder URL - in real implementation would create actual Automerge folder docs
+          });
+        }
+      }
+
+      console.log(`📊 Found ${entries.length} items in directory`);
+
+      // Update the Patchwork document with proper folder structure
+      handle.change((doc: FolderDoc) => {
+        // Ensure proper patchwork folder structure
+        if (!doc["@patchwork"]) {
+          doc["@patchwork"] = { type: "folder" };
+        }
+        if (!doc.docs) {
+          doc.docs = [];
+        }
+
+        // Clear and rebuild the docs array
+        doc.docs = entries.map((entry) => ({
+          name: entry.name,
+          type: entry.type,
+          url: entry.url as any, // Type assertion for the placeholder URLs
+        }));
+
+        console.log(
+          `✅ Updated Patchwork document with ${entries.length} entries`
+        );
+        console.log("📄 Document structure:", doc);
+      });
 
       setState((prev) => ({
         ...prev,
@@ -210,18 +257,14 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
           ...prev.status,
           syncInProgress: false,
           lastSync: new Date(),
-          error: result.success
-            ? null
-            : `Sync failed: ${result.errors
-                .map((e: any) => e.error.message)
-                .join(", ")}`,
+          error: null,
+          filesCount: entries.length,
         },
       }));
 
-      if (result.success) {
-        await updateFileList();
-      }
+      await updateFileList(state.directoryHandle);
     } catch (error) {
+      console.error("❌ Simple sync failed:", error);
       setState((prev) => ({
         ...prev,
         status: {
@@ -255,17 +298,51 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
   };
 
   if (!isFileSystemAccessSupported()) {
+    const hasAPI = typeof (window as any).showDirectoryPicker === "function";
+    const isSecureContext =
+      window.isSecureContext ||
+      window.location.protocol === "https:" ||
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1";
+
+    let errorMessage = "";
+    let suggestion = "";
+
+    if (!hasAPI) {
+      errorMessage = "File System Access API Not Available";
+      suggestion =
+        "Please use Chrome 86+, Edge 86+, or Safari 15.2+. Firefox doesn't support this API yet.";
+    } else if (!isSecureContext) {
+      errorMessage = "Secure Context Required";
+      suggestion =
+        "The File System Access API requires HTTPS or localhost. Please use https:// or run on localhost.";
+    } else {
+      errorMessage = "File System Access Not Supported";
+      suggestion =
+        "Your browser configuration doesn't allow File System Access.";
+    }
+
     return (
       <div className="browser-sync-tool">
         <div className="empty-state">
           <AlertCircle className="empty-state-icon" />
-          <h3 className="empty-state-title">
-            File System Access Not Supported
-          </h3>
-          <p className="empty-state-description">
-            Your browser doesn't support the File System Access API. Please use
-            a modern browser like Chrome, Edge, or Safari.
-          </p>
+          <h3 className="empty-state-title">{errorMessage}</h3>
+          <p className="empty-state-description">{suggestion}</p>
+          <div
+            style={{ marginTop: "1rem", fontSize: "0.75rem", color: "#9ca3af" }}
+          >
+            <strong>Debug Info:</strong>
+            <br />
+            Browser: {navigator.userAgent.split(" ").slice(-2).join(" ")}
+            <br />
+            Protocol: {window.location.protocol}
+            <br />
+            Host: {window.location.hostname}
+            <br />
+            Secure Context: {isSecureContext ? "Yes" : "No"}
+            <br />
+            API Available: {hasAPI ? "Yes" : "No"}
+          </div>
         </div>
       </div>
     );
