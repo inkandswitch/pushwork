@@ -626,6 +626,35 @@ export async function status(): Promise<void> {
       console.log(
         `  🔗 Root URL: ${chalk.cyan(syncStatus.snapshot.rootDirectoryUrl)}`
       );
+
+      // Try to show lastSyncAt from root directory document
+      try {
+        const rootHandle = await repo.find<DirectoryDocument>(
+          syncStatus.snapshot.rootDirectoryUrl
+        );
+        const rootDoc = await rootHandle.doc();
+        if (rootDoc?.lastSyncAt) {
+          const lastSyncDate = new Date(rootDoc.lastSyncAt);
+          const timeSince = Date.now() - rootDoc.lastSyncAt;
+          const timeAgo =
+            timeSince < 60000
+              ? `${Math.floor(timeSince / 1000)}s ago`
+              : timeSince < 3600000
+              ? `${Math.floor(timeSince / 60000)}m ago`
+              : `${Math.floor(timeSince / 3600000)}h ago`;
+          console.log(
+            `  🕒 Root last touched: ${chalk.green(
+              lastSyncDate.toLocaleString()
+            )} (${chalk.gray(timeAgo)})`
+          );
+        } else {
+          console.log(`  🕒 Root last touched: ${chalk.yellow("Never")}`);
+        }
+      } catch (error) {
+        console.log(
+          `  🕒 Root last touched: ${chalk.gray("Unable to determine")}`
+        );
+      }
     } else {
       console.log(`  🔗 Root URL: ${chalk.yellow("Not set")}`);
     }
@@ -1047,6 +1076,124 @@ export async function commit(
     spinner.fail(`Commit failed: ${error}`);
     console.error(chalk.red(`Error: ${error}`));
     process.exit(1);
+  }
+}
+
+/**
+ * Debug command to inspect internal document state
+ */
+export async function debug(
+  targetPath = ".",
+  options: { verbose?: boolean } = {}
+): Promise<void> {
+  try {
+    const spinner = ora("Loading debug information...").start();
+
+    // Setup shared context with network disabled for debug check
+    const { repo, syncEngine, workingDir } = await setupCommandContext(
+      targetPath,
+      undefined,
+      undefined,
+      false
+    );
+    const debugStatus = await syncEngine.getStatus();
+
+    spinner.stop();
+
+    console.log(chalk.bold("🔍 Debug Information"));
+    console.log(`${"=".repeat(50)}`);
+
+    // Directory information
+    console.log(`\n${chalk.bold("📁 Directory Information:")}`);
+    console.log(`  📂 Path: ${chalk.blue(workingDir)}`);
+    console.log(`  🔧 Config: ${path.join(workingDir, ".pushwork")}`);
+
+    if (debugStatus.snapshot?.rootDirectoryUrl) {
+      console.log(`\n${chalk.bold("🗂️  Root Directory Document:")}`);
+      console.log(
+        `  🔗 URL: ${chalk.cyan(debugStatus.snapshot.rootDirectoryUrl)}`
+      );
+
+      try {
+        const rootHandle = await repo.find<DirectoryDocument>(
+          debugStatus.snapshot.rootDirectoryUrl
+        );
+        const rootDoc = await rootHandle.doc();
+
+        if (rootDoc) {
+          console.log(`  📊 Document Structure:`);
+          console.log(`    📄 Entries: ${rootDoc.docs.length}`);
+          console.log(`    🏷️  Type: ${rootDoc["@patchwork"].type}`);
+
+          if (rootDoc.lastSyncAt) {
+            const lastSyncDate = new Date(rootDoc.lastSyncAt);
+            console.log(
+              `    🕒 Last Sync At: ${chalk.green(lastSyncDate.toISOString())}`
+            );
+            console.log(
+              `    🕒 Last Sync Timestamp: ${chalk.gray(rootDoc.lastSyncAt)}`
+            );
+          } else {
+            console.log(`    🕒 Last Sync At: ${chalk.yellow("Never set")}`);
+          }
+
+          if (options.verbose) {
+            console.log(`\n  📋 Full Document Content:`);
+            console.log(JSON.stringify(rootDoc, null, 2));
+
+            console.log(`\n  🏷️  Document Heads:`);
+            console.log(JSON.stringify(rootHandle.heads(), null, 2));
+          }
+
+          console.log(`\n  📁 Directory Entries:`);
+          rootDoc.docs.forEach((entry: any, index: number) => {
+            console.log(
+              `    ${index + 1}. ${entry.name} (${entry.type}) -> ${entry.url}`
+            );
+          });
+        } else {
+          console.log(`  ❌ Unable to load root document`);
+        }
+      } catch (error) {
+        console.log(`  ❌ Error loading root document: ${error}`);
+      }
+    } else {
+      console.log(`\n${chalk.bold("🗂️  Root Directory Document:")}`);
+      console.log(`  ❌ No root directory URL set`);
+    }
+
+    // Snapshot information
+    if (debugStatus.snapshot) {
+      console.log(`\n${chalk.bold("📸 Snapshot Information:")}`);
+      console.log(`  📄 Tracked files: ${debugStatus.snapshot.files.size}`);
+      console.log(
+        `  📁 Tracked directories: ${debugStatus.snapshot.directories.size}`
+      );
+      console.log(
+        `  🏷️  Timestamp: ${new Date(
+          debugStatus.snapshot.timestamp
+        ).toISOString()}`
+      );
+      console.log(`  📂 Root path: ${debugStatus.snapshot.rootPath}`);
+
+      if (options.verbose) {
+        console.log(`\n  📋 All Tracked Files:`);
+        debugStatus.snapshot.files.forEach((entry, path) => {
+          console.log(`    ${path} -> ${entry.url}`);
+        });
+
+        console.log(`\n  📋 All Tracked Directories:`);
+        debugStatus.snapshot.directories.forEach((entry, path) => {
+          console.log(`    ${path} -> ${entry.url}`);
+        });
+      }
+    }
+
+    // Cleanup repo resources
+    await safeRepoShutdown(repo, "debug");
+  } catch (error) {
+    console.error(chalk.red(`Debug failed: ${error}`));
+    throw error;
   }
 }
 

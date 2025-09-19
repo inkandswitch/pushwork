@@ -15,6 +15,7 @@ export interface DirectoryEntry {
 export interface DirectoryDocument {
   "@patchwork": { type: "folder" };
   docs: DirectoryEntry[];
+  lastSyncAt?: number; // Timestamp of last sync operation that made changes
 }
 
 /**

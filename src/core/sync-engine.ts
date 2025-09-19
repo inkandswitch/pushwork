@@ -150,6 +150,13 @@ export class SyncEngine {
       result.errors.push(...commitResult.errors);
       result.warnings.push(...commitResult.warnings);
 
+      // Touch root directory if any changes were made
+      const hasChanges =
+        result.filesChanged > 0 || result.directoriesChanged > 0;
+      if (hasChanges) {
+        await this.touchRootDirectory(snapshot, dryRun);
+      }
+
       // Save updated snapshot if not dry run
       if (!dryRun) {
         await this.snapshotManager.save(snapshot);
@@ -269,6 +276,13 @@ export class SyncEngine {
       result.directoriesChanged += phase2Result.directoriesChanged;
       result.errors.push(...phase2Result.errors);
       result.warnings.push(...phase2Result.warnings);
+
+      // Touch root directory if any changes were made during sync
+      const hasChanges =
+        result.filesChanged > 0 || result.directoriesChanged > 0;
+      if (hasChanges) {
+        await this.touchRootDirectory(snapshot, dryRun);
+      }
 
       // Save updated snapshot if not dry run
       if (!dryRun) {
@@ -1163,5 +1177,49 @@ export class SyncEngine {
     }
 
     return parts.join(", ");
+  }
+
+  /**
+   * Update the lastSyncAt timestamp on the root directory document
+   */
+  private async touchRootDirectory(
+    snapshot: SyncSnapshot,
+    dryRun: boolean
+  ): Promise<void> {
+    if (dryRun || !snapshot.rootDirectoryUrl) {
+      return;
+    }
+
+    try {
+      const rootHandle = await this.repo.find<DirectoryDocument>(
+        snapshot.rootDirectoryUrl
+      );
+
+      const snapshotEntry = snapshot.directories.get("");
+      const heads = snapshotEntry?.head;
+
+      const timestamp = Date.now();
+
+      if (heads) {
+        rootHandle.changeAt(heads, (doc: DirectoryDocument) => {
+          doc.lastSyncAt = timestamp;
+        });
+      } else {
+        rootHandle.change((doc: DirectoryDocument) => {
+          doc.lastSyncAt = timestamp;
+        });
+      }
+
+      // Track root directory for network sync
+      this.handlesToWaitOn.push(rootHandle);
+
+      console.log(
+        `🕒 Updated root directory lastSyncAt to ${new Date(
+          timestamp
+        ).toISOString()}`
+      );
+    } catch (error) {
+      console.warn(`Failed to update root directory lastSyncAt: ${error}`);
+    }
   }
 }

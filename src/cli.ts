@@ -12,6 +12,7 @@ import {
   checkout,
   commit,
   url,
+  debug,
 } from "./cli/commands";
 
 /**
@@ -259,6 +260,34 @@ Note: This command outputs only the URL, making it useful for scripts.`
   .action(
     withErrorHandling(async (path: string) => {
       await url(path);
+    })
+  );
+
+// Debug command
+program
+  .command("debug")
+  .description("Show internal debug information including lastSyncAt timestamp")
+  .argument("[path]", "Directory path", ".")
+  .option(
+    "-v, --verbose",
+    "Show verbose debug information including full document contents"
+  )
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork debug           # Show debug info for current directory
+  pushwork debug --verbose # Show verbose debug info including full document contents
+  pushwork debug ./repo    # Show debug info for specific directory
+  
+This command displays internal document state, including the lastSyncAt timestamp
+that gets updated when sync operations make changes.`
+  )
+  .action(
+    withErrorHandling(async (path: string, options) => {
+      await debug(path, {
+        verbose: options.verbose || false,
+      });
     })
   );
 

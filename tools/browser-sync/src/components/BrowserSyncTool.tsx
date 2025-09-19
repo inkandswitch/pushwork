@@ -248,7 +248,7 @@ const BrowserSyncTool: React.FC<EditorProps<FolderDoc, unknown>> = ({
         console.log(
           `✅ Updated Patchwork document with ${entries.length} entries`
         );
-        console.log("📄 Document structure:", doc);
+        console.log("📄 Document structure:", JSON.stringify(doc, null, 2));
       });
 
       setState((prev) => ({
