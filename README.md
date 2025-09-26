@@ -26,8 +26,10 @@ Currently, install from source:
 ```bash
 pnpm install
 pnpm run build
-pnpm link
+pnpm link --global
 ```
+
+Note: you
 
 ### Basic Usage
 
