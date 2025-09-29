@@ -795,6 +795,12 @@ export class SyncEngine {
     }
     if (didChange) {
       this.handlesToWaitOn.push(dirHandle);
+
+      // CRITICAL FIX: Update snapshot with new directory heads immediately
+      // This prevents stale head issues that cause convergence problems
+      if (snapshotEntry) {
+        snapshotEntry.head = dirHandle.heads();
+      }
     }
   }
 
@@ -914,6 +920,13 @@ export class SyncEngine {
       this.handlesToWaitOn.push(dirHandle);
       if (didChange) {
         this.handlesToWaitOn.push(parentHandle);
+
+        // CRITICAL FIX: Update parent directory heads in snapshot immediately
+        // This prevents stale head issues when parent directory is modified
+        const parentSnapshotEntry = snapshot.directories.get(parentPath);
+        if (parentSnapshotEntry) {
+          parentSnapshotEntry.head = parentHandle.heads();
+        }
       }
 
       // Update snapshot with new directory
@@ -964,6 +977,8 @@ export class SyncEngine {
       this.handlesToWaitOn.push(dirHandle);
       const snapshotEntry = snapshot.directories.get(directoryPath);
       const heads = snapshotEntry?.head;
+      let didChange = false;
+
       if (heads) {
         dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
           const indexToRemove = doc.docs.findIndex(
@@ -971,6 +986,7 @@ export class SyncEngine {
           );
           if (indexToRemove !== -1) {
             doc.docs.splice(indexToRemove, 1);
+            didChange = true;
             console.log(
               `🗑️  Removed ${fileName} from directory ${
                 directoryPath || "root"
@@ -985,6 +1001,7 @@ export class SyncEngine {
           );
           if (indexToRemove !== -1) {
             doc.docs.splice(indexToRemove, 1);
+            didChange = true;
             console.log(
               `🗑️  Removed ${fileName} from directory ${
                 directoryPath || "root"
@@ -992,6 +1009,12 @@ export class SyncEngine {
             );
           }
         });
+      }
+
+      // CRITICAL FIX: Update snapshot with new directory heads immediately
+      // This prevents stale head issues that cause convergence problems
+      if (didChange && snapshotEntry) {
+        snapshotEntry.head = dirHandle.heads();
       }
     } catch (error) {
       console.warn(
@@ -1212,6 +1235,12 @@ export class SyncEngine {
 
       // Track root directory for network sync
       this.handlesToWaitOn.push(rootHandle);
+
+      // CRITICAL FIX: Update root directory heads in snapshot immediately
+      // This prevents stale head issues when root directory is modified
+      if (snapshotEntry) {
+        snapshotEntry.head = rootHandle.heads();
+      }
 
       console.log(
         `🕒 Updated root directory lastSyncAt to ${new Date(
