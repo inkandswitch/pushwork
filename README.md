@@ -17,7 +17,7 @@ Pushwork enables real-time collaboration on directories and files using **Confli
 - **Cross-Platform**: Runs on Windows, macOS, and Linux
 - **Rich CLI**: Full-featured command-line interface with comprehensive tooling
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -57,7 +57,7 @@ pushwork sync
 pushwork status
 ```
 
-## 📚 Commands
+## Commands
 
 ### `init <path> [options]`
 
@@ -216,7 +216,7 @@ pushwork checkout sync-123
 pushwork checkout sync-123 --force
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 ### Default Configuration
 
@@ -253,7 +253,7 @@ Configuration is stored in `.pushwork/config.json`:
 }
 ```
 
-## 🔧 How It Works
+## How It Works
 
 ### CRDT-Based Conflict Resolution
 
@@ -284,7 +284,7 @@ Pushwork uses **Automerge CRDTs** to automatically resolve conflicts:
 - **User prompt**: Moves with 50-80% similarity (configurable)
 - **Ignore**: Moves with <50% similarity
 
-## 📁 Architecture
+## Architecture
 
 ### Document Schema
 
@@ -327,7 +327,7 @@ Pushwork uses **Automerge CRDTs** to automatically resolve conflicts:
 - **WebSocket Connection**: Provides real-time updates
 - **Graceful Degradation**: Works offline with manual sync
 
-## 🧪 Testing
+## Testing
 
 ### Running Tests
 
@@ -393,7 +393,7 @@ test/
 └── integration/   # Integration tests
 ```
 
-## 🤝 Real-World Collaboration Example
+## Real-World Collaboration Example
 
 ```bash
 # Alice initializes a project
@@ -422,7 +422,7 @@ Alice's changes
 Bob's changes
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -447,11 +447,11 @@ pushwork sync --dry-run
 pushwork status
 ```
 
-## 📄 License
+## License
 
 MIT License - see LICENSE file for details.
 
-## 🔗 Links
+## Links
 
 - **Issues**: Report bugs and request features
 - **Documentation**: Additional guides and tutorials
@@ -459,4 +459,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**🚀 Ready to collaborate conflict-free? Get started with `pushwork init`!**
+** Ready to collaborate conflict-free? Get started with `pushwork init`!**
