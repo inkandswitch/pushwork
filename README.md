@@ -29,7 +29,7 @@ pnpm run build
 pnpm link --global
 ```
 
-Note: you
+Note: you can also run this from NPX, I think.
 
 ### Basic Usage
 
