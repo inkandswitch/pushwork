@@ -8,14 +8,14 @@ Pushwork enables real-time collaboration on directories and files using **Confli
 
 ## Key Features
 
-- ** Bidirectional Sync**: Keep local directories synchronized with remote Automerge repositories
-- ** Conflict-Free**: Automatic conflict resolution using Automerge CRDTs - no merge conflicts ever
-- ** Real-time Collaboration**: Multiple users can edit the same files simultaneously
-- ** Intelligent Move Detection**: Detects file renames and moves based on content similarity
-- ** Incremental Sync**: Only synchronizes changed files for maximum efficiency
-- ** Network Resilient**: Works offline and gracefully handles network interruptions
-- ** Cross-Platform**: Runs on Windows, macOS, and Linux
-- ** Rich CLI**: Full-featured command-line interface with comprehensive tooling
+- **Bidirectional Sync**: Keep local directories synchronized with remote Automerge repositories
+- **Conflict-Free**: Automatic conflict resolution using Automerge CRDTs - no merge conflicts ever
+- **Real-time Collaboration**: Multiple users can edit the same files simultaneously
+- **Intelligent Move Detection**: Detects file renames and moves based on content similarity
+- **Incremental Sync**: Only synchronizes changed files for maximum efficiency
+- **Network Resilient**: Works offline and gracefully handles network interruptions
+- **Cross-Platform**: Runs on Windows, macOS, and Linux
+- **Rich CLI**: Full-featured command-line interface with comprehensive tooling
 
 ## 🚀 Quick Start
 
