@@ -216,6 +216,118 @@ describe("Pushwork Fuzzer", () => {
       expect(contentA).toBe("modified content");
       expect(contentB).toBe("modified content");
     }, 30000);
+
+    it("should handle edit + rename on one side", async () => {
+      const repoA = path.join(tmpDir, "rename-a");
+      const repoB = path.join(tmpDir, "rename-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      // Initialize repo A with a file
+      await fs.writeFile(path.join(repoA, "original.txt"), "original content");
+      await pushwork(["init", "."], repoA);
+      await wait(500);
+
+      // Clone to B
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await wait(500);
+
+      // Edit AND rename file on A (the suspicious operation!)
+      await fs.writeFile(path.join(repoA, "original.txt"), "edited content");
+      await fs.rename(
+        path.join(repoA, "original.txt"),
+        path.join(repoA, "renamed.txt")
+      );
+
+      // Sync both sides
+      await pushwork(["sync"], repoA);
+      await wait(1000);
+      await pushwork(["sync"], repoB);
+      await wait(1000);
+
+      // One more round for convergence
+      await pushwork(["sync"], repoA);
+      await wait(1000);
+      await pushwork(["sync"], repoB);
+      await wait(1000);
+
+      // Verify: original.txt should not exist, renamed.txt should exist with edited content
+      const originalExistsA = await pathExists(
+        path.join(repoA, "original.txt")
+      );
+      const originalExistsB = await pathExists(
+        path.join(repoB, "original.txt")
+      );
+      const renamedExistsA = await pathExists(path.join(repoA, "renamed.txt"));
+      const renamedExistsB = await pathExists(path.join(repoB, "renamed.txt"));
+
+      expect(originalExistsA).toBe(false);
+      expect(originalExistsB).toBe(false);
+      expect(renamedExistsA).toBe(true);
+      expect(renamedExistsB).toBe(true);
+
+      const contentA = await fs.readFile(
+        path.join(repoA, "renamed.txt"),
+        "utf-8"
+      );
+      const contentB = await fs.readFile(
+        path.join(repoB, "renamed.txt"),
+        "utf-8"
+      );
+
+      expect(contentA).toBe("edited content");
+      expect(contentB).toBe("edited content");
+    }, 120000); // 2 minute timeout
+
+    it("should handle files in subdirectories and moves between directories", async () => {
+      const repoA = path.join(tmpDir, "subdir-a");
+      const repoB = path.join(tmpDir, "subdir-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      // Initialize repo A with a file in a subdirectory
+      await fs.mkdir(path.join(repoA, "dir1"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dir1", "file1.txt"), "in dir1");
+
+      await pushwork(["init", "."], repoA);
+      await wait(500);
+
+      // Clone to B
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await wait(500);
+
+      // Verify B got the subdirectory and file
+      expect(await pathExists(path.join(repoB, "dir1", "file1.txt"))).toBe(
+        true
+      );
+      const initialContentB = await fs.readFile(
+        path.join(repoB, "dir1", "file1.txt"),
+        "utf-8"
+      );
+      expect(initialContentB).toBe("in dir1");
+
+      // On A: Create another file in a different subdirectory
+      await fs.mkdir(path.join(repoA, "dir2"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dir2", "file2.txt"), "in dir2");
+
+      // Sync both sides
+      await pushwork(["sync"], repoA);
+      await wait(1000);
+      await pushwork(["sync"], repoB);
+      await wait(1000);
+
+      // Verify B got the new subdirectory and file
+      expect(await pathExists(path.join(repoB, "dir2", "file2.txt"))).toBe(
+        true
+      );
+      const file2ContentB = await fs.readFile(
+        path.join(repoB, "dir2", "file2.txt"),
+        "utf-8"
+      );
+      expect(file2ContentB).toBe("in dir2");
+    }, 30000);
   });
 
   describe("Property-Based Fuzzing with fast-check", () => {
@@ -223,17 +335,46 @@ describe("Pushwork Fuzzer", () => {
     type FileOperation =
       | { type: "add"; path: string; content: string }
       | { type: "edit"; path: string; content: string }
-      | { type: "delete"; path: string };
+      | { type: "delete"; path: string }
+      | { type: "rename"; fromPath: string; toPath: string }
+      | {
+          type: "editAndRename";
+          fromPath: string;
+          toPath: string;
+          content: string;
+        };
 
     /**
-     * Arbitrary: Generate a simple filename (no subdirectories for now)
+     * Arbitrary: Generate a directory name
      */
-    const fileNameArbitrary = fc
+    const dirNameArbitrary = fc.stringMatching(/^[a-z]{2,6}$/);
+
+    /**
+     * Arbitrary: Generate a simple filename (basename + extension)
+     */
+    const baseNameArbitrary = fc
       .tuple(
         fc.stringMatching(/^[a-z]{3,8}$/), // basename
         fc.constantFrom("txt", "md", "json", "ts") // extension
       )
       .map(([name, ext]) => `${name}.${ext}`);
+
+    /**
+     * Arbitrary: Generate a file path (can be in root or in subdirectories)
+     * Examples: "file.txt", "dir1/file.txt", "dir1/dir2/file.txt"
+     */
+    const filePathArbitrary = fc.oneof(
+      // File in root directory (60% probability)
+      baseNameArbitrary,
+      // File in single subdirectory (30% probability)
+      fc
+        .tuple(dirNameArbitrary, baseNameArbitrary)
+        .map(([dir, file]) => `${dir}/${file}`),
+      // File in nested subdirectory (10% probability)
+      fc
+        .tuple(dirNameArbitrary, dirNameArbitrary, baseNameArbitrary)
+        .map(([dir1, dir2, file]) => `${dir1}/${dir2}/${file}`)
+    );
 
     /**
      * Arbitrary: Generate file content (small strings for now)
@@ -244,24 +385,45 @@ describe("Pushwork Fuzzer", () => {
      * Arbitrary: Generate a file operation
      */
     const fileOperationArbitrary: fc.Arbitrary<FileOperation> = fc.oneof(
-      // Add file
+      // Add file (can be in subdirectories)
       fc.record({
         type: fc.constant("add" as const),
-        path: fileNameArbitrary,
+        path: filePathArbitrary,
         content: fileContentArbitrary,
       }),
       // Edit file
       fc.record({
         type: fc.constant("edit" as const),
-        path: fileNameArbitrary,
+        path: filePathArbitrary,
         content: fileContentArbitrary,
       }),
       // Delete file
       fc.record({
         type: fc.constant("delete" as const),
-        path: fileNameArbitrary,
+        path: filePathArbitrary,
+      }),
+      // Rename file (can move between directories)
+      fc.record({
+        type: fc.constant("rename" as const),
+        fromPath: filePathArbitrary,
+        toPath: filePathArbitrary,
+      }),
+      // Edit and rename (can move between directories)
+      fc.record({
+        type: fc.constant("editAndRename" as const),
+        fromPath: filePathArbitrary,
+        toPath: filePathArbitrary,
+        content: fileContentArbitrary,
       })
     );
+
+    /**
+     * Helper: Ensure parent directory exists
+     */
+    async function ensureParentDir(filePath: string): Promise<void> {
+      const dir = path.dirname(filePath);
+      await fs.mkdir(dir, { recursive: true });
+    }
 
     /**
      * Helper: Apply a file operation to a directory
@@ -270,27 +432,54 @@ describe("Pushwork Fuzzer", () => {
       repoPath: string,
       op: FileOperation
     ): Promise<void> {
-      const filePath = path.join(repoPath, op.path);
-
       try {
         switch (op.type) {
-          case "add":
+          case "add": {
+            const filePath = path.join(repoPath, op.path);
+            await ensureParentDir(filePath);
             await fs.writeFile(filePath, op.content);
             break;
-          case "edit":
+          }
+          case "edit": {
+            const filePath = path.join(repoPath, op.path);
             // Only edit if file exists, otherwise create it
             if (await pathExists(filePath)) {
               await fs.writeFile(filePath, op.content);
             } else {
+              await ensureParentDir(filePath);
               await fs.writeFile(filePath, op.content);
             }
             break;
-          case "delete":
+          }
+          case "delete": {
+            const filePath = path.join(repoPath, op.path);
             // Only delete if file exists
             if (await pathExists(filePath)) {
               await fs.unlink(filePath);
             }
             break;
+          }
+          case "rename": {
+            const fromPath = path.join(repoPath, op.fromPath);
+            const toPath = path.join(repoPath, op.toPath);
+            // Only rename if source exists and target doesn't
+            if ((await pathExists(fromPath)) && !(await pathExists(toPath))) {
+              await ensureParentDir(toPath);
+              await fs.rename(fromPath, toPath);
+            }
+            break;
+          }
+          case "editAndRename": {
+            const fromPath = path.join(repoPath, op.fromPath);
+            const toPath = path.join(repoPath, op.toPath);
+            // Edit then rename: only if source exists and target doesn't
+            if ((await pathExists(fromPath)) && !(await pathExists(toPath))) {
+              await fs.writeFile(fromPath, op.content);
+              await ensureParentDir(toPath);
+              await fs.rename(fromPath, toPath);
+            }
+            break;
+          }
         }
       } catch (error) {
         // Ignore operation errors (e.g., deleting non-existent file)
@@ -328,17 +517,24 @@ describe("Pushwork Fuzzer", () => {
             await fs.mkdir(repoA);
             await fs.mkdir(repoB);
 
+            const testStart = Date.now();
             console.log(
-              `\n🔬 Testing with ${opsA.length} ops on A, ${opsB.length} ops on B`
+              `\n🔬 Testing: ${opsA.length} ops on A, ${opsB.length} ops on B`
             );
 
             try {
               // Initialize repo A with an initial file
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Initializing repo A...`
+              );
               await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
               await pushwork(["init", "."], repoA);
               await wait(500);
 
               // Get root URL and clone to B
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Cloning to repo B...`
+              );
               const { stdout: rootUrl } = await pushwork(["url"], repoA);
               const cleanRootUrl = rootUrl.trim();
               await pushwork(["clone", cleanRootUrl, repoB], testRoot);
@@ -348,33 +544,60 @@ describe("Pushwork Fuzzer", () => {
               const hashBeforeOps = await hashDirectory(repoA);
               const hashB1 = await hashDirectory(repoB);
               expect(hashBeforeOps).toBe(hashB1);
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Initial state verified`
+              );
 
               // Apply operations to both sides
-              console.log(`  Applying ${opsA.length} operations to repo A...`);
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Applying ${
+                  opsA.length
+                } operations to repo A...`
+              );
+              console.log(`     Operations A: ${JSON.stringify(opsA)}`);
               await applyOperations(repoA, opsA);
 
-              console.log(`  Applying ${opsB.length} operations to repo B...`);
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Applying ${
+                  opsB.length
+                } operations to repo B...`
+              );
+              console.log(`     Operations B: ${JSON.stringify(opsB)}`);
               await applyOperations(repoB, opsB);
 
-              // Sync from A
-              console.log(`  Syncing repo A...`);
+              // Multiple sync rounds for convergence
+              // Round 1: A pushes changes
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: A...`
+              );
               await pushwork(["sync"], repoA);
-              await wait(1000);
+              await wait(500);
 
-              // Sync from B
-              console.log(`  Syncing repo B...`);
+              // Round 2: B pushes changes and pulls A's changes
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: B...`
+              );
               await pushwork(["sync"], repoB);
-              await wait(1000);
+              await wait(500);
 
-              // One more round to ensure full convergence when both sides changed
-              console.log(`  Final convergence sync...`);
+              // Round 3: A pulls B's changes
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: A...`
+              );
               await pushwork(["sync"], repoA);
-              await wait(1000);
+              await wait(500);
+
+              // Round 4: B confirms convergence
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: B...`
+              );
               await pushwork(["sync"], repoB);
-              await wait(1000);
+              await wait(500);
 
               // Verify final state matches
-              console.log(`  Verifying convergence...`);
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Verifying convergence...`
+              );
               const hashAfterA = await hashDirectory(repoA);
               const hashAfterB = await hashDirectory(repoB);
 
@@ -423,7 +646,8 @@ describe("Pushwork Fuzzer", () => {
                 );
               expect(diffLines.length).toBe(0);
 
-              console.log(`  ✅ Converged successfully!`);
+              const totalTime = Date.now() - testStart;
+              console.log(`  ✅ Converged successfully! (took ${totalTime}ms)`);
 
               // Cleanup
               await fs.rm(testRoot, { recursive: true, force: true });
@@ -437,13 +661,13 @@ describe("Pushwork Fuzzer", () => {
           }
         ),
         {
-          numRuns: 1, // Just 1 run for now
-          timeout: 40000, // 40 second timeout per run
+          numRuns: 5, // Run 5 times to find issues
+          timeout: 120000, // 2 minute timeout per run
           verbose: true,
           endOnFailure: true, // Stop on first failure
         }
       );
-    }, 50000); // 50 second timeout for the whole test
+    }, 600000); // 10 minute timeout for the whole test
   });
 });
 

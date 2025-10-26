@@ -89,21 +89,28 @@ export async function safeRepoShutdown(
     await repo.shutdown();
   } catch (shutdownError) {
     // WebSocket errors during shutdown are common and non-critical
-    // Only warn about unexpected shutdown errors
+    // Silently ignore them - they don't affect data integrity
     const errorMessage =
       shutdownError instanceof Error
         ? shutdownError.message
         : String(shutdownError);
+
+    // Ignore WebSocket-related errors entirely
     if (
-      !errorMessage.includes("WebSocket") &&
-      !errorMessage.includes("connection was established")
+      errorMessage.includes("WebSocket") ||
+      errorMessage.includes("connection was established") ||
+      errorMessage.includes("was closed")
     ) {
-      console.warn(
-        `Warning: Repository shutdown failed${
-          context ? ` (${context})` : ""
-        }: ${shutdownError}`
-      );
+      // Silently ignore WebSocket shutdown errors
+      return;
     }
+
+    // Only warn about truly unexpected shutdown errors
+    console.warn(
+      `Warning: Repository shutdown failed${
+        context ? ` (${context})` : ""
+      }: ${shutdownError}`
+    );
   }
 }
 

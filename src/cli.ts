@@ -303,6 +303,17 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 process.on("uncaughtException", (error) => {
+  // Ignore WebSocket errors during shutdown - they're non-critical
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  if (
+    errorMessage.includes("WebSocket") ||
+    errorMessage.includes("connection was established") ||
+    errorMessage.includes("was closed")
+  ) {
+    // Silently ignore WebSocket shutdown errors
+    return;
+  }
+
   console.error(chalk.red("Uncaught Exception:"), error);
   process.exit(1);
 });

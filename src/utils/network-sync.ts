@@ -10,6 +10,8 @@ export async function waitForSync(
   syncServerStorageId?: StorageId,
   timeoutMs: number = 60000 // 60 second timeout for debugging
 ): Promise<void> {
+  const startTime = Date.now();
+
   if (!syncServerStorageId) {
     console.warn(
       "No sync server storage ID provided. Skipping network sync wait."
@@ -47,7 +49,10 @@ export async function waitForSync(
   const promises = handlesToWaitOn.map(
     (handle, index) =>
       new Promise<void>((resolve, reject) => {
+        let pollInterval: NodeJS.Timeout;
+
         const timeout = setTimeout(() => {
+          clearInterval(pollInterval);
           const localHeads = handle.heads();
           const syncInfo = handle.getSyncInfo(syncServerStorageId);
           const remoteHeads = syncInfo?.lastHeads;
@@ -79,6 +84,7 @@ export async function waitForSync(
               console.log(`✅ Document ${index + 1} synced: ${handle.url}`);
             }
             clearTimeout(timeout);
+            clearInterval(pollInterval);
             resolve();
             return true;
           }
@@ -90,7 +96,14 @@ export async function waitForSync(
           return;
         }
 
-        // Otherwise, wait for remote-heads event
+        // Periodically re-check if heads have converged (polling fallback)
+        pollInterval = setInterval(() => {
+          if (checkSync()) {
+            clearInterval(pollInterval);
+          }
+        }, 500); // Check every 500ms
+
+        // Also wait for remote-heads event (faster when events work)
         const onRemoteHeads = ({
           storageId,
           heads,
@@ -118,6 +131,7 @@ export async function waitForSync(
               );
             }
             clearTimeout(timeout);
+            clearInterval(pollInterval);
             handle.off("remote-heads", onRemoteHeads);
             resolve();
           } else if (verbose) {
@@ -134,11 +148,13 @@ export async function waitForSync(
 
   try {
     await Promise.all(promises);
+    const elapsed = Date.now() - startTime;
     if (verbose) {
-      console.log("✅ All documents synced to network");
+      console.log(`✅ All documents synced to network (took ${elapsed}ms)`);
     }
   } catch (error) {
-    console.error(`❌ Sync wait failed: ${error}`);
+    const elapsed = Date.now() - startTime;
+    console.error(`❌ Sync wait failed after ${elapsed}ms: ${error}`);
     throw error;
   }
 }
