@@ -259,51 +259,9 @@ export class SyncEngine {
         }
       }
 
-      // CRITICAL FIX: Update snapshot heads after network sync
-      // Network sync can change document heads, so we need to update the snapshot
-      // to prevent fresh change detection from seeing stale heads
-      if (!dryRun) {
-        // Update file document heads
-        for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
-          try {
-            const handle = await this.repo.find(snapshotEntry.url);
-            const currentHeads = handle.heads();
-            if (!A.equals(currentHeads, snapshotEntry.head)) {
-              // Update snapshot with current heads after network sync
-              snapshot.files.set(filePath, {
-                ...snapshotEntry,
-                head: currentHeads,
-              });
-            }
-          } catch (error) {
-            // Handle might not exist if file was deleted, skip
-            console.warn(`Could not update heads for ${filePath}: ${error}`);
-          }
-        }
-
-        // Update directory document heads
-        for (const [dirPath, snapshotEntry] of snapshot.directories.entries()) {
-          try {
-            const handle = await this.repo.find(snapshotEntry.url);
-            const currentHeads = handle.heads();
-            if (!A.equals(currentHeads, snapshotEntry.head)) {
-              // Update snapshot with current heads after network sync
-              snapshot.directories.set(dirPath, {
-                ...snapshotEntry,
-                head: currentHeads,
-              });
-            }
-          } catch (error) {
-            // Handle might not exist if directory was deleted, skip
-            console.warn(
-              `Could not update heads for directory ${dirPath}: ${error}`
-            );
-          }
-        }
-      }
-
       // Re-detect remote changes after network sync to ensure fresh state
       // This fixes race conditions where we detect changes before server propagation
+      // NOTE: We DON'T update snapshot heads yet - that would prevent detecting remote changes!
       const freshChanges = await this.changeDetector.detectChanges(snapshot);
       const freshRemoteChanges = freshChanges.filter(
         (c) =>
@@ -321,6 +279,49 @@ export class SyncEngine {
       result.directoriesChanged += phase2Result.directoriesChanged;
       result.errors.push(...phase2Result.errors);
       result.warnings.push(...phase2Result.warnings);
+
+      // CRITICAL FIX: Update snapshot heads AFTER pulling remote changes
+      // This ensures that change detection can find remote changes, and we only
+      // update the snapshot after the filesystem is in sync with the documents
+      if (!dryRun) {
+        // Update file document heads
+        for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
+          try {
+            const handle = await this.repo.find(snapshotEntry.url);
+            const currentHeads = handle.heads();
+            if (!A.equals(currentHeads, snapshotEntry.head)) {
+              // Update snapshot with current heads after pulling changes
+              snapshot.files.set(filePath, {
+                ...snapshotEntry,
+                head: currentHeads,
+              });
+            }
+          } catch (error) {
+            // Handle might not exist if file was deleted, skip
+            console.warn(`Could not update heads for ${filePath}: ${error}`);
+          }
+        }
+
+        // Update directory document heads
+        for (const [dirPath, snapshotEntry] of snapshot.directories.entries()) {
+          try {
+            const handle = await this.repo.find(snapshotEntry.url);
+            const currentHeads = handle.heads();
+            if (!A.equals(currentHeads, snapshotEntry.head)) {
+              // Update snapshot with current heads after pulling changes
+              snapshot.directories.set(dirPath, {
+                ...snapshotEntry,
+                head: currentHeads,
+              });
+            }
+          } catch (error) {
+            // Handle might not exist if directory was deleted, skip
+            console.warn(
+              `Could not update heads for directory ${dirPath}: ${error}`
+            );
+          }
+        }
+      }
 
       // Touch root directory if any changes were made during sync
       const hasChanges =
