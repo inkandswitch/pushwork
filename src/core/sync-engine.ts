@@ -1,3 +1,5 @@
+const myers = require("myers-diff");
+
 import {
   AutomergeUrl,
   Repo,
@@ -257,6 +259,49 @@ export class SyncEngine {
         }
       }
 
+      // CRITICAL FIX: Update snapshot heads after network sync
+      // Network sync can change document heads, so we need to update the snapshot
+      // to prevent fresh change detection from seeing stale heads
+      if (!dryRun) {
+        // Update file document heads
+        for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
+          try {
+            const handle = await this.repo.find(snapshotEntry.url);
+            const currentHeads = handle.heads();
+            if (!A.equals(currentHeads, snapshotEntry.head)) {
+              // Update snapshot with current heads after network sync
+              snapshot.files.set(filePath, {
+                ...snapshotEntry,
+                head: currentHeads,
+              });
+            }
+          } catch (error) {
+            // Handle might not exist if file was deleted, skip
+            console.warn(`Could not update heads for ${filePath}: ${error}`);
+          }
+        }
+
+        // Update directory document heads
+        for (const [dirPath, snapshotEntry] of snapshot.directories.entries()) {
+          try {
+            const handle = await this.repo.find(snapshotEntry.url);
+            const currentHeads = handle.heads();
+            if (!A.equals(currentHeads, snapshotEntry.head)) {
+              // Update snapshot with current heads after network sync
+              snapshot.directories.set(dirPath, {
+                ...snapshotEntry,
+                head: currentHeads,
+              });
+            }
+          } catch (error) {
+            // Handle might not exist if directory was deleted, skip
+            console.warn(
+              `Could not update heads for directory ${dirPath}: ${error}`
+            );
+          }
+        }
+      }
+
       // Re-detect remote changes after network sync to ensure fresh state
       // This fixes race conditions where we detect changes before server propagation
       const freshChanges = await this.changeDetector.detectChanges(snapshot);
@@ -452,6 +497,8 @@ export class SyncEngine {
           dryRun
         );
 
+        // CRITICAL FIX: Update snapshot with heads AFTER adding to directory
+        // The addFileToDirectory call above may have changed the document heads
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
           path: normalizePath(this.rootPath + "/" + change.path),
           url: handle.url,
@@ -463,6 +510,32 @@ export class SyncEngine {
     } else {
       // Update existing file
       console.log(`📝 ${change.path}`);
+
+      // log the change in detail for debugging
+      // split out remotea nd local content so we don't overwhelm the logs
+      const { remoteContent, localContent, ...rest } = change;
+      console.log(`🔍 Change in detail:`, rest);
+
+      // compare the local and remote content and make a diff so we can
+      // see what happened between the two
+      const { diff, changed } = require("myers-diff");
+      const lhs = change.remoteContent ? change.remoteContent.toString() : "";
+      const rhs = change.localContent ? change.localContent.toString() : "";
+      const changes = diff(lhs, rhs, { compare: "chars" });
+
+      for (const change of changes) {
+        if (changed(change.lhs)) {
+          // deleted
+          const { pos, text, del, length } = change.lhs;
+          console.log(`🔍 Deleted:`, { pos, text, del, length });
+        }
+        if (changed(change.rhs)) {
+          // added
+          const { pos, text, add, length } = change.rhs;
+          console.log(`🔍 Added:`, { pos, text, add, length });
+        }
+      }
+
       await this.updateRemoteFile(
         snapshotEntry.url,
         change.localContent,
@@ -582,17 +655,39 @@ export class SyncEngine {
         dryRun
       );
 
-      // 3) Update the FileDocument name to match new basename
+      // 3) Update the FileDocument name and content to match new location/state
       try {
         const handle = await this.repo.find<FileDocument>(fromEntry.url);
         const heads = fromEntry.head;
+
+        // Update both name and content (if content changed during move)
         if (heads && heads.length > 0) {
           handle.changeAt(heads, (doc: FileDocument) => {
             doc.name = toFileName;
+
+            // If new content is provided, update it (handles move + modification case)
+            if (move.newContent !== undefined) {
+              const isText = this.isTextContent(move.newContent);
+              if (isText && typeof move.newContent === "string") {
+                updateText(doc, ["content"], move.newContent);
+              } else {
+                doc.content = move.newContent;
+              }
+            }
           });
         } else {
           handle.change((doc: FileDocument) => {
             doc.name = toFileName;
+
+            // If new content is provided, update it (handles move + modification case)
+            if (move.newContent !== undefined) {
+              const isText = this.isTextContent(move.newContent);
+              if (isText && typeof move.newContent === "string") {
+                updateText(doc, ["content"], move.newContent);
+              } else {
+                doc.content = move.newContent;
+              }
+            }
           });
         }
         // Track file handle for network sync
@@ -671,11 +766,26 @@ export class SyncEngine {
     const currentContent = doc?.content;
     const contentChanged = !isContentEqual(content, currentContent);
 
+    // CRITICAL FIX: Always update snapshot heads, even when content is identical
+    // This prevents stale head issues that cause false change detection
+    const snapshotEntry = snapshot.files.get(filePath);
+    if (snapshotEntry) {
+      // Update snapshot with current document heads
+      snapshot.files.set(filePath, {
+        ...snapshotEntry,
+        head: handle.heads(),
+      });
+    }
+
     if (!contentChanged) {
+      // Content is identical, but we've updated the snapshot heads above
+      // This prevents fresh change detection from seeing stale heads
+      console.log(
+        `🔍 Content is identical, but we've updated the snapshot heads above`
+      );
       return;
     }
 
-    const snapshotEntry = snapshot.files.get(filePath);
     const heads = snapshotEntry?.head;
 
     if (!heads) {
@@ -691,7 +801,8 @@ export class SyncEngine {
       }
     });
 
-    if (!dryRun) {
+    // Update snapshot with new heads after content change
+    if (!dryRun && snapshotEntry) {
       snapshot.files.set(filePath, {
         ...snapshotEntry,
         head: handle.heads(),

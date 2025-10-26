@@ -78,6 +78,8 @@ export class MoveDetector {
           toPath: bestMatch.file.path,
           similarity: bestMatch.similarity,
           confidence,
+          // Capture new content (may include modifications)
+          newContent: bestMatch.file.localContent || undefined,
         });
 
         // Only consume the deletion/creation pair when we would auto-apply the move.
