@@ -1,5 +1,7 @@
 # Browser Folder Sync - Patchwork Tool
 
+## NOTE: This tool does not yet work!
+
 A patchwork tool that enables synchronizing local folders with Patchwork documents using the Chrome File System Access API.
 
 ## Features
