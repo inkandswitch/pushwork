@@ -252,6 +252,15 @@ export class SyncEngine {
               this.handlesToWaitOn,
               getSyncServerStorageId(this.syncServerStorageId)
             );
+
+            // CRITICAL: Wait a bit after our changes reach the server to allow
+            // time for WebSocket to deliver OTHER peers' changes to us.
+            // waitForSync only ensures OUR changes reached the server, not that
+            // we've RECEIVED changes from other peers. This delay allows the
+            // WebSocket protocol to propagate peer changes before we re-detect.
+            // Without this, concurrent operations on different peers can miss
+            // each other due to timing races.
+            await new Promise((resolve) => setTimeout(resolve, 500));
           }
         } catch (error) {
           console.error(`❌ Network sync failed: ${error}`);

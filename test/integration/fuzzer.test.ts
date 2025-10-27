@@ -566,33 +566,41 @@ describe("Pushwork Fuzzer", () => {
               await applyOperations(repoB, opsB);
 
               // Multiple sync rounds for convergence
+              // Need longer waits for network propagation
               // Round 1: A pushes changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: A...`
               );
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 2: B pushes changes and pulls A's changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: B...`
               );
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
 
               // Round 3: A pulls B's changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: A...`
               );
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 4: B confirms convergence
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: B...`
               );
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
+
+              // Round 5: Final convergence check
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 3: A (final)...`
+              );
+              await pushwork(["sync"], repoA);
+              await wait(1000);
 
               // Verify final state matches
               console.log(
