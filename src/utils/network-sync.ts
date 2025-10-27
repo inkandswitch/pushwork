@@ -101,7 +101,7 @@ export async function waitForSync(
           if (checkSync()) {
             clearInterval(pollInterval);
           }
-        }, 500); // Check every 500ms
+        }, 100); // Check every 100ms for faster response
 
         // Also wait for remote-heads event (faster when events work)
         const onRemoteHeads = ({

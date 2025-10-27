@@ -280,6 +280,173 @@ describe("Pushwork Fuzzer", () => {
       expect(contentB).toBe("edited content");
     }, 120000); // 2 minute timeout
 
+    it("should handle simplest case: clone then add file", async () => {
+      const repoA = path.join(tmpDir, "simple-a");
+      const repoB = path.join(tmpDir, "simple-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      // Initialize repo A
+      await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
+      await pushwork(["init", "."], repoA);
+      await wait(1000);
+
+      // Clone to B
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await wait(1000);
+
+      // B: Create a new file (nothing else happens)
+      await fs.writeFile(path.join(repoB, "aaa.txt"), "");
+      console.log("Created aaa.txt in B");
+
+      // B syncs
+      console.log("B sync...");
+      const syncB = await pushwork(["sync"], repoB);
+      console.log("B pushed aaa.txt?", syncB.stdout.includes("aaa.txt"));
+      console.log("B full output:\n", syncB.stdout);
+      await wait(1000);
+
+      // A syncs
+      console.log("A sync...");
+      const syncA = await pushwork(["sync"], repoA);
+      console.log("A pulled aaa.txt?", syncA.stdout.includes("aaa.txt"));
+      await wait(1000);
+
+      // Check convergence
+      const filesA = await fs.readdir(repoA);
+      const filesB = await fs.readdir(repoB);
+      console.log(
+        "Files in A:",
+        filesA.filter((f) => !f.startsWith("."))
+      );
+      console.log(
+        "Files in B:",
+        filesB.filter((f) => !f.startsWith("."))
+      );
+
+      expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
+      expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
+    }, 30000);
+
+    it("should handle minimal shrunk case: editAndRename non-existent + add same file", async () => {
+      const repoA = path.join(tmpDir, "shrunk-a");
+      const repoB = path.join(tmpDir, "shrunk-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      // Initialize repo A
+      await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
+      await pushwork(["init", "."], repoA);
+      await wait(1000); // Match manual test timing
+
+      // Clone to B
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await wait(1000); // Match manual test timing
+
+      // A: Try to editAndRename a non-existent file (this is from the shrunk test case)
+      // This operation should be a no-op since aaa.txt doesn't exist
+      const fromPath = path.join(repoA, "aaa.txt");
+      const toPath = path.join(repoA, "aa/aa/aaa.txt");
+      if ((await pathExists(fromPath)) && !(await pathExists(toPath))) {
+        await fs.writeFile(fromPath, "");
+        await fs.mkdir(path.dirname(toPath), { recursive: true });
+        await fs.rename(fromPath, toPath);
+        console.log("Applied editAndRename to A");
+      } else {
+        console.log("Skipped editAndRename to A (file doesn't exist)");
+      }
+
+      // B: Create the same file that A tried to operate on
+      await fs.writeFile(path.join(repoB, "aaa.txt"), "");
+      console.log("Created aaa.txt in B");
+
+      // Sync multiple rounds (use 1s waits for reliable network propagation)
+      // Pattern: A, B, A (like manual test that worked)
+      console.log("Round 1: A sync...");
+      const sync1 = await pushwork(["sync"], repoA);
+      console.log(
+        "  A result:",
+        sync1.stdout.includes("already in sync") ? "no changes" : "had changes"
+      );
+      await wait(1000);
+
+      console.log("Round 2: B sync (should push aaa.txt)...");
+
+      // Check what B sees before sync
+      const bDiffBefore = await pushwork(["diff", "--name-only"], repoB);
+      console.log(
+        "  B diff before sync:",
+        bDiffBefore.stdout
+          .split("\n")
+          .filter((l) => !l.includes("✓") && l.trim())
+      );
+
+      // Check B's snapshot
+      const bSnapshotPath = path.join(repoB, ".pushwork", "snapshot.json");
+      if (await pathExists(bSnapshotPath)) {
+        const bSnapshot = JSON.parse(await fs.readFile(bSnapshotPath, "utf8"));
+        console.log(
+          "  B snapshot files:",
+          Array.from(Object.keys(bSnapshot.files || {}))
+        );
+        console.log(
+          "  B snapshot has aaa.txt?",
+          bSnapshot.files && bSnapshot.files["aaa.txt"] ? "YES" : "NO"
+        );
+      }
+
+      const sync2 = await pushwork(["sync"], repoB);
+      console.log("  B pushed?", sync2.stdout.includes("aaa.txt"));
+      console.log(
+        "  B result:",
+        sync2.stdout.includes("already in sync") ? "no changes" : "had changes"
+      );
+      console.log("  B full output:\n", sync2.stdout);
+      await wait(1000);
+
+      console.log("Round 3: A sync (should pull aaa.txt)...");
+      const sync3 = await pushwork(["sync"], repoA);
+      console.log("  A pulled?", sync3.stdout.includes("aaa.txt"));
+      console.log(
+        "  A result:",
+        sync3.stdout.includes("already in sync") ? "no changes" : "had changes"
+      );
+      await wait(1000);
+
+      // Debug: Check what files exist
+      const filesA = await fs.readdir(repoA);
+      const filesB = await fs.readdir(repoB);
+      console.log(
+        "Files in A after sync:",
+        filesA.filter((f) => !f.startsWith("."))
+      );
+      console.log(
+        "Files in B after sync:",
+        filesB.filter((f) => !f.startsWith("."))
+      );
+
+      // Check diff
+      const { stdout: diffA } = await pushwork(["diff", "--name-only"], repoA);
+      const { stdout: diffB } = await pushwork(["diff", "--name-only"], repoB);
+      console.log("Diff A:", diffA.trim());
+      console.log("Diff B:", diffB.trim());
+
+      // Verify convergence
+      const hashA = await hashDirectory(repoA);
+      const hashB = await hashDirectory(repoB);
+
+      console.log("Hash A:", hashA);
+      console.log("Hash B:", hashB);
+
+      expect(hashA).toBe(hashB);
+
+      // Both should have aaa.txt
+      expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
+      expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
+    }, 30000);
+
     it("should handle files in subdirectories and moves between directories", async () => {
       const repoA = path.join(tmpDir, "subdir-a");
       const repoB = path.join(tmpDir, "subdir-b");
@@ -502,8 +669,8 @@ describe("Pushwork Fuzzer", () => {
     it("should converge after random operations on both sides", async () => {
       await fc.assert(
         fc.asyncProperty(
-          fc.array(fileOperationArbitrary, { minLength: 1, maxLength: 1 }), // Operations on repo A
-          fc.array(fileOperationArbitrary, { minLength: 1, maxLength: 1 }), // Operations on repo B
+          fc.array(fileOperationArbitrary, { minLength: 1, maxLength: 10 }), // Operations on repo A (1-10 ops)
+          fc.array(fileOperationArbitrary, { minLength: 1, maxLength: 10 }), // Operations on repo B (1-10 ops)
           async (opsA, opsB) => {
             // Create two directories for testing
             const testRoot = path.join(
@@ -566,46 +733,54 @@ describe("Pushwork Fuzzer", () => {
               await applyOperations(repoB, opsB);
 
               // Multiple sync rounds for convergence
-              // Need longer waits for network propagation
+              // Need enough time for network propagation between CLI invocations
               // Round 1: A pushes changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: A...`
               );
               await pushwork(["sync"], repoA);
-              await wait(1000);
+              await wait(500);
 
               // Round 2: B pushes changes and pulls A's changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: B...`
               );
               await pushwork(["sync"], repoB);
-              await wait(1000);
+              await wait(500);
 
               // Round 3: A pulls B's changes
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: A...`
               );
               await pushwork(["sync"], repoA);
-              await wait(1000);
+              await wait(500);
 
               // Round 4: B confirms convergence
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: B...`
               );
               await pushwork(["sync"], repoB);
-              await wait(1000);
+              await wait(500);
 
               // Round 5: Final convergence check
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Sync round 3: A (final)...`
               );
               await pushwork(["sync"], repoA);
-              await wait(1000);
+              await wait(500);
+
+              // Round 6: Extra convergence check (for aggressive fuzzing)
+              console.log(
+                `  ⏱️  [${Date.now() - testStart}ms] Sync round 3: B (final)...`
+              );
+              await pushwork(["sync"], repoB);
+              await wait(500);
 
               // Verify final state matches
               console.log(
                 `  ⏱️  [${Date.now() - testStart}ms] Verifying convergence...`
               );
+
               const hashAfterA = await hashDirectory(repoA);
               const hashAfterB = await hashDirectory(repoB);
 
@@ -669,13 +844,13 @@ describe("Pushwork Fuzzer", () => {
           }
         ),
         {
-          numRuns: 5, // Run 5 times to find issues
-          timeout: 120000, // 2 minute timeout per run
-          verbose: true,
-          endOnFailure: true, // Stop on first failure
+          numRuns: 50, // INTENSE MODE (was 20, then cranked to 50)
+          timeout: 180000, // 3 minute timeout per run
+          verbose: true, // Verbose output
+          endOnFailure: true, // Stop on first failure to debug
         }
       );
-    }, 600000); // 10 minute timeout for the whole test
+    }, 1200000); // 20 minute timeout for the whole test
   });
 });
 

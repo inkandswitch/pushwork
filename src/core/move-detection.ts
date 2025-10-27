@@ -47,13 +47,17 @@ export class MoveDetector {
         deletedFile,
         snapshot
       );
-      if (!deletedContent) continue;
+      // CRITICAL: Check for null explicitly, not falsy values
+      // Empty strings "" are valid file content!
+      if (deletedContent === null) continue;
 
       let bestMatch: { file: DetectedChange; similarity: number } | null = null;
 
       for (const createdFile of createdFiles) {
         if (usedCreations.has(createdFile.path)) continue;
-        if (!createdFile.localContent) continue;
+        // CRITICAL: Check for null explicitly, not falsy values
+        // Empty strings "" are valid file content!
+        if (createdFile.localContent === null) continue;
 
         const similarity = await ContentSimilarity.calculateSimilarity(
           deletedContent,

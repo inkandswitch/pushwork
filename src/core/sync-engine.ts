@@ -185,6 +185,9 @@ export class SyncEngine {
    * Run full bidirectional sync
    */
   async sync(dryRun = false): Promise<SyncResult> {
+    const syncStartTime = Date.now();
+    const timings: { [key: string]: number } = {};
+
     const result: SyncResult = {
       success: false,
       filesChanged: 0,
@@ -198,37 +201,47 @@ export class SyncEngine {
 
     try {
       // Load current snapshot
+      const t0 = Date.now();
       let snapshot = await this.snapshotManager.load();
+      timings["load_snapshot"] = Date.now() - t0;
       if (!snapshot) {
         snapshot = this.snapshotManager.createEmpty();
       }
 
       // Backup snapshot before starting
+      const t1 = Date.now();
       if (!dryRun) {
         await this.snapshotManager.backup();
       }
+      timings["backup_snapshot"] = Date.now() - t1;
 
       // Detect all changes
+      const t2 = Date.now();
       const changes = await this.changeDetector.detectChanges(snapshot);
+      timings["detect_changes"] = Date.now() - t2;
 
       // Detect moves
+      const t3 = Date.now();
       const { moves, remainingChanges } = await this.moveDetector.detectMoves(
         changes,
         snapshot,
         this.rootPath
       );
+      timings["detect_moves"] = Date.now() - t3;
 
       if (changes.length > 0) {
         console.log(`🔄 Syncing ${changes.length} changes...`);
       }
 
       // Phase 1: Push local changes to remote
+      const t4 = Date.now();
       const phase1Result = await this.pushLocalChanges(
         remainingChanges,
         moves,
         snapshot,
         dryRun
       );
+      timings["phase1_push"] = Date.now() - t4;
 
       result.filesChanged += phase1Result.filesChanged;
       result.directoriesChanged += phase1Result.directoriesChanged;
@@ -237,6 +250,7 @@ export class SyncEngine {
 
       // Always wait for network sync when enabled (not just when local changes exist)
       // This is critical for clone scenarios where we need to pull remote changes
+      const t5 = Date.now();
       if (!dryRun && this.networkSyncEnabled) {
         try {
           // If we have a root directory URL, wait for it to sync
@@ -248,10 +262,12 @@ export class SyncEngine {
           }
 
           if (this.handlesToWaitOn.length > 0) {
+            const tWaitStart = Date.now();
             await waitForSync(
               this.handlesToWaitOn,
               getSyncServerStorageId(this.syncServerStorageId)
             );
+            timings["network_sync"] = Date.now() - tWaitStart;
 
             // CRITICAL: Wait a bit after our changes reach the server to allow
             // time for WebSocket to deliver OTHER peers' changes to us.
@@ -260,30 +276,40 @@ export class SyncEngine {
             // WebSocket protocol to propagate peer changes before we re-detect.
             // Without this, concurrent operations on different peers can miss
             // each other due to timing races.
-            await new Promise((resolve) => setTimeout(resolve, 500));
+            //
+            // Optimization: Only wait if we pushed changes (shorter delay if no changes)
+            const tDelayStart = Date.now();
+            const delayMs = phase1Result.filesChanged > 0 ? 200 : 100;
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            timings["post_sync_delay"] = Date.now() - tDelayStart;
           }
         } catch (error) {
           console.error(`❌ Network sync failed: ${error}`);
           result.warnings.push(`Network sync failed: ${error}`);
         }
       }
+      timings["total_network"] = Date.now() - t5;
 
       // Re-detect remote changes after network sync to ensure fresh state
       // This fixes race conditions where we detect changes before server propagation
       // NOTE: We DON'T update snapshot heads yet - that would prevent detecting remote changes!
+      const t6 = Date.now();
       const freshChanges = await this.changeDetector.detectChanges(snapshot);
       const freshRemoteChanges = freshChanges.filter(
         (c) =>
           c.changeType === ChangeType.REMOTE_ONLY ||
           c.changeType === ChangeType.BOTH_CHANGED
       );
+      timings["redetect_changes"] = Date.now() - t6;
 
       // Phase 2: Pull remote changes to local using fresh detection
+      const t7 = Date.now();
       const phase2Result = await this.pullRemoteChanges(
         freshRemoteChanges,
         snapshot,
         dryRun
       );
+      timings["phase2_pull"] = Date.now() - t7;
       result.filesChanged += phase2Result.filesChanged;
       result.directoriesChanged += phase2Result.directoriesChanged;
       result.errors.push(...phase2Result.errors);
@@ -292,6 +318,7 @@ export class SyncEngine {
       // CRITICAL FIX: Update snapshot heads AFTER pulling remote changes
       // This ensures that change detection can find remote changes, and we only
       // update the snapshot after the filesystem is in sync with the documents
+      const t8 = Date.now();
       if (!dryRun) {
         // Update file document heads
         for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
@@ -331,17 +358,39 @@ export class SyncEngine {
           }
         }
       }
+      timings["update_snapshot_heads"] = Date.now() - t8;
 
       // Touch root directory if any changes were made during sync
+      const t9 = Date.now();
       const hasChanges =
         result.filesChanged > 0 || result.directoriesChanged > 0;
       if (hasChanges) {
         await this.touchRootDirectory(snapshot, dryRun);
       }
+      timings["touch_root"] = Date.now() - t9;
 
       // Save updated snapshot if not dry run
+      const t10 = Date.now();
       if (!dryRun) {
         await this.snapshotManager.save(snapshot);
+      }
+      timings["save_snapshot"] = Date.now() - t10;
+
+      // Output timing breakdown if enabled via environment variable
+      if (process.env.PUSHWORK_TIMING === "1") {
+        const totalTime = Date.now() - syncStartTime;
+        console.error("\n⏱️  Sync Timing Breakdown:");
+        for (const [key, ms] of Object.entries(timings)) {
+          const pct = ((ms / totalTime) * 100).toFixed(1);
+          console.error(
+            `  ${key.padEnd(25)} ${ms.toString().padStart(5)}ms (${pct}%)`
+          );
+        }
+        console.error(
+          `  ${"TOTAL".padEnd(25)} ${totalTime
+            .toString()
+            .padStart(5)}ms (100.0%)\n`
+        );
       }
 
       result.success = result.errors.length === 0;
@@ -476,7 +525,9 @@ export class SyncEngine {
   ): Promise<void> {
     const snapshotEntry = snapshot.files.get(change.path);
 
-    if (!change.localContent) {
+    // CRITICAL: Check for null explicitly, not falsy values
+    // Empty strings "" and empty Uint8Array are valid file content!
+    if (change.localContent === null) {
       // File was deleted locally
       if (snapshotEntry) {
         console.log(`🗑️  ${change.path}`);
@@ -568,11 +619,13 @@ export class SyncEngine {
 
     if (!change.remoteHead) {
       throw new Error(
-        `No remote head found for remote change to${change.path}`
+        `No remote head found for remote change to ${change.path}`
       );
     }
 
-    if (!change.remoteContent) {
+    // CRITICAL: Check for null explicitly, not falsy values
+    // Empty strings "" and empty Uint8Array are valid file content!
+    if (change.remoteContent === null) {
       // File was deleted remotely
       console.log(`🗑️  ${change.path}`);
       if (!dryRun) {
@@ -725,7 +778,9 @@ export class SyncEngine {
     change: DetectedChange,
     dryRun: boolean
   ): Promise<DocHandle<FileDocument> | null> {
-    if (dryRun || !change.localContent) return null;
+    // CRITICAL: Check for null explicitly, not falsy values
+    // Empty strings "" and empty Uint8Array are valid file content!
+    if (dryRun || change.localContent === null) return null;
 
     const isText = this.isTextContent(change.localContent);
 

@@ -159,9 +159,13 @@ function isExcluded(
       }
     } else if (pattern.includes("*")) {
       // Glob pattern like "*.tmp"
-      const regex = new RegExp(
-        pattern.replace(/\*/g, ".*").replace(/\?/g, ".")
-      );
+      // CRITICAL FIX: Properly escape dots and anchor the pattern
+      // Convert glob to regex: *.tmp -> ^.*\.tmp$ (not /.*.tmp/ which matches "fuftmp.ts"!)
+      const regexPattern = pattern
+        .replace(/\./g, "\\.") // Escape dots first
+        .replace(/\*/g, ".*") // Then convert * to .*
+        .replace(/\?/g, "."); // And ? to single char
+      const regex = new RegExp(`^${regexPattern}$`); // Anchor to match full path
       if (regex.test(relativePath)) {
         return true;
       }

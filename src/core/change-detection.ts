@@ -281,7 +281,7 @@ export class ChangeDetector {
                 remoteContent,
                 remoteHead,
               });
-            } else if (localContent && !remoteContent) {
+            } else if (localContent !== null && remoteContent === null) {
               // File exists locally but not remotely (shouldn't happen in this flow)
               changes.push({
                 path: entryPath,
@@ -290,7 +290,7 @@ export class ChangeDetector {
                 localContent,
                 remoteContent: null,
               });
-            } else if (!localContent && remoteContent) {
+            } else if (localContent === null && remoteContent !== null) {
               // File exists remotely but not locally - this is what we need for clone!
               changes.push({
                 path: entryPath,
