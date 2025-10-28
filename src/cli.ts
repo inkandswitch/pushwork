@@ -33,10 +33,13 @@ function withErrorHandling<T extends any[], R>(
 
 const program = new Command();
 
+// get the version from the package.json
+const version = require("../package.json").version;
+
 program
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version("1.0.0");
+  .version(version);
 
 // Init command
 program

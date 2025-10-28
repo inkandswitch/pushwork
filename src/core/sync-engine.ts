@@ -1,5 +1,3 @@
-const myers = require("myers-diff");
-
 import {
   AutomergeUrl,
   Repo,
@@ -571,31 +569,6 @@ export class SyncEngine {
     } else {
       // Update existing file
       console.log(`📝 ${change.path}`);
-
-      // log the change in detail for debugging
-      // split out remotea nd local content so we don't overwhelm the logs
-      const { remoteContent, localContent, ...rest } = change;
-      console.log(`🔍 Change in detail:`, rest);
-
-      // compare the local and remote content and make a diff so we can
-      // see what happened between the two
-      const { diff, changed } = require("myers-diff");
-      const lhs = change.remoteContent ? change.remoteContent.toString() : "";
-      const rhs = change.localContent ? change.localContent.toString() : "";
-      const changes = diff(lhs, rhs, { compare: "chars" });
-
-      for (const change of changes) {
-        if (changed(change.lhs)) {
-          // deleted
-          const { pos, text, del, length } = change.lhs;
-          console.log(`🔍 Deleted:`, { pos, text, del, length });
-        }
-        if (changed(change.rhs)) {
-          // added
-          const { pos, text, add, length } = change.rhs;
-          console.log(`🔍 Added:`, { pos, text, add, length });
-        }
-      }
 
       await this.updateRemoteFile(
         snapshotEntry.url,
