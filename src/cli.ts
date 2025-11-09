@@ -65,30 +65,6 @@ Note: Custom sync server options must always be used together.`
   )
   .action(
     withErrorHandling(async (path: string, options) => {
-      // Validate that both sync server options are provided together
-      const hasSyncServer = !!options.syncServer;
-      const hasSyncServerStorageId = !!options.syncServerStorageId;
-
-      if (hasSyncServer && !hasSyncServerStorageId) {
-        console.error(
-          chalk.red("Error: --sync-server requires --sync-server-storage-id")
-        );
-        console.error(
-          chalk.yellow("Both arguments must be provided together.")
-        );
-        process.exit(1);
-      }
-
-      if (hasSyncServerStorageId && !hasSyncServer) {
-        console.error(
-          chalk.red("Error: --sync-server-storage-id requires --sync-server")
-        );
-        console.error(
-          chalk.yellow("Both arguments must be provided together.")
-        );
-        process.exit(1);
-      }
-
       await init(path, options.syncServer, options.syncServerStorageId);
     })
   );
@@ -120,30 +96,6 @@ Note: Custom sync server options must always be used together.`
   )
   .action(
     withErrorHandling(async (url: string, path: string, options) => {
-      // Validate that both sync server options are provided together
-      const hasSyncServer = !!options.syncServer;
-      const hasSyncServerStorageId = !!options.syncServerStorageId;
-
-      if (hasSyncServer && !hasSyncServerStorageId) {
-        console.error(
-          chalk.red("Error: --sync-server requires --sync-server-storage-id")
-        );
-        console.error(
-          chalk.yellow("Both arguments must be provided together.")
-        );
-        process.exit(1);
-      }
-
-      if (hasSyncServerStorageId && !hasSyncServer) {
-        console.error(
-          chalk.red("Error: --sync-server-storage-id requires --sync-server")
-        );
-        console.error(
-          chalk.yellow("Both arguments must be provided together.")
-        );
-        process.exit(1);
-      }
-
       await clone(url, path, {
         force: options.force || false,
         dryRun: false,

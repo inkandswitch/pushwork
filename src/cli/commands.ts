@@ -30,6 +30,29 @@ export interface CommandContext {
 }
 
 /**
+ * Validate that sync server options are used together
+ */
+function validateSyncServerOptions(
+  syncServer?: string,
+  syncServerStorageId?: string
+): void {
+  const hasSyncServer = !!syncServer;
+  const hasSyncServerStorageId = !!syncServerStorageId;
+
+  if (hasSyncServer && !hasSyncServerStorageId) {
+    throw new Error(
+      "--sync-server requires --sync-server-storage-id\nBoth arguments must be provided together."
+    );
+  }
+
+  if (hasSyncServerStorageId && !hasSyncServer) {
+    throw new Error(
+      "--sync-server-storage-id requires --sync-server\nBoth arguments must be provided together."
+    );
+  }
+}
+
+/**
  * Shared pre-action that ensures repository and sync engine are properly initialized
  * This function always works, with or without network connectivity
  */
@@ -209,6 +232,9 @@ export async function init(
   syncServer?: string,
   syncServerStorageId?: string
 ): Promise<void> {
+  // Validate sync server options
+  validateSyncServerOptions(syncServer, syncServerStorageId);
+
   const spinner = ora("Starting initialization...").start();
 
   try {
@@ -606,7 +632,7 @@ export async function status(): Promise<void> {
     const spinner = ora("Loading sync status...").start();
 
     // Setup shared context with network disabled for status check
-    const { repo, syncEngine, workingDir } = await setupCommandContext(
+    const { repo, syncEngine, workingDir, config } = await setupCommandContext(
       process.cwd(),
       undefined,
       undefined,
@@ -701,11 +727,8 @@ export async function status(): Promise<void> {
     // Configuration
     console.log(`\n${chalk.bold("⚙️  Configuration:")}`);
 
-    const statusConfigManager2 = new ConfigManager(workingDir);
-    const statusConfig2 = await statusConfigManager2.load();
-
-    if (statusConfig2?.sync_server) {
-      console.log(`  🔗 Sync server: ${chalk.blue(statusConfig2.sync_server)}`);
+    if (config?.sync_server) {
+      console.log(`  🔗 Sync server: ${chalk.blue(config.sync_server)}`);
     } else {
       console.log(
         `  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")} (default)`
@@ -714,7 +737,7 @@ export async function status(): Promise<void> {
 
     console.log(
       `  ⚡ Auto sync: ${
-        statusConfig2?.sync?.auto_sync
+        config?.sync?.auto_sync
           ? chalk.green("Enabled")
           : chalk.gray("Disabled")
       }`
@@ -843,6 +866,9 @@ export async function clone(
   targetPath: string,
   options: CloneOptions
 ): Promise<void> {
+  // Validate sync server options
+  validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
+
   const spinner = ora("Starting clone operation...").start();
 
   try {
