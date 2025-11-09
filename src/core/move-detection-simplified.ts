@@ -92,7 +92,10 @@ export class MoveDetector {
     content2: string | Uint8Array,
     path: string
   ): Promise<number> {
-    if (content1 === content2) return 1.0;
+    // Early exit: identical content via hash
+    const hash1 = await calculateContentHash(content1);
+    const hash2 = await calculateContentHash(content2);
+    if (hash1 === hash2) return 1.0;
 
     // Early exit: size difference too large
     const size1 =

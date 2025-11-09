@@ -421,28 +421,18 @@ export class SyncEngine {
       warnings: [],
     };
 
-    // Process moves first
+    // Process moves first - all detected moves are applied
     for (const move of moves) {
-      if (this.moveDetector.shouldAutoApply(move)) {
-        try {
-          await this.applyMoveToRemote(move, snapshot, dryRun);
-          result.filesChanged++;
-        } catch (error) {
-          result.errors.push({
-            path: move.fromPath,
-            operation: "move",
-            error: error as Error,
-            recoverable: true,
-          });
-        }
-      } else if (this.moveDetector.shouldPromptUser(move)) {
-        // Instead of creating a persistent loop, perform delete+create semantics
-        // so the working tree converges even without auto-apply.
-        result.warnings.push(
-          `Potential move detected: ${this.moveDetector.formatMove(
-            move
-          )} (${Math.round(move.similarity * 100)}% similar)`
-        );
+      try {
+        await this.applyMoveToRemote(move, snapshot, dryRun);
+        result.filesChanged++;
+      } catch (error) {
+        result.errors.push({
+          path: move.fromPath,
+          operation: "move",
+          error: error as Error,
+          recoverable: true,
+        });
       }
     }
 

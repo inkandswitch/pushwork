@@ -439,13 +439,10 @@ export async function sync(options: SyncOptions): Promise<void> {
         );
         for (const move of preview.moves.slice(0, 5)) {
           // Show first 5
-          const confidence =
-            move.confidence === "auto"
-              ? chalk.green("Auto")
-              : move.confidence === "prompt"
-              ? chalk.yellow("Prompt")
-              : chalk.red("Low");
-          console.log(`  🔄 ${move.fromPath} → ${move.toPath} (${confidence})`);
+          const percentage = Math.round(move.similarity * 100);
+          console.log(
+            `  🔄 ${move.fromPath} → ${move.toPath} (${percentage}% similar)`
+          );
         }
         if (preview.moves.length > 5) {
           console.log(

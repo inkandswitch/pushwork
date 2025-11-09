@@ -69,6 +69,5 @@ export interface MoveCandidate {
   fromPath: string;
   toPath: string;
   similarity: number;
-  confidence: "auto" | "prompt" | "low";
   newContent?: string | Uint8Array; // Content at destination (may differ from source if modified during move)
 }
