@@ -1,11 +1,10 @@
 import * as path from "path";
 import * as fs from "fs/promises";
-import { Repo, StorageId, AutomergeUrl } from "@automerge/automerge-repo";
+import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
 import chalk from "chalk";
 import ora from "ora";
 import * as diffLib from "diff";
 import {
-  InitOptions,
   CloneOptions,
   SyncOptions,
   DiffOptions,

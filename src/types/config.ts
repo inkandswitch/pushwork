@@ -82,13 +82,6 @@ export interface CommandOptions {
 }
 
 /**
- * Init command specific options
- */
-export interface InitOptions extends CommandOptions {
-  // No additional options needed - init creates a new sync directory
-}
-
-/**
  * Clone command specific options
  */
 export interface CloneOptions extends CommandOptions {

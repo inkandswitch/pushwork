@@ -29,7 +29,14 @@ pnpm run build
 pnpm link --global
 ```
 
-Note: you can also run this from NPX, I think.
+Make sure that pnpm is in your PATH. E.g. in your .zshrc or .bashrc, add:
+
+```bash
+export PNPM_HOME="/Users/username/Library/pnpm" # wherever you have pnpm installed
+export PATH="$PATH:$PNPM_HOME"
+```
+
+Note: you can also run this from NPX.
 
 ### Basic Usage
 
