@@ -171,6 +171,33 @@ export class ChangeDetector {
     const changes: DetectedChange[] = [];
 
     for (const [relativePath, snapshotEntry] of snapshot.files.entries()) {
+      // CRITICAL FIX: Check if file still exists in remote directory listing
+      // Files can be removed from the directory without their document heads changing
+      const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
+        snapshot.rootDirectoryUrl,
+        relativePath
+      );
+
+      if (!stillExistsInDirectory) {
+        // File was removed from remote directory listing
+        const localContent = await this.getLocalContent(relativePath);
+
+        // Only report as deleted if local file still exists
+        // (if local file is also deleted, detectLocalChanges handles it)
+        if (localContent !== null) {
+          changes.push({
+            path: relativePath,
+            changeType: ChangeType.REMOTE_ONLY,
+            fileType: FileType.TEXT,
+            localContent,
+            remoteContent: null, // File deleted remotely
+            localHead: snapshotEntry.head,
+            remoteHead: snapshotEntry.head,
+          });
+        }
+        continue;
+      }
+
       const currentRemoteHead = await this.getCurrentRemoteHead(
         snapshotEntry.url
       );
@@ -492,6 +519,74 @@ export class ChangeDetector {
       return ChangeType.REMOTE_ONLY;
     } else {
       return ChangeType.BOTH_CHANGED;
+    }
+  }
+
+  /**
+   * Check if a file exists in the remote directory hierarchy
+   */
+  private async fileExistsInRemoteDirectory(
+    rootDirectoryUrl: AutomergeUrl | undefined,
+    filePath: string
+  ): Promise<boolean> {
+    if (!rootDirectoryUrl) return false;
+    const entry = await this.findFileInDirectoryHierarchy(
+      rootDirectoryUrl,
+      filePath
+    );
+    return entry !== null;
+  }
+
+  /**
+   * Find a file in the directory hierarchy by path
+   */
+  private async findFileInDirectoryHierarchy(
+    directoryUrl: AutomergeUrl,
+    filePath: string
+  ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
+    try {
+      const pathParts = filePath.split("/");
+      let currentDirUrl = directoryUrl;
+
+      // Navigate through directories to find the parent directory
+      for (let i = 0; i < pathParts.length - 1; i++) {
+        const dirName = pathParts[i];
+        const dirHandle = await this.repo.find<DirectoryDocument>(
+          currentDirUrl
+        );
+        const dirDoc = await dirHandle.doc();
+
+        if (!dirDoc) return null;
+
+        const subDirEntry = dirDoc.docs.find(
+          (entry: { name: string; type: string; url: AutomergeUrl }) =>
+            entry.name === dirName && entry.type === "folder"
+        );
+
+        if (!subDirEntry) return null;
+        currentDirUrl = subDirEntry.url;
+      }
+
+      // Now look for the file in the final directory
+      const fileName = pathParts[pathParts.length - 1];
+      const finalDirHandle = await this.repo.find<DirectoryDocument>(
+        currentDirUrl
+      );
+      const finalDirDoc = await finalDirHandle.doc();
+
+      if (!finalDirDoc) return null;
+
+      const fileEntry = finalDirDoc.docs.find(
+        (entry: { name: string; type: string; url: AutomergeUrl }) =>
+          entry.name === fileName && entry.type === "file"
+      );
+
+      return fileEntry || null;
+    } catch (error) {
+      console.warn(
+        `Failed to find file ${filePath} in directory hierarchy: ${error}`
+      );
+      return null;
     }
   }
 }
