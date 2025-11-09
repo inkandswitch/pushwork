@@ -230,23 +230,30 @@ export async function init(
     }
     out.log("");
     out.log(`Run 'pushwork sync' to start synchronizing`);
+    out.exit();
   } catch (error) {
     out.banner("error", "Initialization failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
+  out.exit();
 }
 
 /**
  * Run bidirectional sync
  */
-export async function sync(options: SyncOptions): Promise<void> {
+export async function sync(
+  targetPath = ".",
+  options: SyncOptions
+): Promise<void> {
   const out = new Output();
 
   try {
     out.task("Syncing");
 
-    const { repo, syncEngine, workingDir } = await setupCommandContext();
+    const { repo, syncEngine, workingDir } = await setupCommandContext(
+      targetPath
+    );
 
     if (options.dryRun) {
       out.update("Analyzing changes");
@@ -477,14 +484,14 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(): Promise<void> {
+export async function status(targetPath = "."): Promise<void> {
   const out = new Output();
 
   try {
     out.task("Loading status");
 
     const { repo, syncEngine, workingDir, config } = await setupCommandContext(
-      process.cwd(),
+      targetPath,
       undefined,
       undefined,
       false
@@ -509,7 +516,7 @@ export async function status(): Promise<void> {
     if (syncStatus.hasChanges) {
       out.pair("Changes", `${syncStatus.changeCount} pending`);
       out.log("");
-      out.log("Run 'pushwork diff' to see pairs");
+      out.log("Run 'pushwork diff' to see changes");
     } else {
       out.pair("Status", "up to date");
     }
@@ -833,6 +840,119 @@ export async function debug(
     await safeRepoShutdown(repo, "debug");
   } catch (error) {
     out.error(`Debug failed: ${error}`);
+    out.exit(1);
+  }
+}
+
+/**
+ * List tracked files
+ */
+export async function ls(
+  targetPath = ".",
+  options: { long?: boolean } = {}
+): Promise<void> {
+  const out = new Output();
+
+  try {
+    const { repo, syncEngine } = await setupCommandContext(
+      targetPath,
+      undefined,
+      undefined,
+      false
+    );
+    const syncStatus = await syncEngine.getStatus();
+
+    if (!syncStatus.snapshot) {
+      out.error("No snapshot found");
+      await safeRepoShutdown(repo, "ls");
+      out.exit(1);
+      return;
+    }
+
+    const files = Array.from(syncStatus.snapshot.files.entries()).sort(
+      ([pathA], [pathB]) => pathA.localeCompare(pathB)
+    );
+
+    if (files.length === 0) {
+      out.info("No tracked files");
+      await safeRepoShutdown(repo, "ls");
+      return;
+    }
+
+    if (options.long) {
+      // Long format with URLs
+      for (const [filePath, entry] of files) {
+        const url = entry?.url || "unknown";
+        console.log(`${filePath} -> ${url}`);
+      }
+    } else {
+      // Simple list
+      for (const [filePath] of files) {
+        console.log(filePath);
+      }
+    }
+
+    await safeRepoShutdown(repo, "ls");
+  } catch (error) {
+    out.error(`List failed: ${error}`);
+    out.exit(1);
+  }
+}
+
+/**
+ * View or edit configuration
+ */
+export async function config(
+  targetPath = ".",
+  options: { list?: boolean; get?: string; set?: string; value?: string } = {}
+): Promise<void> {
+  const out = new Output();
+
+  try {
+    const resolvedPath = path.resolve(targetPath);
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
+
+    if (!(await pathExists(syncToolDir))) {
+      out.error("Directory not initialized for sync");
+      out.exit(1);
+    }
+
+    const configManager = new ConfigManager(resolvedPath);
+    const config = await configManager.getMerged();
+
+    if (options.list) {
+      // List all configuration
+      out.banner("info", "Configuration");
+      out.log(JSON.stringify(config, null, 2));
+    } else if (options.get) {
+      // Get specific config value
+      const keys = options.get.split(".");
+      let value: any = config;
+      for (const key of keys) {
+        value = value?.[key];
+      }
+      if (value !== undefined) {
+        console.log(
+          typeof value === "object" ? JSON.stringify(value, null, 2) : value
+        );
+      } else {
+        out.error(`Config key not found: ${options.get}`);
+        out.exit(1);
+      }
+    } else {
+      // Show basic config info
+      out.banner("info", "Configuration");
+      out.pair("Sync server", config.sync_server || "default");
+      out.pair("Sync enabled", config.sync_enabled ? "yes" : "no");
+      out.pair(
+        "Exclusions",
+        config.defaults.exclude_patterns.length.toString()
+      );
+      out.log("");
+      out.log("Use --list to see full configuration");
+    }
+  } catch (error) {
+    out.error(`Config failed: ${error}`);
     out.exit(1);
   }
 }

@@ -13,6 +13,8 @@ import {
   commit,
   url,
   debug,
+  ls,
+  config,
 } from "./cli/commands";
 
 /**
@@ -45,7 +47,11 @@ program
 program
   .command("init")
   .description("Initialize sync in directory")
-  .argument("<path>", "Directory path to initialize")
+  .argument(
+    "[path]",
+    "Directory path to initialize (default: current directory)",
+    "."
+  )
   .option(
     "--sync-server <url>",
     "Custom sync server URL (must be used with --sync-server-storage-id)"
@@ -58,8 +64,9 @@ program
     "after",
     `
 Examples:
-  pushwork init ./my-folder
-  pushwork init ./my-folder --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
+  pushwork init                # Initialize current directory
+  pushwork init ./my-folder    # Initialize specific directory
+  pushwork init --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
   
 Note: Custom sync server options must always be used together.`
   )
@@ -73,9 +80,12 @@ Note: Custom sync server options must always be used together.`
 program
   .command("clone")
   .description("Clone an existing synced directory")
-  .argument("<url>", "AutomergeUrl of root directory to clone")
+  .argument(
+    "<url>",
+    "AutomergeUrl of root directory to clone (format: automerge:XXXXX)"
+  )
   .argument("<path>", "Target directory path")
-  .option("--force", "Overwrite existing directory")
+  .option("-f, --force", "Overwrite existing directory")
   .option(
     "--sync-server <url>",
     "Custom sync server URL (must be used with --sync-server-storage-id)"
@@ -89,7 +99,7 @@ program
     `
 Examples:
   pushwork clone automerge:abc123 ./my-clone
-  pushwork clone automerge:abc123 ./my-clone --force
+  pushwork clone automerge:abc123 ./my-clone -f
   pushwork clone automerge:abc123 ./my-clone --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
   
 Note: Custom sync server options must always be used together.`
@@ -109,9 +119,21 @@ Note: Custom sync server options must always be used together.`
 // Commit command
 program
   .command("commit")
-  .description("Commit local changes (no network sync)")
-  .argument("[path]", "Directory path to commit", ".")
+  .description("Save local changes to Automerge documents (offline operation)")
+  .argument(
+    "[path]",
+    "Directory path to commit (default: current directory)",
+    "."
+  )
   .option("--dry-run", "Show what would be committed without applying changes")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork commit              # Commit changes in current directory
+  pushwork commit ./my-folder  # Commit changes in specific directory
+  pushwork commit --dry-run    # Preview what would be committed`
+  )
   .action(
     withErrorHandling(async (path: string, options) => {
       await commit(path, options.dryRun || false);
@@ -122,11 +144,25 @@ program
 program
   .command("sync")
   .description("Run full bidirectional synchronization")
+  .argument(
+    "[path]",
+    "Directory path to sync (default: current directory)",
+    "."
+  )
   .option("--dry-run", "Show what would be done without applying changes")
   .option("-v, --verbose", "Verbose output")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork sync                # Sync current directory
+  pushwork sync ./my-folder    # Sync specific directory
+  pushwork sync --dry-run      # Preview changes without applying
+  pushwork sync -v             # Sync with verbose output`
+  )
   .action(
-    withErrorHandling(async (options) => {
-      await sync({
+    withErrorHandling(async (path: string, options) => {
+      await sync(path, {
         dryRun: options.dryRun || false,
         verbose: options.verbose || false,
       });
@@ -137,9 +173,22 @@ program
 program
   .command("diff")
   .description("Show changes in working directory since last sync")
-  .argument("[path]", "Limit diff to specific path", ".")
+  .argument(
+    "[path]",
+    "Limit diff to specific path (default: current directory)",
+    "."
+  )
   .option("--tool <tool>", "Use external diff tool (meld, vimdiff, etc.)")
   .option("--name-only", "Show only changed file names")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork diff                  # Show all changes
+  pushwork diff ./src            # Show changes in src directory
+  pushwork diff --name-only      # List changed files only
+  pushwork diff --tool meld      # Use external diff tool`
+  )
   .action(
     withErrorHandling(async (path: string, options) => {
       await diff(path, {
@@ -155,20 +204,42 @@ program
 program
   .command("status")
   .description("Show sync status summary")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork status              # Show status for current directory
+  pushwork status ./my-folder  # Show status for specific directory`
+  )
   .action(
-    withErrorHandling(async (options) => {
-      await status();
+    withErrorHandling(async (path: string) => {
+      await status(path);
     })
   );
 
 // Log command
 program
   .command("log")
-  .description("Show sync history")
-  .argument("[path]", "Show history for specific file or directory", ".")
+  .description("Show sync history (experimental)")
+  .argument(
+    "[path]",
+    "Show history for specific file or directory (default: current directory)",
+    "."
+  )
   .option("--oneline", "Compact one-line per sync format")
   .option("--since <date>", "Show syncs since date")
   .option("--limit <n>", "Limit number of syncs shown", "10")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork log                 # Show recent sync history
+  pushwork log --limit 20      # Show last 20 syncs
+  pushwork log --oneline       # Compact format
+  
+Note: This command is experimental and shows limited history.`
+  )
   .action(
     withErrorHandling(async (path: string, options) => {
       await log(path, {
@@ -184,10 +255,23 @@ program
 // Checkout command
 program
   .command("checkout")
-  .description("Restore directory to state from previous sync")
+  .description("Restore directory to state from previous sync (experimental)")
   .argument("<sync-id>", "Sync ID to restore to")
-  .argument("[path]", "Specific path to restore", ".")
+  .argument(
+    "[path]",
+    "Specific path to restore (default: current directory)",
+    "."
+  )
   .option("-f, --force", "Force checkout even if there are uncommitted changes")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork checkout abc123      # Restore to sync abc123
+  pushwork checkout abc123 -f   # Force restore
+  
+Note: This command is experimental and not fully implemented yet.`
+  )
   .action(
     withErrorHandling(async (syncId: string, path: string, options) => {
       await checkout(syncId, path, {
@@ -222,7 +306,7 @@ Note: This command outputs only the URL, making it useful for scripts.`
 program
   .command("debug")
   .description("Show internal debug information including lastSyncAt timestamp")
-  .argument("[path]", "Directory path", ".")
+  .argument("[path]", "Directory path (default: current directory)", ".")
   .option(
     "-v, --verbose",
     "Show verbose debug information including full document contents"
@@ -242,6 +326,56 @@ that gets updated when sync operations make changes.`
     withErrorHandling(async (path: string, options) => {
       await debug(path, {
         verbose: options.verbose || false,
+      });
+    })
+  );
+
+// List command
+program
+  .command("ls")
+  .description("List tracked files in the repository")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .option("-l, --long", "Show long format with Automerge URLs")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork ls              # List all tracked files
+  pushwork ls -l           # List with Automerge URLs
+  pushwork ls ./my-folder  # List files in specific directory`
+  )
+  .action(
+    withErrorHandling(async (path: string, options) => {
+      await ls(path, {
+        long: options.long || false,
+      });
+    })
+  );
+
+// Config command
+program
+  .command("config")
+  .description("View or edit repository configuration")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .option("--list", "Show full configuration")
+  .option(
+    "--get <key>",
+    "Get specific config value (dot notation, e.g., sync.auto_sync)"
+  )
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork config              # Show basic configuration
+  pushwork config --list       # Show full configuration as JSON
+  pushwork config --get sync_server  # Get specific config value
+  pushwork config --get defaults.exclude_patterns  # Get nested value`
+  )
+  .action(
+    withErrorHandling(async (path: string, options) => {
+      await config(path, {
+        list: options.list || false,
+        get: options.get,
       });
     })
   );
