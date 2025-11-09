@@ -1,7 +1,6 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
-import chalk from "chalk";
 import * as diffLib from "diff";
 import {
   CloneOptions,
@@ -20,11 +19,41 @@ import {
   DirectoryDocument,
 } from "../types";
 import { SyncEngine } from "../core";
-import { DetectedChange } from "../core/change-detection";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 import { Output } from "./output";
+
+/**
+ * Simple key transformation for debug output: snake_case -> Title Case
+ */
+function prettifyKey(key: string): string {
+  return (
+    key
+      .split("_")
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ") + ":"
+  );
+}
+
+/**
+ * Format timing value with percentage and optional metadata
+ */
+function formatTimingValue(
+  value: any,
+  key: string,
+  total: number,
+  timings?: Record<string, any>
+): string {
+  // Skip non-timing values
+  if (key === "documents_to_sync") return "";
+  if (key === "total") return `${(value / 1000).toFixed(3)}s`;
+
+  const timeStr = `${(value / 1000).toFixed(3)}s`;
+  const pctStr = `(${((value / total) * 100).toFixed(1)}%)`;
+
+  return `${timeStr} ${pctStr}`;
+}
 
 /**
  * Shared context that commands can use
@@ -228,11 +257,11 @@ export async function init(
 
     out.done();
 
-    out.success("INITIALIZED", rootHandle.url);
     out.pair("Sync", defaultSyncServer);
     if (result.filesChanged > 0) {
       out.pair("Files", `${result.filesChanged} added`);
     }
+    out.success("INITIALIZED", rootHandle.url);
 
     // Show timing breakdown if debug mode is enabled
     if (
@@ -240,33 +269,12 @@ export async function init(
       result.timings &&
       Object.keys(result.timings).length > 0
     ) {
-      const timings = result.timings;
-      const total = timings.total || 0;
+      const total = result.timings.total || 0;
       out.log("");
-      out.log("Performance breakdown:");
-      if (timings.detect_changes) {
-        out.log(
-          `  File scanning:     ${(timings.detect_changes / 1000).toFixed(1)}s`
-        );
-      }
-      if (timings.phase1_push) {
-        out.log(
-          `  Creating docs:     ${(timings.phase1_push / 1000).toFixed(1)}s`
-        );
-      }
-      if (timings.network_sync) {
-        out.log(
-          `  Network sync:      ${(timings.network_sync / 1000).toFixed(1)}s (${
-            timings.documents_to_sync || 0
-          } docs)`
-        );
-      }
-      if (timings.save_snapshot) {
-        out.log(
-          `  Saving snapshot:   ${(timings.save_snapshot / 1000).toFixed(1)}s`
-        );
-      }
-      out.log(`  Total:             ${(total / 1000).toFixed(1)}s`);
+      out.special("TIMING", "");
+      out.obj(result.timings, prettifyKey, (value, key) =>
+        formatTimingValue(value, key, total, result.timings)
+      );
     }
 
     out.log("");
@@ -373,6 +381,20 @@ export async function sync(
           if (result.warnings.length > 5) {
             out.log(`  ... and ${result.warnings.length - 5} more`);
           }
+        }
+
+        // Show timing breakdown if debug mode is enabled
+        if (
+          options.debug &&
+          result.timings &&
+          Object.keys(result.timings).length > 0
+        ) {
+          const total = result.timings.total || 0;
+          out.log("");
+          out.special("TIMING", "");
+          out.obj(result.timings, prettifyKey, (value, key) =>
+            formatTimingValue(value, key, total, result.timings)
+          );
         }
       } else {
         out.done("partial", false);
@@ -721,10 +743,10 @@ export async function clone(
 
     out.done();
 
-    out.success("CLONED", rootUrl);
     out.pair("Path", resolvedPath);
     out.pair("Files", `${result.filesChanged} downloaded`);
     out.pair("Sync", defaultSyncServer);
+    out.success("CLONED", rootUrl);
   } catch (error) {
     out.error("FAILED", "Clone failed");
     out.log(`  ${error}`);

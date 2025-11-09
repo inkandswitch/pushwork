@@ -61,6 +61,41 @@ export class Output {
   }
 
   /**
+   * Show an object as a table of key-value pairs
+   * Filters out undefined values and applies optional transforms
+   * Automatically calculates key padding from max key length
+   */
+  obj(
+    obj: Record<string, any>,
+    keyTransform?: (key: string) => string,
+    valueTransform?: (value: any, key: string) => string
+  ): void {
+    this.#stopTask();
+
+    // Filter out undefined values and apply key transform
+    const entries: Array<[string, string, any]> = [];
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === undefined) continue;
+      const displayKey = keyTransform ? keyTransform(key) : key;
+      entries.push([key, displayKey, value]);
+    }
+
+    // Calculate max key length for padding
+    const maxKeyLength = Math.max(
+      ...entries.map(([, displayKey]) => displayKey.length)
+    );
+
+    // Print each entry
+    for (const [key, displayKey, value] of entries) {
+      const displayValue = valueTransform
+        ? valueTransform(value, key)
+        : String(value);
+      const keyFormatted = chalk.dim(displayKey.padEnd(maxKeyLength + 2));
+      console.log(`${keyFormatted}${displayValue}`);
+    }
+  }
+
+  /**
    * Show plain message with optional color
    */
   log(
@@ -115,6 +150,23 @@ export class Output {
         message,
         (text) => chalk.bgGrey.white(text),
         (text) => chalk.dim(text)
+      )
+    );
+  }
+
+  /**
+   * Show info message (dim/grey)
+   * - 1 arg: dim text
+   * - 2 args: grey background label + message
+   */
+  special(labelOrMessage: string, message?: string): void {
+    this.#stopTask();
+    console.log(
+      this.#fmt(
+        labelOrMessage,
+        message,
+        (text) => chalk.bgCyan.black(text),
+        (text) => chalk.cyan(text)
       )
     );
   }
