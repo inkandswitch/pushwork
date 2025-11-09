@@ -3,6 +3,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { glob } from "glob";
 import * as mimeTypes from "mime-types";
+import * as ignore from "ignore";
 import { FileSystemEntry, FileType } from "../types";
 import { isEnhancedTextFile } from "./mime-types";
 
@@ -137,48 +138,23 @@ export async function removePath(filePath: string): Promise<void> {
 }
 
 /**
- * Check if a path matches any of the exclude patterns
+ * Check if a path matches any of the exclude patterns using the ignore library
+ * Supports proper gitignore-style patterns (e.g., "node_modules", "*.tmp", ".git")
  */
 function isExcluded(
   filePath: string,
   basePath: string,
   excludePatterns: string[]
 ): boolean {
+  if (excludePatterns.length === 0) return false;
+
   const relativePath = path.relative(basePath, filePath);
 
-  for (const pattern of excludePatterns) {
-    // Handle different pattern types
-    if (pattern.startsWith(".") && !pattern.includes("*")) {
-      // Directory pattern like ".pushwork" or ".git"
-      if (
-        relativePath.startsWith(pattern) ||
-        relativePath.includes(`/${pattern}/`) ||
-        relativePath.includes(`\\${pattern}\\`)
-      ) {
-        return true;
-      }
-    } else if (pattern.includes("*")) {
-      // Glob pattern like "*.tmp"
-      // CRITICAL FIX: Properly escape dots and anchor the pattern
-      // Convert glob to regex: *.tmp -> ^.*\.tmp$ (not /.*.tmp/ which matches "fuftmp.ts"!)
-      const regexPattern = pattern
-        .replace(/\./g, "\\.") // Escape dots first
-        .replace(/\*/g, ".*") // Then convert * to .*
-        .replace(/\?/g, "."); // And ? to single char
-      const regex = new RegExp(`^${regexPattern}$`); // Anchor to match full path
-      if (regex.test(relativePath)) {
-        return true;
-      }
-    } else {
-      // Exact directory name like "node_modules"
-      const parts = relativePath.split(/[/\\]/);
-      if (parts.includes(pattern)) {
-        return true;
-      }
-    }
-  }
+  // Use the ignore library which implements proper .gitignore semantics
+  // This is the same library used by ESLint and other major tools
+  const ig = ignore.default().add(excludePatterns);
 
-  return false;
+  return ig.ignores(relativePath);
 }
 
 /**
