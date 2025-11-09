@@ -37,9 +37,6 @@ export async function createRepo(
     const networkAdapter = new BrowserWebSocketClientAdapter(syncServer);
     repoConfig.network = [networkAdapter];
     repoConfig.enableRemoteHeadsGossiping = true;
-    console.log(chalk.gray(`  ✓ Network sync enabled: ${syncServer}`));
-  } else {
-    console.log(chalk.gray("  ✓ Local-only mode (network sync disabled)"));
   }
 
   const repo = new Repo(repoConfig);
@@ -47,11 +44,27 @@ export async function createRepo(
   // Subscribe to the sync server storage for network sync
   if (enableNetwork && syncServer && syncServerStorageId) {
     repo.subscribeToRemotes([syncServerStorageId as StorageId]);
-    console.log(
-      chalk.gray(
-        `  ✓ Subscribed to sync server storage: ${syncServerStorageId}`
-      )
-    );
+  }
+
+  // Suppress Automerge internal debug output unless explicitly enabled
+  if (!process.env.PUSHWORK_DEBUG) {
+    const originalLog = console.log;
+    console.log = (...args: any[]) => {
+      const str = args[0]?.toString() || "";
+      // Filter out Automerge internal messages and sync progress
+      if (
+        str.includes("emitting") ||
+        str.includes("lastSyncAt") ||
+        str.includes("Updated root directory") ||
+        str.includes("🔄") ||
+        str.includes("⬇️") ||
+        str.includes("🔀") ||
+        str.includes("Syncing")
+      ) {
+        return;
+      }
+      originalLog(...args);
+    };
   }
 
   return repo;

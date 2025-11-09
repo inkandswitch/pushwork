@@ -2,7 +2,6 @@ import * as path from "path";
 import * as fs from "fs/promises";
 import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
 import chalk from "chalk";
-import ora from "ora";
 import * as diffLib from "diff";
 import {
   CloneOptions,
@@ -18,6 +17,7 @@ import { DetectedChange } from "../core/change-detection";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
+import { Output } from "./output";
 
 /**
  * Shared context that commands can use
@@ -137,33 +137,6 @@ export async function safeRepoShutdown(
 }
 
 /**
- * Common progress message helpers
- */
-export const ProgressMessages = {
-  // Setup messages
-  directoryFound: () => console.log(chalk.gray("  ✓ Sync directory found")),
-  configLoaded: () => console.log(chalk.gray("  ✓ Configuration loaded")),
-  repoConnected: () => console.log(chalk.gray("  ✓ Connected to repository")),
-
-  // Configuration display
-  syncServer: (server: string) =>
-    console.log(chalk.gray(`  ✓ Sync server: ${server}`)),
-  storageId: (id: string) => console.log(chalk.gray(`  ✓ Storage ID: ${id}`)),
-  rootUrl: (url: string) => console.log(chalk.gray(`  ✓ Root URL: ${url}`)),
-
-  // Operation completion
-  changesWritten: () =>
-    console.log(chalk.gray("  ✓ All changes written to disk")),
-  syncCompleted: (duration: number) =>
-    console.log(chalk.gray(`  ✓ Initial sync completed in ${duration}ms`)),
-  directoryStructureCreated: () =>
-    console.log(chalk.gray("  ✓ Created sync directory structure")),
-  configSaved: () => console.log(chalk.gray("  ✓ Saved configuration")),
-  repoCreated: () =>
-    console.log(chalk.gray("  ✓ Created Automerge repository")),
-};
-
-/**
  * Show actual content diff for a changed file
  */
 async function showContentDiff(change: DetectedChange): Promise<void> {
@@ -235,31 +208,29 @@ export async function init(
   // Validate sync server options
   validateSyncServerOptions(syncServer, syncServerStorageId);
 
-  const spinner = ora("Starting initialization...").start();
+  const out = new Output();
+  const startTime = Date.now();
 
   try {
     const resolvedPath = path.resolve(targetPath);
 
-    // Step 1: Directory setup
-    spinner.text = "Setting up directory structure...";
+    out.task(`Initializing ${resolvedPath}`);
+
     await ensureDirectoryExists(resolvedPath);
 
     // Check if already initialized
     const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
-      spinner.fail("Directory already initialized for sync");
-      return;
+      out.fail("Already initialized");
+      out.error("Directory already initialized for sync");
+      out.exit(1);
     }
 
-    // Step 2: Create sync directories
-    spinner.text = "Creating .pushwork directory...";
+    out.update("Creating sync directory");
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-    ProgressMessages.directoryStructureCreated();
-
-    // Step 3: Configuration setup
-    spinner.text = "Setting up configuration...";
+    out.update("Setting up configuration");
     const configManager = new ConfigManager(resolvedPath);
     const defaultSyncServer = syncServer || "wss://sync3.automerge.org";
     const defaultStorageId =
@@ -284,80 +255,49 @@ export async function init(
     };
     await configManager.save(config);
 
-    ProgressMessages.configSaved();
-    ProgressMessages.syncServer(defaultSyncServer);
-    ProgressMessages.storageId(defaultStorageId);
-
-    // Step 4: Initialize Automerge repo and create root directory document
-    spinner.text = "Creating root directory document...";
+    out.update("Creating root directory");
     const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
       syncServer: syncServer,
       syncServerStorageId: syncServerStorageId,
     });
 
-    // Create the root directory document
     const rootDoc: DirectoryDocument = {
       "@patchwork": { type: "folder" },
       docs: [],
     };
     const rootHandle = repo.create(rootDoc);
 
-    ProgressMessages.repoCreated();
-    ProgressMessages.rootUrl(rootHandle.url);
-
-    // Step 5: Scan existing files
-    spinner.text = "Scanning existing files...";
+    out.update("Scanning existing files");
     const syncEngine = new SyncEngine(
       repo,
       resolvedPath,
       config.defaults.exclude_patterns,
-      true, // Network sync enabled for init
+      true,
       config.sync_server_storage_id
     );
 
-    // Get file count for progress
-    const dirEntries = await fs.readdir(resolvedPath, { withFileTypes: true });
-    const fileCount = dirEntries.filter((dirent: any) =>
-      dirent.isFile()
-    ).length;
-
-    if (fileCount > 0) {
-      console.log(chalk.gray(`  ✓ Found ${fileCount} existing files`));
-      spinner.text = `Creating initial snapshot with ${fileCount} files...`;
-    } else {
-      spinner.text = "Creating initial empty snapshot...";
-    }
-
-    // Step 6: Set the root directory URL before creating initial snapshot
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
+    const result = await syncEngine.sync(false);
 
-    // Step 7: Create initial snapshot
-    spinner.text = "Creating initial snapshot...";
-    const startTime = Date.now();
-    await syncEngine.sync(false);
-    const duration = Date.now() - startTime;
-
-    ProgressMessages.syncCompleted(duration);
-
-    // Step 8: Ensure all Automerge operations are flushed to disk
-    spinner.text = "Flushing changes to disk...";
+    out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
-    ProgressMessages.changesWritten();
 
-    spinner.succeed(`Initialized sync in ${chalk.green(resolvedPath)}`);
+    out.done("done", startTime);
 
-    console.log(`\n${chalk.bold("🎉 Sync Directory Created!")}`);
-    console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
-    console.log(`  🔗 Sync server: ${chalk.blue(defaultSyncServer)}`);
-    console.log(
-      `\n${chalk.green("Initialization complete!")} Run ${chalk.cyan(
-        "pushwork sync"
-      )} to start syncing.`
-    );
+    out.section("success", "Repository initialized");
+    out.detail("URL", rootHandle.url);
+    out.detail("Sync", defaultSyncServer);
+    if (result.filesChanged > 0) {
+      out.detail("Files", `${result.filesChanged} added`);
+    }
+    out.log("");
+    out.log(`Run 'pushwork sync' to start synchronizing`);
   } catch (error) {
-    spinner.fail(`Failed to initialize: ${error}`);
-    throw error;
+    out.fail("failed");
+    out.section("error", "Initialization failed");
+    out.log(`  ${error}`);
+    out.exit(1);
   }
 }
 
@@ -365,193 +305,121 @@ export async function init(
  * Run bidirectional sync
  */
 export async function sync(options: SyncOptions): Promise<void> {
-  const spinner = ora("Starting sync operation...").start();
+  const out = new Output();
+  const startTime = Date.now();
 
   try {
-    // Step 1: Setup shared context
-    spinner.text = "Setting up sync context...";
-    const { repo, syncEngine, config, workingDir } =
-      await setupCommandContext();
+    out.task("Syncing");
 
-    ProgressMessages.directoryFound();
-    ProgressMessages.configLoaded();
-    ProgressMessages.syncServer(
-      config?.sync_server || "wss://sync3.automerge.org"
-    );
-    ProgressMessages.repoConnected();
-
-    // Show root directory URL for context
-    const syncStatus = await syncEngine.getStatus();
-    if (syncStatus.snapshot?.rootDirectoryUrl) {
-      ProgressMessages.rootUrl(syncStatus.snapshot.rootDirectoryUrl);
-    }
+    const { repo, syncEngine, workingDir } = await setupCommandContext();
 
     if (options.dryRun) {
-      // Dry run mode - detailed preview
-      spinner.text = "Analyzing changes (dry run)...";
-      const startTime = Date.now();
+      out.update("Analyzing changes");
       const preview = await syncEngine.previewChanges();
-      const analysisTime = Date.now() - startTime;
 
-      spinner.succeed("Change analysis completed");
-
-      console.log(`\n${chalk.bold("📊 Change Analysis")} (${analysisTime}ms):`);
-      console.log(chalk.gray(`  Directory: ${workingDir}`));
-      console.log(chalk.gray(`  Analysis time: ${analysisTime}ms`));
+      out.done("done", startTime);
 
       if (preview.changes.length === 0 && preview.moves.length === 0) {
-        console.log(
-          `\n${chalk.green("✨ No changes detected")} - everything is in sync!`
-        );
+        out.section("info", "No changes detected");
+        out.log("Everything is already in sync");
         return;
       }
 
-      console.log(`\n${chalk.bold("📋 Summary:")}`);
-      console.log(`  ${preview.summary}`);
+      out.section("info", "Changes pending");
+      out.detail("Directory", workingDir);
+      out.detail("Changes", preview.changes.length.toString());
+      if (preview.moves.length > 0) {
+        out.detail("Moves", preview.moves.length.toString());
+      }
 
-      if (preview.changes.length > 0) {
-        const localChanges = preview.changes.filter(
-          (c) =>
-            c.changeType === "local_only" || c.changeType === "both_changed"
-        ).length;
-        const remoteChanges = preview.changes.filter(
-          (c) =>
-            c.changeType === "remote_only" || c.changeType === "both_changed"
-        ).length;
-        const conflicts = preview.changes.filter(
-          (c) => c.changeType === "both_changed"
-        ).length;
-
-        console.log(
-          `\n${chalk.bold("📁 File Changes:")} (${
-            preview.changes.length
-          } total)`
-        );
-        if (localChanges > 0) {
-          console.log(`  ${chalk.green("📤")} Local changes: ${localChanges}`);
-        }
-        if (remoteChanges > 0) {
-          console.log(`  ${chalk.blue("📥")} Remote changes: ${remoteChanges}`);
-        }
-        if (conflicts > 0) {
-          console.log(`  ${chalk.yellow("⚠️")} Conflicts: ${conflicts}`);
-        }
-
-        console.log(`\n${chalk.bold("📄 Changed Files:")}`);
-        for (const change of preview.changes.slice(0, 10)) {
-          // Show first 10
-          const typeIcon =
-            change.changeType === "local_only"
-              ? chalk.green("📤")
-              : change.changeType === "remote_only"
-              ? chalk.blue("📥")
-              : change.changeType === "both_changed"
-              ? chalk.yellow("⚠️")
-              : chalk.gray("➖");
-          console.log(`  ${typeIcon} ${change.path}`);
-        }
-        if (preview.changes.length > 10) {
-          console.log(
-            `  ${chalk.gray(
-              `... and ${preview.changes.length - 10} more files`
-            )}`
-          );
-        }
+      out.log("");
+      out.log("Files:");
+      for (const change of preview.changes.slice(0, 10)) {
+        const prefix =
+          change.changeType === "local_only"
+            ? "[local]  "
+            : change.changeType === "remote_only"
+            ? "[remote] "
+            : "[conflict]";
+        out.log(`  ${prefix} ${change.path}`);
+      }
+      if (preview.changes.length > 10) {
+        out.log(`  ... and ${preview.changes.length - 10} more`);
       }
 
       if (preview.moves.length > 0) {
-        console.log(
-          `\n${chalk.bold("🔄 Potential Moves:")} (${preview.moves.length})`
-        );
+        out.log("");
+        out.log("Moves:");
         for (const move of preview.moves.slice(0, 5)) {
-          // Show first 5
-          const percentage = Math.round(move.similarity * 100);
-          console.log(
-            `  🔄 ${move.fromPath} → ${move.toPath} (${percentage}% similar)`
-          );
+          out.log(`  ${move.fromPath} → ${move.toPath}`);
         }
         if (preview.moves.length > 5) {
-          console.log(
-            `  ${chalk.gray(`... and ${preview.moves.length - 5} more moves`)}`
-          );
+          out.log(`  ... and ${preview.moves.length - 5} more`);
         }
       }
 
-      console.log(
-        `\n${chalk.cyan("ℹ️  Run without --dry-run to apply these changes")}`
-      );
+      out.log("");
+      out.log("Run without --dry-run to apply these changes");
     } else {
-      // Actual sync operation
-      spinner.text = "Detecting changes...";
-      const startTime = Date.now();
-
+      out.update("Synchronizing");
       const result = await syncEngine.sync(false);
-      const totalTime = Date.now() - startTime;
+
+      out.update("Writing to disk");
+      await safeRepoShutdown(repo, "sync");
+
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
       if (result.success) {
-        spinner.succeed(`Sync completed in ${totalTime}ms`);
-
-        console.log(`\n${chalk.bold("✅ Sync Results:")}`);
-        console.log(`  📄 Files changed: ${chalk.yellow(result.filesChanged)}`);
-        console.log(
-          `  📁 Directories changed: ${chalk.yellow(result.directoriesChanged)}`
-        );
-        console.log(`  ⏱️  Total time: ${chalk.gray(totalTime + "ms")}`);
+        if (result.filesChanged === 0 && result.directoriesChanged === 0) {
+          out.done(`done (${duration}s)`);
+          out.section("success", "Already in sync");
+        } else {
+          out.done(`done (${duration}s)`);
+          out.section(
+            "success",
+            `${result.filesChanged} file${
+              result.filesChanged !== 1 ? "s" : ""
+            } updated`
+          );
+          out.detail("Files", result.filesChanged.toString());
+          out.detail("Time", `${duration}s`);
+        }
 
         if (result.warnings.length > 0) {
-          console.log(
-            `\n${chalk.yellow("⚠️  Warnings:")} (${result.warnings.length})`
-          );
+          out.log("");
+          out.section("warning", `${result.warnings.length} warnings`);
           for (const warning of result.warnings.slice(0, 5)) {
-            console.log(`  ${chalk.yellow("⚠️")} ${warning}`);
+            out.log(`  ${warning}`);
           }
           if (result.warnings.length > 5) {
-            console.log(
-              `  ${chalk.gray(
-                `... and ${result.warnings.length - 5} more warnings`
-              )}`
-            );
+            out.log(`  ... and ${result.warnings.length - 5} more`);
           }
         }
-
-        if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-          console.log(`\n${chalk.green("✨ Everything already in sync!")}`);
-        }
-
-        // Ensure all changes are flushed to disk
-        spinner.text = "Flushing changes to disk...";
-        await safeRepoShutdown(repo, "sync");
-        ProgressMessages.changesWritten();
       } else {
-        spinner.fail("Sync completed with errors");
-
-        console.log(
-          `\n${chalk.red("❌ Sync Errors:")} (${result.errors.length})`
+        out.done(`partial (${duration}s)`);
+        out.section(
+          "partial",
+          `${result.filesChanged} updated, ${result.errors.length} errors`
         );
+        out.detail("Files", result.filesChanged.toString());
+        out.detail("Errors", result.errors.length.toString());
+
+        out.log("");
         for (const error of result.errors.slice(0, 5)) {
-          console.log(
-            `  ${chalk.red("❌")} ${error.path}: ${error.error.message}`
-          );
+          out.section("error", error.path);
+          out.log(`  ${error.error.message}`);
+          out.log("");
         }
         if (result.errors.length > 5) {
-          console.log(
-            `  ${chalk.gray(`... and ${result.errors.length - 5} more errors`)}`
-          );
+          out.log(`... and ${result.errors.length - 5} more errors`);
         }
-
-        if (result.filesChanged > 0 || result.directoriesChanged > 0) {
-          console.log(`\n${chalk.yellow("⚠️  Partial sync completed:")}`);
-          console.log(`  📄 Files changed: ${result.filesChanged}`);
-          console.log(`  📁 Directories changed: ${result.directoriesChanged}`);
-        }
-
-        // Still try to flush any partial changes
-        await safeRepoShutdown(repo, "sync-error");
       }
     }
   } catch (error) {
-    spinner.fail(`Sync failed: ${error}`);
-    throw error;
+    out.fail("failed");
+    out.section("error", "Sync failed");
+    out.log(`  ${error}`);
+    out.exit(1);
   }
 }
 
@@ -562,8 +430,11 @@ export async function diff(
   targetPath = ".",
   options: DiffOptions
 ): Promise<void> {
+  const out = new Output();
+
   try {
-    // Setup shared context with network disabled for diff check
+    out.task("Analyzing changes");
+
     const { repo, syncEngine } = await setupCommandContext(
       targetPath,
       undefined,
@@ -572,55 +443,44 @@ export async function diff(
     );
     const preview = await syncEngine.previewChanges();
 
+    out.done("done");
+
     if (options.nameOnly) {
-      // Show only file names
       for (const change of preview.changes) {
         console.log(change.path);
       }
       return;
     }
 
-    // Show root directory URL for context
-    const diffStatus = await syncEngine.getStatus();
-    if (diffStatus.snapshot?.rootDirectoryUrl) {
-      console.log(
-        chalk.gray(`Root URL: ${diffStatus.snapshot.rootDirectoryUrl}`)
-      );
-      console.log("");
-    }
-
     if (preview.changes.length === 0) {
-      console.log(chalk.green("No changes detected"));
+      out.section("info", "No changes detected");
+      await safeRepoShutdown(repo, "diff");
       return;
     }
 
-    console.log(chalk.bold("Differences:"));
+    out.section("info", `${preview.changes.length} changes`);
+    out.log("");
 
     for (const change of preview.changes) {
-      const typeLabel =
+      const prefix =
         change.changeType === "local_only"
-          ? chalk.green("[LOCAL]")
+          ? "[local]  "
           : change.changeType === "remote_only"
-          ? chalk.blue("[REMOTE]")
-          : change.changeType === "both_changed"
-          ? chalk.yellow("[CONFLICT]")
-          : chalk.gray("[NO CHANGE]");
+          ? "[remote] "
+          : "[conflict]";
 
-      console.log(`\n${typeLabel} ${change.path}`);
+      out.log(`${prefix} ${change.path}`);
 
-      if (options.tool) {
-        console.log(`  Use "${options.tool}" to view detailed diff`);
-      } else {
-        // Show actual diff content
+      if (!options.tool) {
         await showContentDiff(change);
       }
     }
 
-    // Cleanup repo resources
     await safeRepoShutdown(repo, "diff");
   } catch (error) {
-    console.error(chalk.red(`Diff failed: ${error}`));
-    throw error;
+    out.fail("failed");
+    out.error(`Diff failed: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -628,10 +488,11 @@ export async function diff(
  * Show sync status
  */
 export async function status(): Promise<void> {
-  try {
-    const spinner = ora("Loading sync status...").start();
+  const out = new Output();
 
-    // Setup shared context with network disabled for status check
+  try {
+    out.task("Loading status");
+
     const { repo, syncEngine, workingDir, config } = await setupCommandContext(
       process.cwd(),
       undefined,
@@ -640,143 +501,34 @@ export async function status(): Promise<void> {
     );
     const syncStatus = await syncEngine.getStatus();
 
-    spinner.stop();
+    out.done("done");
 
-    console.log(chalk.bold("📊 Sync Status Report"));
-    console.log(`${"=".repeat(50)}`);
+    out.section("status", workingDir);
 
-    // Directory information
-    console.log(`\n${chalk.bold("📁 Directory Information:")}`);
-    console.log(`  📂 Path: ${chalk.blue(workingDir)}`);
-    console.log(`  🔧 Config: ${path.join(workingDir, ".pushwork")}`);
-
-    // Show root directory URL if available
     if (syncStatus.snapshot?.rootDirectoryUrl) {
-      console.log(
-        `  🔗 Root URL: ${chalk.cyan(syncStatus.snapshot.rootDirectoryUrl)}`
-      );
-
-      // Try to show lastSyncAt from root directory document
-      try {
-        const rootHandle = await repo.find<DirectoryDocument>(
-          syncStatus.snapshot.rootDirectoryUrl
-        );
-        const rootDoc = await rootHandle.doc();
-        if (rootDoc?.lastSyncAt) {
-          const lastSyncDate = new Date(rootDoc.lastSyncAt);
-          const timeSince = Date.now() - rootDoc.lastSyncAt;
-          const timeAgo =
-            timeSince < 60000
-              ? `${Math.floor(timeSince / 1000)}s ago`
-              : timeSince < 3600000
-              ? `${Math.floor(timeSince / 60000)}m ago`
-              : `${Math.floor(timeSince / 3600000)}h ago`;
-          console.log(
-            `  🕒 Root last touched: ${chalk.green(
-              lastSyncDate.toLocaleString()
-            )} (${chalk.gray(timeAgo)})`
-          );
-        } else {
-          console.log(`  🕒 Root last touched: ${chalk.yellow("Never")}`);
-        }
-      } catch (error) {
-        console.log(
-          `  🕒 Root last touched: ${chalk.gray("Unable to determine")}`
-        );
-      }
-    } else {
-      console.log(`  🔗 Root URL: ${chalk.yellow("Not set")}`);
+      out.detail("URL", syncStatus.snapshot.rootDirectoryUrl);
     }
 
-    // Sync timing
-    if (syncStatus.lastSync) {
-      const timeSince = Date.now() - syncStatus.lastSync.getTime();
-      const timeAgo =
-        timeSince < 60000
-          ? `${Math.floor(timeSince / 1000)}s ago`
-          : timeSince < 3600000
-          ? `${Math.floor(timeSince / 60000)}m ago`
-          : `${Math.floor(timeSince / 3600000)}h ago`;
-
-      console.log(`\n${chalk.bold("⏱️  Sync Timing:")}`);
-      console.log(
-        `  🕐 Last sync: ${chalk.green(syncStatus.lastSync.toLocaleString())}`
-      );
-      console.log(`  ⏳ Time since: ${chalk.gray(timeAgo)}`);
-    } else {
-      console.log(`\n${chalk.bold("⏱️  Sync Timing:")}`);
-      console.log(`  🕐 Last sync: ${chalk.yellow("Never synced")}`);
-      console.log(
-        `  💡 Run ${chalk.cyan("pushwork sync")} to perform initial sync`
-      );
-    }
-
-    // Change status
-    console.log(`\n${chalk.bold("📝 Change Status:")}`);
-    if (syncStatus.hasChanges) {
-      console.log(
-        `  📄 Pending changes: ${chalk.yellow(syncStatus.changeCount)}`
-      );
-      console.log(`  🔄 Status: ${chalk.yellow("Sync needed")}`);
-      console.log(`  💡 Run ${chalk.cyan("pushwork diff")} to see details`);
-    } else {
-      console.log(`  📄 Pending changes: ${chalk.green("None")}`);
-      console.log(`  ✅ Status: ${chalk.green("Up to date")}`);
-    }
-
-    // Configuration
-    console.log(`\n${chalk.bold("⚙️  Configuration:")}`);
-
-    if (config?.sync_server) {
-      console.log(`  🔗 Sync server: ${chalk.blue(config.sync_server)}`);
-    } else {
-      console.log(
-        `  🔗 Sync server: ${chalk.blue("wss://sync3.automerge.org")} (default)`
-      );
-    }
-
-    console.log(
-      `  ⚡ Auto sync: ${
-        config?.sync?.auto_sync
-          ? chalk.green("Enabled")
-          : chalk.gray("Disabled")
-      }`
-    );
-
-    // Snapshot information
     if (syncStatus.snapshot) {
       const fileCount = syncStatus.snapshot.files.size;
-      const dirCount = syncStatus.snapshot.directories.size;
-
-      console.log(`\n${chalk.bold("📊 Repository Statistics:")}`);
-      console.log(`  📄 Tracked files: ${chalk.yellow(fileCount)}`);
-      console.log(`  📁 Tracked directories: ${chalk.yellow(dirCount)}`);
-      console.log(
-        `  🏷️  Snapshot timestamp: ${chalk.gray(
-          new Date(syncStatus.snapshot.timestamp).toLocaleString()
-        )}`
-      );
+      out.detail("Files", `${fileCount} tracked`);
     }
 
-    // Quick actions
-    console.log(`\n${chalk.bold("🚀 Quick Actions:")}`);
+    out.detail("Sync", config?.sync_server || "wss://sync3.automerge.org");
+
     if (syncStatus.hasChanges) {
-      console.log(
-        `  ${chalk.cyan("pushwork diff")}     - View pending changes`
-      );
-      console.log(`  ${chalk.cyan("pushwork sync")}     - Apply changes`);
+      out.detail("Changes", `${syncStatus.changeCount} pending`);
+      out.log("");
+      out.log("Run 'pushwork diff' to see details");
     } else {
-      console.log(
-        `  ${chalk.cyan("pushwork sync")}     - Check for remote changes`
-      );
+      out.detail("Status", "up to date");
     }
-    console.log(`  ${chalk.cyan("pushwork log")}      - View sync history`);
 
-    // Cleanup repo resources
     await safeRepoShutdown(repo, "status");
   } catch (error) {
-    console.error(chalk.red(`❌ Status check failed: ${error}`));
-    throw error;
+    out.fail("failed");
+    out.error(`Status check failed: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -787,47 +539,30 @@ export async function log(
   targetPath = ".",
   options: LogOptions
 ): Promise<void> {
+  const out = new Output();
+
   try {
-    // Setup shared context with network disabled for log check
-    const {
-      repo: logRepo,
-      syncEngine: logSyncEngine,
-      workingDir,
-    } = await setupCommandContext(targetPath, undefined, undefined, false);
-    const logStatus = await logSyncEngine.getStatus();
+    const { repo: logRepo, workingDir } = await setupCommandContext(
+      targetPath,
+      undefined,
+      undefined,
+      false
+    );
 
-    if (logStatus.snapshot?.rootDirectoryUrl) {
-      console.log(
-        chalk.gray(`Root URL: ${logStatus.snapshot.rootDirectoryUrl}`)
-      );
-      console.log("");
-    }
-
-    // TODO: Implement history tracking and display
-    // For now, show basic information
-
-    console.log(chalk.bold("Sync History:"));
-
-    // Check for snapshot files
+    // TODO: Implement history tracking
     const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
     if (await pathExists(snapshotPath)) {
       const stats = await fs.stat(snapshotPath);
-
-      if (options.oneline) {
-        console.log(`${stats.mtime.toISOString()} - Last sync`);
-      } else {
-        console.log(`Last sync: ${chalk.green(stats.mtime.toISOString())}`);
-        console.log(`Snapshot size: ${stats.size} bytes`);
-      }
+      out.section("info", "Sync history (stub)");
+      out.detail("Last sync", stats.mtime.toISOString());
     } else {
-      console.log(chalk.yellow("No sync history found"));
+      out.section("info", "No sync history found");
     }
 
-    // Cleanup repo resources
     await safeRepoShutdown(logRepo, "log");
   } catch (error) {
-    console.error(chalk.red(`Log failed: ${error}`));
-    throw error;
+    out.error(`Log failed: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -839,22 +574,18 @@ export async function checkout(
   targetPath = ".",
   options: CheckoutOptions
 ): Promise<void> {
+  const out = new Output();
+
   try {
-    // Setup shared context
     const { workingDir } = await setupCommandContext(targetPath);
 
     // TODO: Implement checkout functionality
-    // This would involve:
-    // 1. Finding the sync with the given ID
-    // 2. Restoring file states from that sync
-    // 3. Updating the snapshot
-
-    console.log(chalk.yellow(`Checkout functionality not yet implemented`));
-    console.log(`Would restore to sync: ${syncId}`);
-    console.log(`Target path: ${workingDir}`);
+    out.section("warning", "Checkout not yet implemented");
+    out.detail("Sync ID", syncId);
+    out.detail("Path", workingDir);
   } catch (error) {
-    console.error(chalk.red(`Checkout failed: ${error}`));
-    throw error;
+    out.error(`Checkout failed: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -869,22 +600,21 @@ export async function clone(
   // Validate sync server options
   validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
 
-  const spinner = ora("Starting clone operation...").start();
+  const out = new Output();
+  const startTime = Date.now();
 
   try {
     const resolvedPath = path.resolve(targetPath);
 
-    // Step 1: Directory setup
-    spinner.text = "Setting up target directory...";
+    out.task(`Cloning ${rootUrl}`);
 
     // Check if directory exists and handle --force
     if (await pathExists(resolvedPath)) {
       const files = await fs.readdir(resolvedPath);
       if (files.length > 0 && !options.force) {
-        spinner.fail(
-          "Target directory is not empty. Use --force to overwrite."
-        );
-        return;
+        out.fail("Target directory is not empty");
+        out.error("Use --force to overwrite existing directory");
+        out.exit(1);
       }
     } else {
       await ensureDirectoryExists(resolvedPath);
@@ -894,26 +624,18 @@ export async function clone(
     const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
       if (!options.force) {
-        spinner.fail(
-          "Directory already initialized for sync. Use --force to overwrite."
-        );
-        return;
+        out.fail("Directory already initialized");
+        out.error("Use --force to overwrite existing sync directory");
+        out.exit(1);
       }
-      // Clean up existing sync directory
       await fs.rm(syncToolDir, { recursive: true, force: true });
     }
 
-    console.log(chalk.gray("  ✓ Target directory prepared"));
-
-    // Step 2: Create sync directories
-    spinner.text = "Creating .pushwork directory...";
+    out.update("Creating sync directory");
     await ensureDirectoryExists(syncToolDir);
     await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-    ProgressMessages.directoryStructureCreated();
-
-    // Step 3: Configuration setup
-    spinner.text = "Setting up configuration...";
+    out.update("Setting up configuration");
     const configManager = new ConfigManager(resolvedPath);
     const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
     const defaultStorageId =
@@ -938,60 +660,39 @@ export async function clone(
     };
     await configManager.save(config);
 
-    ProgressMessages.configSaved();
-    ProgressMessages.syncServer(defaultSyncServer);
-    ProgressMessages.storageId(defaultStorageId);
-
-    // Step 4: Initialize Automerge repo and connect to root directory
-    spinner.text = "Connecting to root directory document...";
+    out.update("Connecting to sync server");
     const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
       syncServer: options.syncServer,
       syncServerStorageId: options.syncServerStorageId,
     });
 
-    ProgressMessages.repoCreated();
-    ProgressMessages.rootUrl(rootUrl);
-
-    // Step 5: Initialize sync engine and pull existing structure
-    spinner.text = "Downloading directory structure...";
+    out.update("Downloading files");
     const syncEngine = new SyncEngine(
       repo,
       resolvedPath,
       config.defaults.exclude_patterns,
-      true, // Network sync enabled for clone
+      true,
       defaultStorageId
     );
 
-    // Set the root directory URL to connect to the cloned repository
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
+    const result = await syncEngine.sync(false);
 
-    // Sync to pull the existing directory structure and files
-    const startTime = Date.now();
-    await syncEngine.sync(false);
-    const duration = Date.now() - startTime;
-
-    console.log(chalk.gray(`  ✓ Directory sync completed in ${duration}ms`));
-
-    // Ensure all changes are flushed to disk
-    spinner.text = "Flushing changes to disk...";
+    out.update("Writing to disk");
     await safeRepoShutdown(repo, "clone");
-    ProgressMessages.changesWritten();
 
-    spinner.succeed(`Cloned sync directory to ${chalk.green(resolvedPath)}`);
+    out.done("done", startTime);
 
-    console.log(`\n${chalk.bold("📂 Directory Cloned!")}`);
-    console.log(`  📁 Directory: ${chalk.blue(resolvedPath)}`);
-    console.log(`  🔗 Root URL: ${chalk.cyan(rootUrl)}`);
-    console.log(`  🔗 Sync server: ${chalk.blue(defaultSyncServer)}`);
-    console.log(
-      `\n${chalk.green("Clone complete!")} Run ${chalk.cyan(
-        "pushwork sync"
-      )} to stay in sync.`
-    );
+    out.section("success", `Cloned to ${resolvedPath}`);
+    out.detail("Files", `${result.filesChanged} downloaded`);
+    out.detail("Sync", defaultSyncServer);
+    out.detail("URL", rootUrl);
   } catch (error) {
-    spinner.fail(`Failed to clone: ${error}`);
-    throw error;
+    out.fail("failed");
+    out.section("error", "Clone failed");
+    out.log(`  ${error}`);
+    out.exit(1);
   }
 }
 
@@ -999,25 +700,21 @@ export async function clone(
  * Get the root URL for the current pushwork repository
  */
 export async function url(targetPath = "."): Promise<void> {
+  const out = new Output();
+
   try {
     const resolvedPath = path.resolve(targetPath);
-
-    // Check if initialized
     const syncToolDir = path.join(resolvedPath, ".pushwork");
+
     if (!(await pathExists(syncToolDir))) {
-      console.error(chalk.red("Directory not initialized for sync"));
-      console.error(`Run ${chalk.cyan("pushwork init .")} to get started`);
-      process.exit(1);
+      out.error("Directory not initialized for sync");
+      out.exit(1);
     }
 
-    // Load the snapshot directly to get the URL without all the verbose output
     const snapshotPath = path.join(syncToolDir, "snapshot.json");
     if (!(await pathExists(snapshotPath))) {
-      console.error(chalk.red("No snapshot found"));
-      console.error(
-        chalk.gray("The repository may not be properly initialized")
-      );
-      process.exit(1);
+      out.error("No snapshot found");
+      out.exit(1);
     }
 
     const snapshotData = await fs.readFile(snapshotPath, "utf-8");
@@ -1027,15 +724,12 @@ export async function url(targetPath = "."): Promise<void> {
       // Output just the URL for easy use in scripts
       console.log(snapshot.rootDirectoryUrl);
     } else {
-      console.error(chalk.red("No root URL found in snapshot"));
-      console.error(
-        chalk.gray("The repository may not be properly initialized")
-      );
-      process.exit(1);
+      out.error("No root URL found in snapshot");
+      out.exit(1);
     }
   } catch (error) {
-    console.error(chalk.red(`Failed to get URL: ${error}`));
-    process.exit(1);
+    out.error(`Failed to get URL: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -1043,68 +737,45 @@ export async function commit(
   targetPath: string,
   dryRun: boolean = false
 ): Promise<void> {
-  const spinner = ora("Starting commit operation...").start();
-  let repo: Repo | undefined;
+  const out = new Output();
+  const startTime = Date.now();
 
   try {
-    // Setup shared context with network disabled for local-only commit
-    spinner.text = "Setting up commit context...";
-    const context = await setupCommandContext(
+    out.task("Committing local changes");
+
+    const { repo, syncEngine } = await setupCommandContext(
       targetPath,
       undefined,
       undefined,
       false
     );
-    repo = context.repo;
-    const syncEngine = context.syncEngine;
-    spinner.succeed("Connected to repository");
 
-    // Run local commit only
-    spinner.text = "Committing local changes...";
-    const startTime = Date.now();
     const result = await syncEngine.commitLocal(dryRun);
-    const duration = Date.now() - startTime;
+    await safeRepoShutdown(repo, "commit");
 
-    if (repo) {
-      await safeRepoShutdown(repo, "commit");
-    }
-    spinner.succeed(`Commit completed in ${duration}ms`);
-
-    // Display results
-    console.log(chalk.green("\n✅ Commit Results:"));
-    console.log(`  📄 Files committed: ${result.filesChanged}`);
-    console.log(`  📁 Directories committed: ${result.directoriesChanged}`);
-    console.log(`  ⏱️  Total time: ${duration}ms`);
-
-    if (result.warnings.length > 0) {
-      console.log(chalk.yellow("\n⚠️  Warnings:"));
-      result.warnings.forEach((warning: string) =>
-        console.log(chalk.yellow(`  • ${warning}`))
-      );
-    }
+    out.done("done", startTime);
 
     if (result.errors.length > 0) {
-      console.log(chalk.red("\n❌ Errors:"));
-      result.errors.forEach((error) =>
-        console.log(
-          chalk.red(
-            `  • ${error.operation} at ${error.path}: ${error.error.message}`
-          )
-        )
-      );
-      process.exit(1);
+      out.section("error", `${result.errors.length} errors`);
+      result.errors.forEach((error) => {
+        out.log(`  ${error.path}: ${error.error.message}`);
+      });
+      out.exit(1);
     }
 
-    console.log(
-      chalk.gray("\n💡 Run 'pushwork push' to upload to sync server")
-    );
-  } catch (error) {
-    if (repo) {
-      await safeRepoShutdown(repo, "commit-error");
+    out.section("success", `${result.filesChanged} files committed`);
+    out.detail("Files", result.filesChanged.toString());
+    out.detail("Directories", result.directoriesChanged.toString());
+
+    if (result.warnings.length > 0) {
+      out.log("");
+      out.section("warning", `${result.warnings.length} warnings`);
+      result.warnings.forEach((warning: string) => out.log(`  ${warning}`));
     }
-    spinner.fail(`Commit failed: ${error}`);
-    console.error(chalk.red(`Error: ${error}`));
-    process.exit(1);
+  } catch (error) {
+    out.fail("failed");
+    out.error(`Commit failed: ${error}`);
+    out.exit(1);
   }
 }
 
@@ -1115,10 +786,11 @@ export async function debug(
   targetPath = ".",
   options: { verbose?: boolean } = {}
 ): Promise<void> {
-  try {
-    const spinner = ora("Loading debug information...").start();
+  const out = new Output();
 
-    // Setup shared context with network disabled for debug check
+  try {
+    out.task("Loading debug info");
+
     const { repo, syncEngine, workingDir } = await setupCommandContext(
       targetPath,
       undefined,
@@ -1127,21 +799,13 @@ export async function debug(
     );
     const debugStatus = await syncEngine.getStatus();
 
-    spinner.stop();
+    out.done("done");
 
-    console.log(chalk.bold("🔍 Debug Information"));
-    console.log(`${"=".repeat(50)}`);
-
-    // Directory information
-    console.log(`\n${chalk.bold("📁 Directory Information:")}`);
-    console.log(`  📂 Path: ${chalk.blue(workingDir)}`);
-    console.log(`  🔧 Config: ${path.join(workingDir, ".pushwork")}`);
+    out.section("info", "Debug Information");
+    out.detail("Path", workingDir);
 
     if (debugStatus.snapshot?.rootDirectoryUrl) {
-      console.log(`\n${chalk.bold("🗂️  Root Directory Document:")}`);
-      console.log(
-        `  🔗 URL: ${chalk.cyan(debugStatus.snapshot.rootDirectoryUrl)}`
-      );
+      out.detail("URL", debugStatus.snapshot.rootDirectoryUrl);
 
       try {
         const rootHandle = await repo.find<DirectoryDocument>(
@@ -1150,79 +814,47 @@ export async function debug(
         const rootDoc = await rootHandle.doc();
 
         if (rootDoc) {
-          console.log(`  📊 Document Structure:`);
-          console.log(`    📄 Entries: ${rootDoc.docs.length}`);
-          console.log(`    🏷️  Type: ${rootDoc["@patchwork"].type}`);
-
+          out.detail("Entries", rootDoc.docs.length.toString());
           if (rootDoc.lastSyncAt) {
             const lastSyncDate = new Date(rootDoc.lastSyncAt);
-            console.log(
-              `    🕒 Last Sync At: ${chalk.green(lastSyncDate.toISOString())}`
-            );
-            console.log(
-              `    🕒 Last Sync Timestamp: ${chalk.gray(rootDoc.lastSyncAt)}`
-            );
-          } else {
-            console.log(`    🕒 Last Sync At: ${chalk.yellow("Never set")}`);
+            out.detail("Last sync", lastSyncDate.toISOString());
           }
 
           if (options.verbose) {
-            console.log(`\n  📋 Full Document Content:`);
-            console.log(JSON.stringify(rootDoc, null, 2));
-
-            console.log(`\n  🏷️  Document Heads:`);
-            console.log(JSON.stringify(rootHandle.heads(), null, 2));
+            out.log("");
+            out.log("Document:");
+            out.log(JSON.stringify(rootDoc, null, 2));
+            out.log("");
+            out.log("Heads:");
+            out.log(JSON.stringify(rootHandle.heads(), null, 2));
           }
-
-          console.log(`\n  📁 Directory Entries:`);
-          rootDoc.docs.forEach((entry: any, index: number) => {
-            console.log(
-              `    ${index + 1}. ${entry.name} (${entry.type}) -> ${entry.url}`
-            );
-          });
-        } else {
-          console.log(`  ❌ Unable to load root document`);
         }
       } catch (error) {
-        console.log(`  ❌ Error loading root document: ${error}`);
+        out.warn(`Error loading root document: ${error}`);
       }
-    } else {
-      console.log(`\n${chalk.bold("🗂️  Root Directory Document:")}`);
-      console.log(`  ❌ No root directory URL set`);
     }
 
-    // Snapshot information
     if (debugStatus.snapshot) {
-      console.log(`\n${chalk.bold("📸 Snapshot Information:")}`);
-      console.log(`  📄 Tracked files: ${debugStatus.snapshot.files.size}`);
-      console.log(
-        `  📁 Tracked directories: ${debugStatus.snapshot.directories.size}`
+      out.detail("Files", debugStatus.snapshot.files.size.toString());
+      out.detail(
+        "Directories",
+        debugStatus.snapshot.directories.size.toString()
       );
-      console.log(
-        `  🏷️  Timestamp: ${new Date(
-          debugStatus.snapshot.timestamp
-        ).toISOString()}`
-      );
-      console.log(`  📂 Root path: ${debugStatus.snapshot.rootPath}`);
 
       if (options.verbose) {
-        console.log(`\n  📋 All Tracked Files:`);
-        debugStatus.snapshot.files.forEach((entry, path) => {
-          console.log(`    ${path} -> ${entry.url}`);
-        });
-
-        console.log(`\n  📋 All Tracked Directories:`);
-        debugStatus.snapshot.directories.forEach((entry, path) => {
-          console.log(`    ${path} -> ${entry.url}`);
+        out.log("");
+        out.log("All tracked files:");
+        debugStatus.snapshot.files.forEach((entry, filePath) => {
+          out.log(`  ${filePath} -> ${entry.url}`);
         });
       }
     }
 
-    // Cleanup repo resources
     await safeRepoShutdown(repo, "debug");
   } catch (error) {
-    console.error(chalk.red(`Debug failed: ${error}`));
-    throw error;
+    out.fail("failed");
+    out.error(`Debug failed: ${error}`);
+    out.exit(1);
   }
 }
 
