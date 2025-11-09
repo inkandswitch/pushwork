@@ -11,6 +11,8 @@ import ora, { Ora } from "ora";
 export class Output {
   private spinner: Ora | null = null;
   private quiet: boolean = false;
+  private taskStartTime: number | null = null;
+  private taskMessage: string | null = null;
 
   constructor(quiet = false) {
     this.quiet = quiet;
@@ -21,7 +23,9 @@ export class Output {
    */
   task(message: string): void {
     if (this.quiet) return;
-    this.stopSpinner();
+    this.#stopTask();
+    this.taskStartTime = Date.now();
+    this.taskMessage = message;
     this.spinner = ora(message).start();
   }
 
@@ -35,14 +39,15 @@ export class Output {
   }
 
   /**
-   * Complete task with optional duration
+   * Complete task with optional duration display
+   * Defaults to showing the original task message with duration
    */
-  done(message?: string, startTime?: number): void {
+  done(message?: string, showTime: boolean = true): void {
     if (this.quiet) return;
 
-    let text = message || "done";
-    if (startTime) {
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    let text = message || this.taskMessage || "done";
+    if (showTime && this.taskStartTime) {
+      const duration = ((Date.now() - this.taskStartTime) / 1000).toFixed(1);
       text += ` (${duration}s)`;
     }
 
@@ -50,112 +55,131 @@ export class Output {
       this.spinner.succeed(text);
       this.spinner = null;
     }
+    this.taskStartTime = null;
+    this.taskMessage = null;
   }
 
   /**
-   * Fail task with error
+   * Show a banner header with background color
    */
-  fail(message?: string): void {
-    if (this.quiet) return;
-    if (this.spinner) {
-      this.spinner.fail(message || "failed");
-      this.spinner = null;
-    }
-  }
-
-  /**
-   * Show a section header with background color
-   */
-  section(
-    type: "success" | "error" | "warning" | "info" | "status" | "partial",
+  banner(
+    type: "success" | "error" | "warning" | "info",
     message: string
   ): void {
     if (this.quiet) return;
-    this.stopSpinner();
+    this.#stopTask();
 
-    const label = type.toUpperCase().padEnd(8);
+    const label = type.toUpperCase();
     let styled: string;
 
     switch (type) {
       case "success":
-        styled = chalk.bgGreen.black(` ${label} `);
+        styled = chalk.bgGreen.black(label);
         break;
       case "error":
-        styled = chalk.bgRed.white(` ${label} `);
+        styled = chalk.bgRed.white(label);
         break;
       case "warning":
-        styled = chalk.bgYellow.black(` ${label} `);
+        styled = chalk.bgYellow.black(label);
         break;
-      case "partial":
-        styled = chalk.bgYellow.black(` ${label} `);
-        break;
-      case "status":
-        styled = chalk.bgBlue.white(` ${label} `);
+      case "info":
+        styled = chalk.bgGrey.white(label);
         break;
       default:
-        styled = chalk.bgWhite.black(` ${label} `);
+        styled = chalk.bgWhite.black(label);
     }
 
     console.log(`\n${styled} ${message}`);
   }
 
   /**
-   * Show a key-value pair (indented)
+   * Show a key-value pair (indented, aligned)
    */
-  detail(key: string, value: string | number): void {
+  pair(key: string, value: string | number): void {
     if (this.quiet) return;
-    this.stopSpinner();
+    this.#stopTask();
     const keyFormatted = chalk.dim(key.padEnd(12));
-    console.log(`  ${keyFormatted}${value}`);
+    console.log(`${keyFormatted}${value}`);
   }
 
   /**
-   * Show a list item (indented)
+   * Show plain message with optional color
    */
-  item(message: string): void {
+  log(
+    message: string,
+    color?:
+      | "red"
+      | "green"
+      | "yellow"
+      | "blue"
+      | "cyan"
+      | "magenta"
+      | "gray"
+      | "dim"
+  ): void {
     if (this.quiet) return;
-    this.stopSpinner();
-    console.log(`  ${chalk.dim("•")} ${message}`);
+    this.#stopTask();
+
+    if (color) {
+      const colorFn = color === "dim" ? chalk.dim : chalk[color];
+      console.log(colorFn(message));
+    } else {
+      console.log(message);
+    }
   }
 
   /**
-   * Show plain message
+   * Show success message (green)
    */
-  log(message: string): void {
+  success(message: string): void {
     if (this.quiet) return;
-    this.stopSpinner();
-    console.log(message);
+    this.#stopTask();
+    console.log(chalk.green(message));
   }
 
   /**
-   * Show error message (in red)
+   * Show info message (dim)
+   */
+  info(message: string): void {
+    if (this.quiet) return;
+    this.#stopTask();
+    console.log(chalk.dim(message));
+  }
+
+  /**
+   * Show error message (red) - fails spinner if running
    */
   error(message: string): void {
-    this.stopSpinner();
+    if (this.spinner) {
+      this.spinner.fail("failed");
+      this.spinner = null;
+      this.taskStartTime = null;
+      this.taskMessage = null;
+    }
     console.error(chalk.red(message));
   }
 
   /**
-   * Show warning message (in yellow)
+   * Show warning message (yellow)
    */
   warn(message: string): void {
     if (this.quiet) return;
-    this.stopSpinner();
+    this.#stopTask();
     console.warn(chalk.yellow(message));
   }
 
   /**
    * Exit with code
    */
-  exit(code: number): never {
-    this.stopSpinner();
-    process.exit(code);
+  exit(code?: number): never {
+    this.#stopTask();
+    process.exit(code || 0);
   }
 
   /**
    * Stop spinner without showing result
    */
-  private stopSpinner(): void {
+  #stopTask(): void {
     if (this.spinner) {
       this.spinner.stop();
       this.spinner.clear();

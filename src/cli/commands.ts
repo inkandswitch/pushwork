@@ -137,67 +137,6 @@ export async function safeRepoShutdown(
 }
 
 /**
- * Show actual content diff for a changed file
- */
-async function showContentDiff(change: DetectedChange): Promise<void> {
-  try {
-    // Get old content (from snapshot/remote)
-    const oldContent = change.remoteContent || "";
-
-    // Get new content (current local)
-    const newContent = change.localContent || "";
-
-    // Convert binary content to string representation if needed
-    const oldText =
-      typeof oldContent === "string"
-        ? oldContent
-        : `<binary content: ${oldContent.length} bytes>`;
-    const newText =
-      typeof newContent === "string"
-        ? newContent
-        : `<binary content: ${newContent.length} bytes>`;
-
-    // Generate unified diff
-    const diffResult = diffLib.createPatch(
-      change.path,
-      oldText,
-      newText,
-      "previous",
-      "current"
-    );
-
-    // Skip the header lines and process the diff
-    const lines = diffResult.split("\n").slice(4); // Skip index, ===, ---, +++ lines
-
-    if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
-      console.log(chalk.gray("  (content identical)"));
-      return;
-    }
-
-    for (const line of lines) {
-      if (line.startsWith("@@")) {
-        // Hunk header
-        console.log(chalk.cyan(line));
-      } else if (line.startsWith("+")) {
-        // Added line
-        console.log(chalk.green(line));
-      } else if (line.startsWith("-")) {
-        // Removed line
-        console.log(chalk.red(line));
-      } else if (line.startsWith(" ")) {
-        // Context line
-        console.log(chalk.gray(line));
-      } else if (line === "") {
-        // Empty line
-        console.log("");
-      }
-    }
-  } catch (error) {
-    console.log(chalk.gray(`  (diff error: ${error})`));
-  }
-}
-
-/**
  * Initialize sync in a directory
  */
 export async function init(
@@ -209,7 +148,6 @@ export async function init(
   validateSyncServerOptions(syncServer, syncServerStorageId);
 
   const out = new Output();
-  const startTime = Date.now();
 
   try {
     const resolvedPath = path.resolve(targetPath);
@@ -221,7 +159,6 @@ export async function init(
     // Check if already initialized
     const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
-      out.fail("Already initialized");
       out.error("Directory already initialized for sync");
       out.exit(1);
     }
@@ -283,19 +220,18 @@ export async function init(
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
 
-    out.done("done", startTime);
+    out.done();
 
-    out.section("success", "Repository initialized");
-    out.detail("URL", rootHandle.url);
-    out.detail("Sync", defaultSyncServer);
+    out.banner("success", "Repository initialized");
+    out.pair("URL", rootHandle.url);
+    out.pair("Sync", defaultSyncServer);
     if (result.filesChanged > 0) {
-      out.detail("Files", `${result.filesChanged} added`);
+      out.pair("Files", `${result.filesChanged} added`);
     }
     out.log("");
     out.log(`Run 'pushwork sync' to start synchronizing`);
   } catch (error) {
-    out.fail("failed");
-    out.section("error", "Initialization failed");
+    out.banner("error", "Initialization failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -306,7 +242,6 @@ export async function init(
  */
 export async function sync(options: SyncOptions): Promise<void> {
   const out = new Output();
-  const startTime = Date.now();
 
   try {
     out.task("Syncing");
@@ -317,19 +252,19 @@ export async function sync(options: SyncOptions): Promise<void> {
       out.update("Analyzing changes");
       const preview = await syncEngine.previewChanges();
 
-      out.done("done", startTime);
+      out.done();
 
       if (preview.changes.length === 0 && preview.moves.length === 0) {
-        out.section("info", "No changes detected");
+        out.banner("info", "No changes detected");
         out.log("Everything is already in sync");
         return;
       }
 
-      out.section("info", "Changes pending");
-      out.detail("Directory", workingDir);
-      out.detail("Changes", preview.changes.length.toString());
+      out.banner("info", "Changes pending");
+      out.pair("Directory", workingDir);
+      out.pair("Changes", preview.changes.length.toString());
       if (preview.moves.length > 0) {
-        out.detail("Moves", preview.moves.length.toString());
+        out.pair("Moves", preview.moves.length.toString());
       }
 
       out.log("");
@@ -367,27 +302,24 @@ export async function sync(options: SyncOptions): Promise<void> {
       out.update("Writing to disk");
       await safeRepoShutdown(repo, "sync");
 
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-          out.done(`done (${duration}s)`);
-          out.section("success", "Already in sync");
+          out.done();
+          out.banner("success", "Already in sync");
         } else {
-          out.done(`done (${duration}s)`);
-          out.section(
+          out.done();
+          out.banner(
             "success",
             `${result.filesChanged} file${
               result.filesChanged !== 1 ? "s" : ""
             } updated`
           );
-          out.detail("Files", result.filesChanged.toString());
-          out.detail("Time", `${duration}s`);
+          out.pair("Files", result.filesChanged.toString());
         }
 
         if (result.warnings.length > 0) {
           out.log("");
-          out.section("warning", `${result.warnings.length} warnings`);
+          out.banner("warning", `${result.warnings.length} warnings`);
           for (const warning of result.warnings.slice(0, 5)) {
             out.log(`  ${warning}`);
           }
@@ -396,17 +328,17 @@ export async function sync(options: SyncOptions): Promise<void> {
           }
         }
       } else {
-        out.done(`partial (${duration}s)`);
-        out.section(
-          "partial",
+        out.done("partial", false);
+        out.banner(
+          "warning",
           `${result.filesChanged} updated, ${result.errors.length} errors`
         );
-        out.detail("Files", result.filesChanged.toString());
-        out.detail("Errors", result.errors.length.toString());
+        out.pair("Files", result.filesChanged.toString());
+        out.pair("Errors", result.errors.length.toString());
 
         out.log("");
         for (const error of result.errors.slice(0, 5)) {
-          out.section("error", error.path);
+          out.banner("error", error.path);
           out.log(`  ${error.error.message}`);
           out.log("");
         }
@@ -416,8 +348,7 @@ export async function sync(options: SyncOptions): Promise<void> {
       }
     }
   } catch (error) {
-    out.fail("failed");
-    out.section("error", "Sync failed");
+    out.banner("error", "Sync failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -443,7 +374,7 @@ export async function diff(
     );
     const preview = await syncEngine.previewChanges();
 
-    out.done("done");
+    out.done();
 
     if (options.nameOnly) {
       for (const change of preview.changes) {
@@ -453,13 +384,13 @@ export async function diff(
     }
 
     if (preview.changes.length === 0) {
-      out.section("info", "No changes detected");
+      out.success("No changes detected");
       await safeRepoShutdown(repo, "diff");
+      out.exit();
       return;
     }
 
-    out.section("info", `${preview.changes.length} changes`);
-    out.log("");
+    out.warn(`${preview.changes.length} changes detected`);
 
     for (const change of preview.changes) {
       const prefix =
@@ -469,16 +400,75 @@ export async function diff(
           ? "[remote] "
           : "[conflict]";
 
-      out.log(`${prefix} ${change.path}`);
-
       if (!options.tool) {
-        await showContentDiff(change);
+        try {
+          // Get old content (from snapshot/remote)
+          const oldContent = change.remoteContent || "";
+          // Get new content (current local)
+          const newContent = change.localContent || "";
+
+          // Convert binary content to string representation if needed
+          const oldText =
+            typeof oldContent === "string"
+              ? oldContent
+              : `<binary content: ${oldContent.length} bytes>`;
+          const newText =
+            typeof newContent === "string"
+              ? newContent
+              : `<binary content: ${newContent.length} bytes>`;
+
+          // Generate unified diff
+          const diffResult = diffLib.createPatch(
+            change.path,
+            oldText,
+            newText,
+            "previous",
+            "current"
+          );
+
+          // Skip the header lines and process the diff
+          const lines = diffResult.split("\n").slice(4); // Skip index, ===, ---, +++ lines
+
+          if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
+            out.log(`${prefix}${change.path} (content identical)`, "cyan");
+            continue;
+          }
+
+          // Extract first hunk header and show inline with path
+          let firstHunk = "";
+          let diffLines = lines;
+          if (lines[0]?.startsWith("@@")) {
+            firstHunk = ` ${lines[0]}`;
+            diffLines = lines.slice(1);
+          }
+
+          out.log(`${prefix}${change.path}${firstHunk}`, "cyan");
+
+          for (const line of diffLines) {
+            if (line.startsWith("@@")) {
+              // Additional hunk headers
+              out.log(line, "dim");
+            } else if (line.startsWith("+")) {
+              // Added line
+              out.log(line, "green");
+            } else if (line.startsWith("-")) {
+              // Removed line
+              out.log(line, "red");
+            } else if (line.startsWith(" ") || line === "") {
+              // Context line or empty
+              out.log(line, "dim");
+            }
+          }
+        } catch (error) {
+          out.log(`${prefix}${change.path} (diff error: ${error})`, "cyan");
+        }
+      } else {
+        out.log(`${prefix} ${change.path}`);
       }
     }
 
     await safeRepoShutdown(repo, "diff");
   } catch (error) {
-    out.fail("failed");
     out.error(`Diff failed: ${error}`);
     out.exit(1);
   }
@@ -501,32 +491,31 @@ export async function status(): Promise<void> {
     );
     const syncStatus = await syncEngine.getStatus();
 
-    out.done("done");
+    out.done();
 
-    out.section("status", workingDir);
+    out.banner("info", workingDir);
 
     if (syncStatus.snapshot?.rootDirectoryUrl) {
-      out.detail("URL", syncStatus.snapshot.rootDirectoryUrl);
+      out.pair("URL", syncStatus.snapshot.rootDirectoryUrl);
     }
 
     if (syncStatus.snapshot) {
       const fileCount = syncStatus.snapshot.files.size;
-      out.detail("Files", `${fileCount} tracked`);
+      out.pair("Files", `${fileCount} tracked`);
     }
 
-    out.detail("Sync", config?.sync_server || "wss://sync3.automerge.org");
+    out.pair("Sync", config?.sync_server || "wss://sync3.automerge.org");
 
     if (syncStatus.hasChanges) {
-      out.detail("Changes", `${syncStatus.changeCount} pending`);
+      out.pair("Changes", `${syncStatus.changeCount} pending`);
       out.log("");
-      out.log("Run 'pushwork diff' to see details");
+      out.log("Run 'pushwork diff' to see pairs");
     } else {
-      out.detail("Status", "up to date");
+      out.pair("Status", "up to date");
     }
 
     await safeRepoShutdown(repo, "status");
   } catch (error) {
-    out.fail("failed");
     out.error(`Status check failed: ${error}`);
     out.exit(1);
   }
@@ -553,10 +542,10 @@ export async function log(
     const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
     if (await pathExists(snapshotPath)) {
       const stats = await fs.stat(snapshotPath);
-      out.section("info", "Sync history (stub)");
-      out.detail("Last sync", stats.mtime.toISOString());
+      out.banner("info", "Sync history (stub)");
+      out.pair("Last sync", stats.mtime.toISOString());
     } else {
-      out.section("info", "No sync history found");
+      out.banner("info", "No sync history found");
     }
 
     await safeRepoShutdown(logRepo, "log");
@@ -580,9 +569,9 @@ export async function checkout(
     const { workingDir } = await setupCommandContext(targetPath);
 
     // TODO: Implement checkout functionality
-    out.section("warning", "Checkout not yet implemented");
-    out.detail("Sync ID", syncId);
-    out.detail("Path", workingDir);
+    out.banner("warning", "Checkout not yet implemented");
+    out.pair("Sync ID", syncId);
+    out.pair("Path", workingDir);
   } catch (error) {
     out.error(`Checkout failed: ${error}`);
     out.exit(1);
@@ -601,7 +590,6 @@ export async function clone(
   validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
 
   const out = new Output();
-  const startTime = Date.now();
 
   try {
     const resolvedPath = path.resolve(targetPath);
@@ -612,8 +600,7 @@ export async function clone(
     if (await pathExists(resolvedPath)) {
       const files = await fs.readdir(resolvedPath);
       if (files.length > 0 && !options.force) {
-        out.fail("Target directory is not empty");
-        out.error("Use --force to overwrite existing directory");
+        out.error("Target directory is not empty. Use --force to overwrite");
         out.exit(1);
       }
     } else {
@@ -624,8 +611,7 @@ export async function clone(
     const syncToolDir = path.join(resolvedPath, ".pushwork");
     if (await pathExists(syncToolDir)) {
       if (!options.force) {
-        out.fail("Directory already initialized");
-        out.error("Use --force to overwrite existing sync directory");
+        out.error("Directory already initialized. Use --force to overwrite");
         out.exit(1);
       }
       await fs.rm(syncToolDir, { recursive: true, force: true });
@@ -682,15 +668,14 @@ export async function clone(
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "clone");
 
-    out.done("done", startTime);
+    out.done();
 
-    out.section("success", `Cloned to ${resolvedPath}`);
-    out.detail("Files", `${result.filesChanged} downloaded`);
-    out.detail("Sync", defaultSyncServer);
-    out.detail("URL", rootUrl);
+    out.banner("success", `Cloned to ${resolvedPath}`);
+    out.pair("Files", `${result.filesChanged} downloaded`);
+    out.pair("Sync", defaultSyncServer);
+    out.pair("URL", rootUrl);
   } catch (error) {
-    out.fail("failed");
-    out.section("error", "Clone failed");
+    out.banner("error", "Clone failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -738,7 +723,6 @@ export async function commit(
   dryRun: boolean = false
 ): Promise<void> {
   const out = new Output();
-  const startTime = Date.now();
 
   try {
     out.task("Committing local changes");
@@ -753,27 +737,26 @@ export async function commit(
     const result = await syncEngine.commitLocal(dryRun);
     await safeRepoShutdown(repo, "commit");
 
-    out.done("done", startTime);
+    out.done();
 
     if (result.errors.length > 0) {
-      out.section("error", `${result.errors.length} errors`);
+      out.banner("error", `${result.errors.length} errors`);
       result.errors.forEach((error) => {
         out.log(`  ${error.path}: ${error.error.message}`);
       });
       out.exit(1);
     }
 
-    out.section("success", `${result.filesChanged} files committed`);
-    out.detail("Files", result.filesChanged.toString());
-    out.detail("Directories", result.directoriesChanged.toString());
+    out.banner("success", `${result.filesChanged} files committed`);
+    out.pair("Files", result.filesChanged.toString());
+    out.pair("Directories", result.directoriesChanged.toString());
 
     if (result.warnings.length > 0) {
       out.log("");
-      out.section("warning", `${result.warnings.length} warnings`);
+      out.banner("warning", `${result.warnings.length} warnings`);
       result.warnings.forEach((warning: string) => out.log(`  ${warning}`));
     }
   } catch (error) {
-    out.fail("failed");
     out.error(`Commit failed: ${error}`);
     out.exit(1);
   }
@@ -801,11 +784,11 @@ export async function debug(
 
     out.done("done");
 
-    out.section("info", "Debug Information");
-    out.detail("Path", workingDir);
+    out.banner("info", "Debug Information");
+    out.pair("Path", workingDir);
 
     if (debugStatus.snapshot?.rootDirectoryUrl) {
-      out.detail("URL", debugStatus.snapshot.rootDirectoryUrl);
+      out.pair("URL", debugStatus.snapshot.rootDirectoryUrl);
 
       try {
         const rootHandle = await repo.find<DirectoryDocument>(
@@ -814,10 +797,10 @@ export async function debug(
         const rootDoc = await rootHandle.doc();
 
         if (rootDoc) {
-          out.detail("Entries", rootDoc.docs.length.toString());
+          out.pair("Entries", rootDoc.docs.length.toString());
           if (rootDoc.lastSyncAt) {
             const lastSyncDate = new Date(rootDoc.lastSyncAt);
-            out.detail("Last sync", lastSyncDate.toISOString());
+            out.pair("Last sync", lastSyncDate.toISOString());
           }
 
           if (options.verbose) {
@@ -835,11 +818,8 @@ export async function debug(
     }
 
     if (debugStatus.snapshot) {
-      out.detail("Files", debugStatus.snapshot.files.size.toString());
-      out.detail(
-        "Directories",
-        debugStatus.snapshot.directories.size.toString()
-      );
+      out.pair("Files", debugStatus.snapshot.files.size.toString());
+      out.pair("Directories", debugStatus.snapshot.directories.size.toString());
 
       if (options.verbose) {
         out.log("");
@@ -852,7 +832,6 @@ export async function debug(
 
     await safeRepoShutdown(repo, "debug");
   } catch (error) {
-    out.fail("failed");
     out.error(`Debug failed: ${error}`);
     out.exit(1);
   }
