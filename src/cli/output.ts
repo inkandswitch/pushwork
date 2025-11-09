@@ -10,19 +10,13 @@ import ora, { Ora } from "ora";
  */
 export class Output {
   private spinner: Ora | null = null;
-  private quiet: boolean = false;
   private taskStartTime: number | null = null;
   private taskMessage: string | null = null;
-
-  constructor(quiet = false) {
-    this.quiet = quiet;
-  }
 
   /**
    * Start a task with spinner - updates in place
    */
   task(message: string): void {
-    if (this.quiet) return;
     this.#stopTask();
     this.taskStartTime = Date.now();
     this.taskMessage = message;
@@ -33,7 +27,7 @@ export class Output {
    * Update spinner text (stays on same line)
    */
   update(message: string): void {
-    if (this.spinner && !this.quiet) {
+    if (this.spinner) {
       this.spinner.text = message;
     }
   }
@@ -43,8 +37,6 @@ export class Output {
    * Defaults to showing the original task message with duration
    */
   done(message?: string, showTime: boolean = true): void {
-    if (this.quiet) return;
-
     let text = message || this.taskMessage || "done";
     if (showTime && this.taskStartTime) {
       const duration = ((Date.now() - this.taskStartTime) / 1000).toFixed(1);
@@ -60,43 +52,9 @@ export class Output {
   }
 
   /**
-   * Show a banner header with background color
-   */
-  banner(
-    type: "success" | "error" | "warning" | "info",
-    message: string
-  ): void {
-    if (this.quiet) return;
-    this.#stopTask();
-
-    const label = type.toUpperCase();
-    let styled: string;
-
-    switch (type) {
-      case "success":
-        styled = chalk.bgGreen.black(label);
-        break;
-      case "error":
-        styled = chalk.bgRed.white(label);
-        break;
-      case "warning":
-        styled = chalk.bgYellow.black(label);
-        break;
-      case "info":
-        styled = chalk.bgGrey.white(label);
-        break;
-      default:
-        styled = chalk.bgWhite.black(label);
-    }
-
-    console.log(`\n${styled} ${message}`);
-  }
-
-  /**
    * Show a key-value pair (indented, aligned)
    */
   pair(key: string, value: string | number): void {
-    if (this.quiet) return;
     this.#stopTask();
     const keyFormatted = chalk.dim(key.padEnd(12));
     console.log(`${keyFormatted}${value}`);
@@ -117,7 +75,6 @@ export class Output {
       | "gray"
       | "dim"
   ): void {
-    if (this.quiet) return;
     this.#stopTask();
 
     if (color) {
@@ -130,42 +87,75 @@ export class Output {
 
   /**
    * Show success message (green)
+   * - 1 arg: green text
+   * - 2 args: green background label + message
    */
-  success(message: string): void {
-    if (this.quiet) return;
+  success(labelOrMessage: string, message?: string): void {
     this.#stopTask();
-    console.log(chalk.green(message));
+    console.log(
+      this.#fmt(
+        labelOrMessage,
+        message,
+        (text) => chalk.bgGreen.black(text),
+        (text) => chalk.green(text)
+      )
+    );
   }
 
   /**
-   * Show info message (dim)
+   * Show info message (dim/grey)
+   * - 1 arg: dim text
+   * - 2 args: grey background label + message
    */
-  info(message: string): void {
-    if (this.quiet) return;
+  info(labelOrMessage: string, message?: string): void {
     this.#stopTask();
-    console.log(chalk.dim(message));
+    console.log(
+      this.#fmt(
+        labelOrMessage,
+        message,
+        (text) => chalk.bgGrey.white(text),
+        (text) => chalk.dim(text)
+      )
+    );
   }
 
   /**
    * Show error message (red) - fails spinner if running
+   * - 1 arg: red text
+   * - 2 args: red background label + message
    */
-  error(message: string): void {
+  error(labelOrMessage: string, message?: string): void {
     if (this.spinner) {
       this.spinner.fail("failed");
       this.spinner = null;
       this.taskStartTime = null;
       this.taskMessage = null;
     }
-    console.error(chalk.red(message));
+    console.log(
+      this.#fmt(
+        labelOrMessage,
+        message,
+        (text) => chalk.bgRed.white(text),
+        (text) => chalk.red(text)
+      )
+    );
   }
 
   /**
    * Show warning message (yellow)
+   * - 1 arg: yellow text
+   * - 2 args: yellow background label + message
    */
-  warn(message: string): void {
-    if (this.quiet) return;
+  warn(labelOrMessage: string, message?: string): void {
     this.#stopTask();
-    console.warn(chalk.yellow(message));
+    console.log(
+      this.#fmt(
+        labelOrMessage,
+        message,
+        (text) => chalk.bgYellow.black(text),
+        (text) => chalk.yellow(text)
+      )
+    );
   }
 
   /**
@@ -185,5 +175,18 @@ export class Output {
       this.spinner.clear();
       this.spinner = null;
     }
+  }
+
+  #fmt(
+    labelOrMessage: string,
+    message: string | undefined,
+    bgColorFn: (text: string) => string,
+    fgColorFn: (text: string) => string
+  ): string {
+    if (message !== undefined) {
+      const styled = bgColorFn(` ${labelOrMessage} `);
+      return `\n${styled} ${message}`;
+    }
+    return fgColorFn(labelOrMessage);
   }
 }

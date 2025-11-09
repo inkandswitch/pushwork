@@ -87,8 +87,6 @@ export class SyncEngine {
    * Commit local changes only (no network sync)
    */
   async commitLocal(dryRun = false): Promise<SyncResult> {
-    console.log(`🚀 Starting local commit process (dryRun: ${dryRun})`);
-
     const result: SyncResult = {
       success: false,
       filesChanged: 0,
@@ -99,50 +97,32 @@ export class SyncEngine {
 
     try {
       // Load current snapshot
-      console.log(`📸 Loading current snapshot...`);
       let snapshot = await this.snapshotManager.load();
       if (!snapshot) {
-        console.log(`📸 No snapshot found, creating empty one`);
         snapshot = this.snapshotManager.createEmpty();
-      } else {
-        console.log(`📸 Snapshot loaded with ${snapshot.files.size} files`);
-        if (snapshot.rootDirectoryUrl) {
-          console.log(`🔗 Root directory URL: ${snapshot.rootDirectoryUrl}`);
-        }
       }
 
       // Backup snapshot before starting
       if (!dryRun) {
-        console.log(`💾 Backing up snapshot...`);
         await this.snapshotManager.backup();
       }
 
       // Detect all changes
-      console.log(`🔍 Detecting changes...`);
       const changes = await this.changeDetector.detectChanges(snapshot);
-      console.log(`🔍 Found ${changes.length} changes`);
 
       // Detect moves
-      console.log(`📦 Detecting moves...`);
       const { moves, remainingChanges } = await this.moveDetector.detectMoves(
         changes,
         snapshot,
         this.rootPath
       );
-      console.log(
-        `📦 Found ${moves.length} moves, ${remainingChanges.length} remaining changes`
-      );
 
       // Apply local changes only (no network sync)
-      console.log(`💾 Committing local changes...`);
       const commitResult = await this.pushLocalChanges(
         remainingChanges,
         moves,
         snapshot,
         dryRun
-      );
-      console.log(
-        `💾 Commit complete: ${commitResult.filesChanged} files changed`
       );
 
       result.filesChanged += commitResult.filesChanged;
@@ -163,11 +143,9 @@ export class SyncEngine {
       }
 
       result.success = result.errors.length === 0;
-      console.log(`💾 Local commit ${result.success ? "completed" : "failed"}`);
 
       return result;
     } catch (error) {
-      console.error(`❌ Local commit failed: ${error}`);
       result.errors.push({
         path: this.rootPath,
         operation: "commitLocal",
@@ -227,10 +205,6 @@ export class SyncEngine {
         this.rootPath
       );
       timings["detect_moves"] = Date.now() - t3;
-
-      if (changes.length > 0) {
-        console.log(`🔄 Syncing ${changes.length} changes...`);
-      }
 
       // Phase 1: Push local changes to remote
       const t4 = Date.now();
@@ -508,7 +482,6 @@ export class SyncEngine {
     if (change.localContent === null) {
       // File was deleted locally
       if (snapshotEntry) {
-        console.log(`🗑️  ${change.path}`);
         await this.deleteRemoteFile(
           snapshotEntry.url,
           dryRun,
@@ -526,7 +499,6 @@ export class SyncEngine {
 
     if (!snapshotEntry) {
       // New file
-      console.log(`➕ ${change.path}`);
       const handle = await this.createRemoteFile(change, dryRun);
       if (!dryRun && handle) {
         await this.addFileToDirectory(
@@ -548,8 +520,6 @@ export class SyncEngine {
       }
     } else {
       // Update existing file
-      console.log(`📝 ${change.path}`);
-
       await this.updateRemoteFile(
         snapshotEntry.url,
         change.localContent,
@@ -580,7 +550,6 @@ export class SyncEngine {
     // Empty strings "" and empty Uint8Array are valid file content!
     if (change.remoteContent === null) {
       // File was deleted remotely
-      console.log(`🗑️  ${change.path}`);
       if (!dryRun) {
         await removePath(localPath);
         this.snapshotManager.removeFileEntry(snapshot, change.path);
@@ -589,12 +558,6 @@ export class SyncEngine {
     }
 
     // Create or update local file
-    if (change.changeType === ChangeType.REMOTE_ONLY) {
-      console.log(`⬇️  ${change.path}`);
-    } else {
-      console.log(`🔀 ${change.path}`);
-    }
-
     if (!dryRun) {
       await writeFileContent(localPath, change.remoteContent);
 
@@ -882,10 +845,6 @@ export class SyncEngine {
       snapshot,
       directoryPath,
       dryRun
-    );
-
-    console.log(
-      `🔗 Adding ${fileName} (${fileUrl}) to directory ${parentDirUrl} (path: ${directoryPath})`
     );
 
     const dirHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);

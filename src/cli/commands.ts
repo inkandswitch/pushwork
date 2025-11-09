@@ -228,8 +228,7 @@ export async function init(
 
     out.done();
 
-    out.banner("success", "Repository initialized");
-    out.pair("URL", rootHandle.url);
+    out.success("INITIALIZED", rootHandle.url);
     out.pair("Sync", defaultSyncServer);
     if (result.filesChanged > 0) {
       out.pair("Files", `${result.filesChanged} added`);
@@ -273,10 +272,11 @@ export async function init(
     out.log("");
     out.log(`Run 'pushwork sync' to start synchronizing`);
   } catch (error) {
-    out.banner("error", "Initialization failed");
+    out.error("FAILED", "Initialization failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
+  process.exit();
 }
 
 /**
@@ -302,12 +302,12 @@ export async function sync(
       out.done();
 
       if (preview.changes.length === 0 && preview.moves.length === 0) {
-        out.banner("info", "No changes detected");
+        out.info("No changes detected");
         out.log("Everything is already in sync");
         return;
       }
 
-      out.banner("info", "Changes pending");
+      out.info("CHANGES", "Pending");
       out.pair("Directory", workingDir);
       out.pair("Changes", preview.changes.length.toString());
       if (preview.moves.length > 0) {
@@ -352,11 +352,11 @@ export async function sync(
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
           out.done();
-          out.banner("success", "Already in sync");
+          out.success("Already in sync");
         } else {
           out.done();
-          out.banner(
-            "success",
+          out.success(
+            "SYNCED",
             `${result.filesChanged} file${
               result.filesChanged !== 1 ? "s" : ""
             } updated`
@@ -366,7 +366,7 @@ export async function sync(
 
         if (result.warnings.length > 0) {
           out.log("");
-          out.banner("warning", `${result.warnings.length} warnings`);
+          out.warn("WARNINGS", `${result.warnings.length} warnings`);
           for (const warning of result.warnings.slice(0, 5)) {
             out.log(`  ${warning}`);
           }
@@ -376,8 +376,8 @@ export async function sync(
         }
       } else {
         out.done("partial", false);
-        out.banner(
-          "warning",
+        out.warn(
+          "PARTIAL",
           `${result.filesChanged} updated, ${result.errors.length} errors`
         );
         out.pair("Files", result.filesChanged.toString());
@@ -385,7 +385,7 @@ export async function sync(
 
         out.log("");
         for (const error of result.errors.slice(0, 5)) {
-          out.banner("error", error.path);
+          out.error("ERROR", error.path);
           out.log(`  ${error.error.message}`);
           out.log("");
         }
@@ -395,10 +395,11 @@ export async function sync(
       }
     }
   } catch (error) {
-    out.banner("error", "Sync failed");
+    out.error("FAILED", "Sync failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
+  process.exit();
 }
 
 /**
@@ -543,7 +544,7 @@ export async function status(
 
     out.done();
 
-    out.banner("info", workingDir);
+    out.info("STATUS", workingDir);
 
     if (syncStatus.snapshot?.rootDirectoryUrl) {
       out.pair("URL", syncStatus.snapshot.rootDirectoryUrl);
@@ -592,10 +593,10 @@ export async function log(
     const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
     if (await pathExists(snapshotPath)) {
       const stats = await fs.stat(snapshotPath);
-      out.banner("info", "Sync history (stub)");
+      out.info("HISTORY", "Sync history (stub)");
       out.pair("Last sync", stats.mtime.toISOString());
     } else {
-      out.banner("info", "No sync history found");
+      out.info("No sync history found");
     }
 
     await safeRepoShutdown(logRepo, "log");
@@ -619,7 +620,7 @@ export async function checkout(
     const { workingDir } = await setupCommandContext(targetPath);
 
     // TODO: Implement checkout functionality
-    out.banner("warning", "Checkout not yet implemented");
+    out.warn("NOT IMPLEMENTED", "Checkout not yet implemented");
     out.pair("Sync ID", syncId);
     out.pair("Path", workingDir);
   } catch (error) {
@@ -720,15 +721,16 @@ export async function clone(
 
     out.done();
 
-    out.banner("success", `Cloned to ${resolvedPath}`);
+    out.success("CLONED", rootUrl);
+    out.pair("Path", resolvedPath);
     out.pair("Files", `${result.filesChanged} downloaded`);
     out.pair("Sync", defaultSyncServer);
-    out.pair("URL", rootUrl);
   } catch (error) {
-    out.banner("error", "Clone failed");
+    out.error("FAILED", "Clone failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
+  process.exit();
 }
 
 /**
@@ -793,26 +795,27 @@ export async function commit(
     out.done();
 
     if (result.errors.length > 0) {
-      out.banner("error", `${result.errors.length} errors`);
+      out.error("ERRORS", `${result.errors.length} errors`);
       result.errors.forEach((error) => {
         out.log(`  ${error.path}: ${error.error.message}`);
       });
       out.exit(1);
     }
 
-    out.banner("success", `${result.filesChanged} files committed`);
+    out.success("COMMITTED", `${result.filesChanged} files committed`);
     out.pair("Files", result.filesChanged.toString());
     out.pair("Directories", result.directoriesChanged.toString());
 
     if (result.warnings.length > 0) {
       out.log("");
-      out.banner("warning", `${result.warnings.length} warnings`);
+      out.warn("WARNINGS", `${result.warnings.length} warnings`);
       result.warnings.forEach((warning: string) => out.log(`  ${warning}`));
     }
   } catch (error) {
     out.error(`Commit failed: ${error}`);
     out.exit(1);
   }
+  process.exit();
 }
 
 /**
@@ -837,8 +840,7 @@ export async function debug(
 
     out.done("done");
 
-    out.banner("info", "Debug Information");
-    out.pair("Path", workingDir);
+    out.info("DEBUG", workingDir);
 
     if (debugStatus.snapshot?.rootDirectoryUrl) {
       out.pair("URL", debugStatus.snapshot.rootDirectoryUrl);
@@ -968,7 +970,7 @@ export async function config(
 
     if (options.list) {
       // List all configuration
-      out.banner("info", "Configuration");
+      out.info("CONFIGURATION", "Full configuration");
       out.log(JSON.stringify(config, null, 2));
     } else if (options.get) {
       // Get specific config value
@@ -987,7 +989,7 @@ export async function config(
       }
     } else {
       // Show basic config info
-      out.banner("info", "Configuration");
+      out.info("CONFIGURATION", resolvedPath);
       out.pair("Sync server", config.sync_server || "default");
       out.pair("Sync enabled", config.sync_enabled ? "yes" : "no");
       out.pair(
