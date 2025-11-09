@@ -52,6 +52,7 @@ export interface SyncResult {
   directoriesChanged: number;
   errors: SyncError[];
   warnings: string[];
+  timings?: { [key: string]: number };
 }
 
 /**

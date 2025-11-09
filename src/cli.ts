@@ -60,19 +60,25 @@ program
     "--sync-server-storage-id <id>",
     "Custom sync server storage ID (must be used with --sync-server)"
   )
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
 Examples:
   pushwork init                # Initialize current directory
   pushwork init ./my-folder    # Initialize specific directory
+  pushwork init --debug        # Show performance breakdown
   pushwork init --sync-server ws://localhost:3030 --sync-server-storage-id 1d89eba7-f7a4-4e8e-80f2-5f4e2406f507
   
 Note: Custom sync server options must always be used together.`
   )
   .action(
-    withErrorHandling(async (path: string, options) => {
-      await init(path, options.syncServer, options.syncServerStorageId);
+    withErrorHandling(async (path: string, cmdOptions) => {
+      await init(path, {
+        syncServer: cmdOptions.syncServer,
+        syncServerStorageId: cmdOptions.syncServerStorageId,
+        debug: cmdOptions.debug || false,
+      });
     })
   );
 
@@ -126,6 +132,7 @@ program
     "."
   )
   .option("--dry-run", "Show what would be committed without applying changes")
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
@@ -135,8 +142,11 @@ Examples:
   pushwork commit --dry-run    # Preview what would be committed`
   )
   .action(
-    withErrorHandling(async (path: string, options) => {
-      await commit(path, options.dryRun || false);
+    withErrorHandling(async (path: string, cmdOptions) => {
+      await commit(path, {
+        dryRun: cmdOptions.dryRun || false,
+        debug: cmdOptions.debug || false,
+      });
     })
   );
 
@@ -151,6 +161,7 @@ program
   )
   .option("--dry-run", "Show what would be done without applying changes")
   .option("-v, --verbose", "Verbose output")
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
@@ -158,13 +169,15 @@ Examples:
   pushwork sync                # Sync current directory
   pushwork sync ./my-folder    # Sync specific directory
   pushwork sync --dry-run      # Preview changes without applying
-  pushwork sync -v             # Sync with verbose output`
+  pushwork sync -v             # Sync with verbose output
+  pushwork sync --debug        # Show performance breakdown`
   )
   .action(
-    withErrorHandling(async (path: string, options) => {
+    withErrorHandling(async (path: string, cmdOptions) => {
       await sync(path, {
-        dryRun: options.dryRun || false,
-        verbose: options.verbose || false,
+        dryRun: cmdOptions.dryRun || false,
+        verbose: cmdOptions.verbose || false,
+        debug: cmdOptions.debug || false,
       });
     })
   );
@@ -205,6 +218,7 @@ program
   .command("status")
   .description("Show sync status summary")
   .argument("[path]", "Directory path (default: current directory)", ".")
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
@@ -213,8 +227,10 @@ Examples:
   pushwork status ./my-folder  # Show status for specific directory`
   )
   .action(
-    withErrorHandling(async (path: string) => {
-      await status(path);
+    withErrorHandling(async (path: string, cmdOptions) => {
+      await status(path, {
+        debug: cmdOptions.debug || false,
+      });
     })
   );
 
@@ -336,6 +352,7 @@ program
   .description("List tracked files in the repository")
   .argument("[path]", "Directory path (default: current directory)", ".")
   .option("-l, --long", "Show long format with Automerge URLs")
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
@@ -345,9 +362,10 @@ Examples:
   pushwork ls ./my-folder  # List files in specific directory`
   )
   .action(
-    withErrorHandling(async (path: string, options) => {
+    withErrorHandling(async (path: string, cmdOptions) => {
       await ls(path, {
-        long: options.long || false,
+        long: cmdOptions.long || false,
+        debug: cmdOptions.debug || false,
       });
     })
   );
@@ -362,6 +380,7 @@ program
     "--get <key>",
     "Get specific config value (dot notation, e.g., sync.auto_sync)"
   )
+  .option("--debug", "Show detailed performance timing information")
   .addHelpText(
     "after",
     `
@@ -372,10 +391,11 @@ Examples:
   pushwork config --get defaults.exclude_patterns  # Get nested value`
   )
   .action(
-    withErrorHandling(async (path: string, options) => {
+    withErrorHandling(async (path: string, cmdOptions) => {
       await config(path, {
-        list: options.list || false,
-        get: options.get,
+        list: cmdOptions.list || false,
+        get: cmdOptions.get,
+        debug: cmdOptions.debug || false,
       });
     })
   );

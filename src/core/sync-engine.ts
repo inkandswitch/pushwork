@@ -192,6 +192,7 @@ export class SyncEngine {
       directoriesChanged: 0,
       errors: [],
       warnings: [],
+      timings: {},
     };
 
     // Reset handles to wait on
@@ -249,6 +250,7 @@ export class SyncEngine {
       // Always wait for network sync when enabled (not just when local changes exist)
       // This is critical for clone scenarios where we need to pull remote changes
       const t5 = Date.now();
+      timings["documents_to_sync"] = this.handlesToWaitOn.length;
       if (!dryRun && this.networkSyncEnabled) {
         try {
           // If we have a root directory URL, wait for it to sync
@@ -374,24 +376,12 @@ export class SyncEngine {
       }
       timings["save_snapshot"] = Date.now() - t10;
 
-      // Output timing breakdown if enabled via environment variable
-      if (process.env.PUSHWORK_TIMING === "1") {
-        const totalTime = Date.now() - syncStartTime;
-        console.error("\n⏱️  Sync Timing Breakdown:");
-        for (const [key, ms] of Object.entries(timings)) {
-          const pct = ((ms / totalTime) * 100).toFixed(1);
-          console.error(
-            `  ${key.padEnd(25)} ${ms.toString().padStart(5)}ms (${pct}%)`
-          );
-        }
-        console.error(
-          `  ${"TOTAL".padEnd(25)} ${totalTime
-            .toString()
-            .padStart(5)}ms (100.0%)\n`
-        );
-      }
+      // Calculate total time
+      const totalTime = Date.now() - syncStartTime;
+      timings["total"] = totalTime;
 
       result.success = result.errors.length === 0;
+      result.timings = timings;
       return result;
     } catch (error) {
       result.errors.push({

@@ -9,6 +9,13 @@ import {
   DiffOptions,
   LogOptions,
   CheckoutOptions,
+  InitOptions,
+  CommitOptions,
+  StatusOptions,
+  UrlOptions,
+  ListOptions,
+  ConfigOptions,
+  DebugOptions,
   DirectoryConfig,
   DirectoryDocument,
 } from "../types";
@@ -141,11 +148,10 @@ export async function safeRepoShutdown(
  */
 export async function init(
   targetPath: string,
-  syncServer?: string,
-  syncServerStorageId?: string
+  options: InitOptions = {}
 ): Promise<void> {
   // Validate sync server options
-  validateSyncServerOptions(syncServer, syncServerStorageId);
+  validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
 
   const out = new Output();
 
@@ -169,9 +175,9 @@ export async function init(
 
     out.update("Setting up configuration");
     const configManager = new ConfigManager(resolvedPath);
-    const defaultSyncServer = syncServer || "wss://sync3.automerge.org";
+    const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
     const defaultStorageId =
-      syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
+      options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
     const config: DirectoryConfig = {
       sync_server: defaultSyncServer,
       sync_server_storage_id: defaultStorageId,
@@ -195,8 +201,8 @@ export async function init(
     out.update("Creating root directory");
     const repo = await createRepo(resolvedPath, {
       enableNetwork: true,
-      syncServer: syncServer,
-      syncServerStorageId: syncServerStorageId,
+      syncServer: options.syncServer,
+      syncServerStorageId: options.syncServerStorageId,
     });
 
     const rootDoc: DirectoryDocument = {
@@ -228,15 +234,49 @@ export async function init(
     if (result.filesChanged > 0) {
       out.pair("Files", `${result.filesChanged} added`);
     }
+
+    // Show timing breakdown if debug mode is enabled
+    if (
+      options.debug &&
+      result.timings &&
+      Object.keys(result.timings).length > 0
+    ) {
+      const timings = result.timings;
+      const total = timings.total || 0;
+      out.log("");
+      out.log("Performance breakdown:");
+      if (timings.detect_changes) {
+        out.log(
+          `  File scanning:     ${(timings.detect_changes / 1000).toFixed(1)}s`
+        );
+      }
+      if (timings.phase1_push) {
+        out.log(
+          `  Creating docs:     ${(timings.phase1_push / 1000).toFixed(1)}s`
+        );
+      }
+      if (timings.network_sync) {
+        out.log(
+          `  Network sync:      ${(timings.network_sync / 1000).toFixed(1)}s (${
+            timings.documents_to_sync || 0
+          } docs)`
+        );
+      }
+      if (timings.save_snapshot) {
+        out.log(
+          `  Saving snapshot:   ${(timings.save_snapshot / 1000).toFixed(1)}s`
+        );
+      }
+      out.log(`  Total:             ${(total / 1000).toFixed(1)}s`);
+    }
+
     out.log("");
     out.log(`Run 'pushwork sync' to start synchronizing`);
-    out.exit();
   } catch (error) {
     out.banner("error", "Initialization failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
-  out.exit();
 }
 
 /**
@@ -484,7 +524,10 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(targetPath = "."): Promise<void> {
+export async function status(
+  targetPath: string = ".",
+  options: StatusOptions = {}
+): Promise<void> {
   const out = new Output();
 
   try {
@@ -691,7 +734,10 @@ export async function clone(
 /**
  * Get the root URL for the current pushwork repository
  */
-export async function url(targetPath = "."): Promise<void> {
+export async function url(
+  targetPath: string = ".",
+  options: UrlOptions = {}
+): Promise<void> {
   const out = new Output();
 
   try {
@@ -727,7 +773,7 @@ export async function url(targetPath = "."): Promise<void> {
 
 export async function commit(
   targetPath: string,
-  dryRun: boolean = false
+  options: CommitOptions = {}
 ): Promise<void> {
   const out = new Output();
 
@@ -741,7 +787,7 @@ export async function commit(
       false
     );
 
-    const result = await syncEngine.commitLocal(dryRun);
+    const result = await syncEngine.commitLocal(options.dryRun || false);
     await safeRepoShutdown(repo, "commit");
 
     out.done();
@@ -773,8 +819,8 @@ export async function commit(
  * Debug command to inspect internal document state
  */
 export async function debug(
-  targetPath = ".",
-  options: { verbose?: boolean } = {}
+  targetPath: string = ".",
+  options: DebugOptions = {}
 ): Promise<void> {
   const out = new Output();
 
@@ -848,8 +894,8 @@ export async function debug(
  * List tracked files
  */
 export async function ls(
-  targetPath = ".",
-  options: { long?: boolean } = {}
+  targetPath: string = ".",
+  options: ListOptions = {}
 ): Promise<void> {
   const out = new Output();
 
@@ -903,8 +949,8 @@ export async function ls(
  * View or edit configuration
  */
 export async function config(
-  targetPath = ".",
-  options: { list?: boolean; get?: string; set?: string; value?: string } = {}
+  targetPath: string = ".",
+  options: ConfigOptions = {}
 ): Promise<void> {
   const out = new Output();
 

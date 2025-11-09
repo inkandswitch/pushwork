@@ -75,6 +75,7 @@ export interface DirectoryConfig {
 export interface CommandOptions {
   dryRun?: boolean;
   verbose?: boolean;
+  debug?: boolean;
   tool?: string;
   nameOnly?: boolean;
   oneline?: boolean;
@@ -120,4 +121,53 @@ export interface LogOptions extends CommandOptions {
  */
 export interface CheckoutOptions extends CommandOptions {
   force?: boolean;
+}
+
+/**
+ * Init command specific options
+ */
+export interface InitOptions extends CommandOptions {
+  syncServer?: string;
+  syncServerStorageId?: string;
+}
+
+/**
+ * Commit command specific options
+ */
+export interface CommitOptions extends CommandOptions {
+  dryRun?: boolean;
+}
+
+/**
+ * Status command specific options
+ */
+export interface StatusOptions extends CommandOptions {}
+
+/**
+ * URL command specific options
+ */
+export interface UrlOptions extends CommandOptions {}
+
+/**
+ * List (ls) command specific options
+ */
+export interface ListOptions extends CommandOptions {
+  long?: boolean;
+}
+
+/**
+ * Config command specific options
+ */
+export interface ConfigOptions extends CommandOptions {
+  list?: boolean;
+  get?: string;
+  set?: string;
+  value?: string;
+}
+
+/**
+ * Debug command specific options
+ */
+export interface DebugOptions extends CommandOptions {
+  verbose?: boolean;
 }
