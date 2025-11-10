@@ -476,7 +476,7 @@ export class ChangeDetector {
 
     const content = (doc as FileDocument | undefined)?.content;
     // Convert ImmutableString to regular string
-    if (content instanceof A.ImmutableString) {
+    if (A.isImmutableString(content)) {
       return content.toString();
     }
     return content as string | Uint8Array;
@@ -498,7 +498,7 @@ export class ChangeDetector {
       const fileDoc = doc as FileDocument;
       const content = fileDoc.content;
       // Convert ImmutableString to regular string
-      if (content instanceof A.ImmutableString) {
+      if (A.isImmutableString(content)) {
         return content.toString();
       }
       return content as string | Uint8Array;
