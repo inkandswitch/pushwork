@@ -262,7 +262,7 @@ export async function init(
       const fileUrl = `file://${traceFile}`;
       out.log("");
       out.log(`Flame graph: ${fileUrl}`);
-      out.log(`Open in chrome://tracing or ui.perfetto.dev`);
+      out.log(`Open in https://ui.perfetto.dev`);
     }
 
     out.log("");
@@ -388,7 +388,7 @@ export async function sync(
           const fileUrl = `file://${traceFile}`;
           out.log("");
           out.log(`Flame graph: ${fileUrl}`);
-          out.log(`Open in chrome://tracing or ui.perfetto.dev`);
+          out.log(`Open in https://ui.perfetto.dev`);
         }
       } else {
         out.done("partial", false);
