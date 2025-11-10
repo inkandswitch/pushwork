@@ -12,6 +12,7 @@ import {
   checkout,
   commit,
   url,
+  rm,
   debug,
   ls,
   config,
@@ -313,6 +314,27 @@ Note: This command outputs only the URL, making it useful for scripts.`
   .action(
     withErrorHandling(async (path: string) => {
       await url(path);
+    })
+  );
+
+// Remove command
+program
+  .command("rm")
+  .description("Remove local pushwork data (logs URL for recovery)")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  pushwork rm              # Remove pushwork data from current directory
+  pushwork rm ./my-folder  # Remove pushwork data from specific directory
+  
+Note: This command removes the .pushwork directory and displays the URL
+so you can recover the repository later with 'pushwork clone' if needed.`
+  )
+  .action(
+    withErrorHandling(async (path: string) => {
+      await rm(path);
     })
   );
 

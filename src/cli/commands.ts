@@ -768,6 +768,48 @@ export async function url(targetPath: string = "."): Promise<void> {
   }
 }
 
+/**
+ * Remove local pushwork data and log URL for recovery
+ */
+export async function rm(targetPath: string = "."): Promise<void> {
+  const out = new Output();
+
+  try {
+    const resolvedPath = path.resolve(targetPath);
+    const syncToolDir = path.join(resolvedPath, ".pushwork");
+
+    if (!(await pathExists(syncToolDir))) {
+      out.error("Directory not initialized for sync");
+      out.exit(1);
+    }
+
+    // Read the URL before deletion for recovery
+    let recoveryUrl = "";
+    const snapshotPath = path.join(syncToolDir, "snapshot.json");
+    if (await pathExists(snapshotPath)) {
+      try {
+        const snapshotData = await fs.readFile(snapshotPath, "utf-8");
+        const snapshot = JSON.parse(snapshotData);
+        recoveryUrl = snapshot.rootDirectoryUrl || null;
+      } catch (error) {
+        out.error(`Remove failed: ${error}`);
+        out.exit(1);
+        return;
+      }
+    }
+
+    out.task("Removing local pushwork data");
+    await fs.rm(syncToolDir, { recursive: true, force: true });
+    out.done();
+
+    out.success("REMOVED", recoveryUrl);
+  } catch (error) {
+    out.error(`Remove failed: ${error}`);
+    out.exit(1);
+  }
+  process.exit();
+}
+
 export async function commit(
   targetPath: string,
   _options: CommitOptions = {}
