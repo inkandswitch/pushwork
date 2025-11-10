@@ -35,6 +35,7 @@ import { waitForSync, getSyncServerStorageId } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector, DetectedChange } from "./change-detection";
 import { MoveDetector } from "./move-detection";
+import { span, getTracer } from "../tracing";
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -161,9 +162,6 @@ export class SyncEngine {
    * Run full bidirectional sync
    */
   async sync(dryRun = false): Promise<SyncResult> {
-    const syncStartTime = Date.now();
-    const timings: { [key: string]: number } = {};
-
     const result: SyncResult = {
       success: false,
       filesChanged: 0,
@@ -178,43 +176,33 @@ export class SyncEngine {
 
     try {
       // Load current snapshot
-      const t0 = Date.now();
-      let snapshot = await this.snapshotManager.load();
-      timings["load_snapshot"] = Date.now() - t0;
-      if (!snapshot) {
-        snapshot = this.snapshotManager.createEmpty();
-      }
+      let snapshot = await span("load_snapshot", async () => {
+        const s = await this.snapshotManager.load();
+        return s || this.snapshotManager.createEmpty();
+      });
 
       // Backup snapshot before starting
-      const t1 = Date.now();
       if (!dryRun) {
-        await this.snapshotManager.backup();
+        await span("backup_snapshot", () => this.snapshotManager.backup());
       }
-      timings["backup_snapshot"] = Date.now() - t1;
 
       // Detect all changes
-      const t2 = Date.now();
-      const changes = await this.changeDetector.detectChanges(snapshot);
-      timings["detect_changes"] = Date.now() - t2;
+      const changes = await span("detect_changes", () =>
+        this.changeDetector.detectChanges(snapshot)
+      );
 
       // Detect moves
-      const t3 = Date.now();
-      const { moves, remainingChanges } = await this.moveDetector.detectMoves(
-        changes,
-        snapshot,
-        this.rootPath
+      const { moves, remainingChanges } = await span("detect_moves", () =>
+        this.moveDetector.detectMoves(changes, snapshot, this.rootPath)
       );
-      timings["detect_moves"] = Date.now() - t3;
 
       // Phase 1: Push local changes to remote
-      const t4 = Date.now();
       const phase1Result = await this.pushLocalChanges(
         remainingChanges,
         moves,
         snapshot,
         dryRun
       );
-      timings["phase1_push"] = Date.now() - t4;
 
       result.filesChanged += phase1Result.filesChanged;
       result.directoriesChanged += phase1Result.directoriesChanged;
@@ -223,67 +211,70 @@ export class SyncEngine {
 
       // Always wait for network sync when enabled (not just when local changes exist)
       // This is critical for clone scenarios where we need to pull remote changes
-      const t5 = Date.now();
-      timings["documents_to_sync"] = this.handlesToWaitOn.length;
-      if (!dryRun && this.networkSyncEnabled) {
-        try {
-          // If we have a root directory URL, wait for it to sync
-          if (snapshot.rootDirectoryUrl) {
-            const rootHandle = await this.repo.find<DirectoryDocument>(
-              snapshot.rootDirectoryUrl
-            );
-            this.handlesToWaitOn.push(rootHandle);
-          }
-
-          if (this.handlesToWaitOn.length > 0) {
-            const tWaitStart = Date.now();
-            await waitForSync(
-              this.handlesToWaitOn,
-              getSyncServerStorageId(this.syncServerStorageId)
-            );
-            timings["network_sync"] = Date.now() - tWaitStart;
-
-            // CRITICAL: Wait a bit after our changes reach the server to allow
-            // time for WebSocket to deliver OTHER peers' changes to us.
-            // waitForSync only ensures OUR changes reached the server, not that
-            // we've RECEIVED changes from other peers. This delay allows the
-            // WebSocket protocol to propagate peer changes before we re-detect.
-            // Without this, concurrent operations on different peers can miss
-            // each other due to timing races.
-            //
-            // Optimization: Only wait if we pushed changes (shorter delay if no changes)
-            const tDelayStart = Date.now();
-            const delayMs = phase1Result.filesChanged > 0 ? 200 : 100;
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-            timings["post_sync_delay"] = Date.now() - tDelayStart;
-          }
-        } catch (error) {
-          console.error(`❌ Network sync failed: ${error}`);
-          result.warnings.push(`Network sync failed: ${error}`);
+      await span("network", async () => {
+        const tracer = getTracer();
+        if (tracer) {
+          tracer.attr("documents_to_sync", this.handlesToWaitOn.length);
         }
-      }
-      timings["total_network"] = Date.now() - t5;
+
+        if (!dryRun && this.networkSyncEnabled) {
+          try {
+            // If we have a root directory URL, wait for it to sync
+            if (snapshot.rootDirectoryUrl) {
+              const rootHandle = await this.repo.find<DirectoryDocument>(
+                snapshot.rootDirectoryUrl
+              );
+              this.handlesToWaitOn.push(rootHandle);
+            }
+
+            if (this.handlesToWaitOn.length > 0) {
+              await span("network_sync", () =>
+                waitForSync(
+                  this.handlesToWaitOn,
+                  getSyncServerStorageId(this.syncServerStorageId)
+                )
+              );
+
+              // CRITICAL: Wait a bit after our changes reach the server to allow
+              // time for WebSocket to deliver OTHER peers' changes to us.
+              // waitForSync only ensures OUR changes reached the server, not that
+              // we've RECEIVED changes from other peers. This delay allows the
+              // WebSocket protocol to propagate peer changes before we re-detect.
+              // Without this, concurrent operations on different peers can miss
+              // each other due to timing races.
+              //
+              // Optimization: Only wait if we pushed changes (shorter delay if no changes)
+
+              await span("post_sync_delay", async () => {
+                const delayMs = phase1Result.filesChanged > 0 ? 200 : 100;
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+              });
+            }
+          } catch (error) {
+            console.error(`❌ Network sync failed: ${error}`);
+            result.warnings.push(`Network sync failed: ${error}`);
+          }
+        }
+      });
 
       // Re-detect remote changes after network sync to ensure fresh state
       // This fixes race conditions where we detect changes before server propagation
       // NOTE: We DON'T update snapshot heads yet - that would prevent detecting remote changes!
-      const t6 = Date.now();
-      const freshChanges = await this.changeDetector.detectChanges(snapshot);
+      const freshChanges = await span("redetect_changes", () =>
+        this.changeDetector.detectChanges(snapshot)
+      );
       const freshRemoteChanges = freshChanges.filter(
         (c) =>
           c.changeType === ChangeType.REMOTE_ONLY ||
           c.changeType === ChangeType.BOTH_CHANGED
       );
-      timings["redetect_changes"] = Date.now() - t6;
 
       // Phase 2: Pull remote changes to local using fresh detection
-      const t7 = Date.now();
       const phase2Result = await this.pullRemoteChanges(
         freshRemoteChanges,
         snapshot,
         dryRun
       );
-      timings["phase2_pull"] = Date.now() - t7;
       result.filesChanged += phase2Result.filesChanged;
       result.directoriesChanged += phase2Result.directoriesChanged;
       result.errors.push(...phase2Result.errors);
@@ -292,70 +283,66 @@ export class SyncEngine {
       // CRITICAL FIX: Update snapshot heads AFTER pulling remote changes
       // This ensures that change detection can find remote changes, and we only
       // update the snapshot after the filesystem is in sync with the documents
-      const t8 = Date.now();
       if (!dryRun) {
-        // Update file document heads
-        for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
-          try {
-            const handle = await this.repo.find(snapshotEntry.url);
-            const currentHeads = handle.heads();
-            if (!A.equals(currentHeads, snapshotEntry.head)) {
-              // Update snapshot with current heads after pulling changes
-              snapshot.files.set(filePath, {
-                ...snapshotEntry,
-                head: currentHeads,
-              });
+        await span("update_snapshot_heads", async () => {
+          // Update file document heads
+          for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
+            try {
+              const handle = await this.repo.find(snapshotEntry.url);
+              const currentHeads = handle.heads();
+              if (!A.equals(currentHeads, snapshotEntry.head)) {
+                // Update snapshot with current heads after pulling changes
+                snapshot.files.set(filePath, {
+                  ...snapshotEntry,
+                  head: currentHeads,
+                });
+              }
+            } catch (error) {
+              // Handle might not exist if file was deleted, skip
+              console.warn(`Could not update heads for ${filePath}: ${error}`);
             }
-          } catch (error) {
-            // Handle might not exist if file was deleted, skip
-            console.warn(`Could not update heads for ${filePath}: ${error}`);
           }
-        }
 
-        // Update directory document heads
-        for (const [dirPath, snapshotEntry] of snapshot.directories.entries()) {
-          try {
-            const handle = await this.repo.find(snapshotEntry.url);
-            const currentHeads = handle.heads();
-            if (!A.equals(currentHeads, snapshotEntry.head)) {
-              // Update snapshot with current heads after pulling changes
-              snapshot.directories.set(dirPath, {
-                ...snapshotEntry,
-                head: currentHeads,
-              });
+          // Update directory document heads
+          for (const [
+            dirPath,
+            snapshotEntry,
+          ] of snapshot.directories.entries()) {
+            try {
+              const handle = await this.repo.find(snapshotEntry.url);
+              const currentHeads = handle.heads();
+              if (!A.equals(currentHeads, snapshotEntry.head)) {
+                // Update snapshot with current heads after pulling changes
+                snapshot.directories.set(dirPath, {
+                  ...snapshotEntry,
+                  head: currentHeads,
+                });
+              }
+            } catch (error) {
+              // Handle might not exist if directory was deleted, skip
+              console.warn(
+                `Could not update heads for directory ${dirPath}: ${error}`
+              );
             }
-          } catch (error) {
-            // Handle might not exist if directory was deleted, skip
-            console.warn(
-              `Could not update heads for directory ${dirPath}: ${error}`
-            );
           }
-        }
+        });
       }
-      timings["update_snapshot_heads"] = Date.now() - t8;
 
       // Touch root directory if any changes were made during sync
-      const t9 = Date.now();
       const hasChanges =
         result.filesChanged > 0 || result.directoriesChanged > 0;
       if (hasChanges) {
-        await this.touchRootDirectory(snapshot, dryRun);
+        await span("touch_root", () =>
+          this.touchRootDirectory(snapshot, dryRun)
+        );
       }
-      timings["touch_root"] = Date.now() - t9;
 
       // Save updated snapshot if not dry run
-      const t10 = Date.now();
       if (!dryRun) {
-        await this.snapshotManager.save(snapshot);
+        await span("save_snapshot", () => this.snapshotManager.save(snapshot));
       }
-      timings["save_snapshot"] = Date.now() - t10;
-
-      // Calculate total time
-      const totalTime = Date.now() - syncStartTime;
-      timings["total"] = totalTime;
 
       result.success = result.errors.length === 0;
-      result.timings = timings;
       return result;
     } catch (error) {
       result.errors.push({

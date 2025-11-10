@@ -23,6 +23,7 @@ import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 import { Output } from "./output";
+import { trace, span } from "../tracing";
 
 /**
  * Simple key transformation for debug output: snake_case -> Title Case
@@ -34,25 +35,6 @@ function prettifyKey(key: string): string {
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ") + ":"
   );
-}
-
-/**
- * Format timing value with percentage and optional metadata
- */
-function formatTimingValue(
-  value: any,
-  key: string,
-  total: number,
-  timings?: Record<string, any>
-): string {
-  // Skip non-timing values
-  if (key === "documents_to_sync") return "";
-  if (key === "total") return `${(value / 1000).toFixed(3)}s`;
-
-  const timeStr = `${(value / 1000).toFixed(3)}s`;
-  const pctStr = `(${((value / total) * 100).toFixed(1)}%)`;
-
-  return `${timeStr} ${pctStr}`;
 }
 
 /**
@@ -182,6 +164,11 @@ export async function init(
   // Validate sync server options
   validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
 
+  // Enable tracing if debug mode
+  if (options.debug) {
+    trace(true);
+  }
+
   const out = new Output();
 
   try {
@@ -250,7 +237,7 @@ export async function init(
     );
 
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
-    const result = await syncEngine.sync(false);
+    const result = await span("sync", () => syncEngine.sync(false));
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
@@ -263,18 +250,19 @@ export async function init(
     }
     out.success("INITIALIZED", rootHandle.url);
 
-    // Show timing breakdown if debug mode is enabled
-    if (
-      options.debug &&
-      result.timings &&
-      Object.keys(result.timings).length > 0
-    ) {
-      const total = result.timings.total || 0;
-      out.log("");
-      out.special("TIMING", "");
-      out.obj(result.timings, prettifyKey, (value, key) =>
-        formatTimingValue(value, key, total, result.timings)
+    // Export flame graph if debug mode is enabled
+    if (options.debug) {
+      const tracer = trace(false);
+      const traceFile = path.join(resolvedPath, ".pushwork", "trace.json");
+      await fs.writeFile(
+        traceFile,
+        JSON.stringify(tracer.toChromeTrace(), null, 2)
       );
+
+      const fileUrl = `file://${traceFile}`;
+      out.log("");
+      out.log(`Flame graph: ${fileUrl}`);
+      out.log(`Open in chrome://tracing or ui.perfetto.dev`);
     }
 
     out.log("");
@@ -294,6 +282,11 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
+  // Enable tracing if debug mode
+  if (options.debug) {
+    trace(true);
+  }
+
   const out = new Output();
 
   try {
@@ -352,7 +345,7 @@ export async function sync(
       out.log("Run without --dry-run to apply these changes");
     } else {
       out.update("Synchronizing");
-      const result = await syncEngine.sync(false);
+      const result = await span("sync", () => syncEngine.sync(false));
 
       out.update("Writing to disk");
       await safeRepoShutdown(repo, "sync");
@@ -383,18 +376,19 @@ export async function sync(
           }
         }
 
-        // Show timing breakdown if debug mode is enabled
-        if (
-          options.debug &&
-          result.timings &&
-          Object.keys(result.timings).length > 0
-        ) {
-          const total = result.timings.total || 0;
-          out.log("");
-          out.special("TIMING", "");
-          out.obj(result.timings, prettifyKey, (value, key) =>
-            formatTimingValue(value, key, total, result.timings)
+        // Export flame graph if debug mode is enabled
+        if (options.debug) {
+          const tracer = trace(false);
+          const traceFile = path.join(workingDir, ".pushwork", "trace.json");
+          await fs.writeFile(
+            traceFile,
+            JSON.stringify(tracer.toChromeTrace(), null, 2)
           );
+
+          const fileUrl = `file://${traceFile}`;
+          out.log("");
+          out.log(`Flame graph: ${fileUrl}`);
+          out.log(`Open in chrome://tracing or ui.perfetto.dev`);
         }
       } else {
         out.done("partial", false);
@@ -736,7 +730,7 @@ export async function clone(
     );
 
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-    const result = await syncEngine.sync(false);
+    const result = await span("sync", () => syncEngine.sync(false));
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "clone");
