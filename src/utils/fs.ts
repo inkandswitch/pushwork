@@ -130,7 +130,7 @@ export async function removePath(filePath: string): Promise<void> {
   try {
     const stats = await fs.stat(filePath);
     if (stats.isDirectory()) {
-      await fs.rmdir(filePath, { recursive: true });
+      await fs.rm(filePath, { recursive: true });
     } else {
       await fs.unlink(filePath);
     }
