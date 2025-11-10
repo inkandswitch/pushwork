@@ -836,7 +836,7 @@ export async function rm(targetPath: string = "."): Promise<void> {
     await fs.rm(syncToolDir, { recursive: true, force: true });
     out.done();
 
-    out.success("REMOVED", recoveryUrl);
+    out.warn("REMOVED", recoveryUrl);
   } catch (error) {
     out.error(`Remove failed: ${error}`);
     out.exit(1);

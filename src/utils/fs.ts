@@ -176,29 +176,25 @@ export async function listDirectory(
       ? path.join(dirPath, "**/*")
       : path.join(dirPath, "*");
 
-    // Convert exclude patterns to glob ignore patterns
-    const ignorePatterns = excludePatterns.map((pattern) => {
-      if (pattern.startsWith(".") && !pattern.includes("*")) {
-        // Directory patterns
-        return `${pattern}/**`;
-      }
-      return pattern;
-    });
-
+    // Use glob to get all paths (with dot files)
+    // Note: We don't use glob's ignore option because it doesn't support gitignore semantics
     const paths = await glob(pattern, {
       dot: true,
-      ignore: ignorePatterns,
     });
 
-    for (const filePath of paths) {
-      // Additional filtering for safety
-      if (!isExcluded(filePath, dirPath, excludePatterns)) {
-        const entry = await getFileSystemEntry(filePath);
-        if (entry) {
-          entries.push(entry);
+    // Parallelize all stat calls for better performance
+    const allEntries = await Promise.all(
+      paths.map(async (filePath) => {
+        // Filter using proper gitignore semantics from the ignore library
+        if (isExcluded(filePath, dirPath, excludePatterns)) {
+          return null;
         }
-      }
-    }
+        return await getFileSystemEntry(filePath);
+      })
+    );
+
+    // Filter out null entries (excluded files or files that couldn't be read)
+    entries.push(...allEntries.filter((e): e is FileSystemEntry => e !== null));
   } catch {
     // Return empty array if directory doesn't exist or can't be read
   }

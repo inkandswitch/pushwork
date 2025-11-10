@@ -433,8 +433,13 @@ export class ChangeDetector {
       await span(
         "read_all_files",
         (async () => {
-          for (const entry of entries) {
-            if (entry.type !== FileType.DIRECTORY) {
+          // Parallelize all file reads for significant performance improvement
+          const fileEntries = entries.filter(
+            (entry) => entry.type !== FileType.DIRECTORY
+          );
+
+          await Promise.all(
+            fileEntries.map(async (entry) => {
               const relativePath = getRelativePath(this.rootPath, entry.path);
               const content = await readFileContent(entry.path);
 
@@ -442,8 +447,8 @@ export class ChangeDetector {
                 content,
                 type: entry.type,
               });
-            }
-          }
+            })
+          );
         })()
       );
     } catch (error) {
