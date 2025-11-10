@@ -10,8 +10,6 @@ import {
   CheckoutOptions,
   InitOptions,
   CommitOptions,
-  StatusOptions,
-  UrlOptions,
   ListOptions,
   ConfigOptions,
   DebugOptions,
@@ -40,7 +38,7 @@ function prettifyKey(key: string): string {
 /**
  * Shared context that commands can use
  */
-export interface CommandContext {
+interface CommandContext {
   repo: Repo;
   syncEngine: SyncEngine;
   config: DirectoryConfig;
@@ -74,7 +72,7 @@ function validateSyncServerOptions(
  * Shared pre-action that ensures repository and sync engine are properly initialized
  * This function always works, with or without network connectivity
  */
-export async function setupCommandContext(
+async function setupCommandContext(
   workingDir: string = process.cwd(),
   customSyncServer?: string,
   customStorageId?: string,
@@ -121,10 +119,7 @@ export async function setupCommandContext(
 /**
  * Safely shutdown a repository with proper error handling
  */
-export async function safeRepoShutdown(
-  repo: Repo,
-  context?: string
-): Promise<void> {
+async function safeRepoShutdown(repo: Repo, context?: string): Promise<void> {
   try {
     await repo.shutdown();
   } catch (shutdownError) {
@@ -237,7 +232,7 @@ export async function init(
     );
 
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
-    const result = await span("sync", syncEngine.sync(false));
+    const result = await span("sync", syncEngine.sync());
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
@@ -345,7 +340,7 @@ export async function sync(
       out.log("Run without --dry-run to apply these changes");
     } else {
       out.update("Synchronizing");
-      const result = await span("sync", syncEngine.sync(false));
+      const result = await span("sync", syncEngine.sync());
 
       out.update("Writing to disk");
       await safeRepoShutdown(repo, "sync");
@@ -541,10 +536,7 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(
-  targetPath: string = ".",
-  options: StatusOptions = {}
-): Promise<void> {
+export async function status(targetPath: string = "."): Promise<void> {
   const out = new Output();
 
   try {
@@ -730,7 +722,7 @@ export async function clone(
     );
 
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-    const result = await span("sync", syncEngine.sync(false));
+    const result = await span("sync", syncEngine.sync());
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "clone");
@@ -752,10 +744,7 @@ export async function clone(
 /**
  * Get the root URL for the current pushwork repository
  */
-export async function url(
-  targetPath: string = ".",
-  options: UrlOptions = {}
-): Promise<void> {
+export async function url(targetPath: string = "."): Promise<void> {
   const out = new Output();
 
   try {
@@ -805,7 +794,7 @@ export async function commit(
       false
     );
 
-    const result = await syncEngine.commitLocal(options.dryRun || false);
+    const result = await syncEngine.commitLocal();
     await safeRepoShutdown(repo, "commit");
 
     out.done();

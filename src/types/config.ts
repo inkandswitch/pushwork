@@ -19,15 +19,6 @@ export interface GlobalConfig {
 }
 
 /**
- * Default settings
- */
-export interface DefaultSettings {
-  remote_repo?: string;
-  exclude_patterns: string[];
-  large_file_threshold: string;
-}
-
-/**
  * Diff tool settings
  */
 export interface DiffSettings {
@@ -95,7 +86,6 @@ export interface CloneOptions extends CommandOptions {
  * Sync command specific options
  */
 export interface SyncOptions extends CommandOptions {
-  dryRun: boolean;
   force?: boolean;
 }
 
@@ -134,19 +124,7 @@ export interface InitOptions extends CommandOptions {
 /**
  * Commit command specific options
  */
-export interface CommitOptions extends CommandOptions {
-  dryRun?: boolean;
-}
-
-/**
- * Status command specific options
- */
-export interface StatusOptions extends CommandOptions {}
-
-/**
- * URL command specific options
- */
-export interface UrlOptions extends CommandOptions {}
+export interface CommitOptions extends CommandOptions {}
 
 /**
  * List (ls) command specific options
