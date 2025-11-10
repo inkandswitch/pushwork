@@ -2,6 +2,7 @@ import {
   trace,
   SpanStatusCode,
   Tracer as OtelTracer,
+  HrTime,
 } from "@opentelemetry/api";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import {
@@ -147,10 +148,8 @@ export class Tracer {
     for (const span of spans) {
       // OpenTelemetry stores time as [seconds, nanoseconds]
       // Chrome trace format uses microseconds
-      const startTime =
-        span.startTime[0] * 1_000_000 + Math.floor(span.startTime[1] / 1000);
-      const endTime =
-        span.endTime[0] * 1_000_000 + Math.floor(span.endTime[1] / 1000);
+      const startTime = toMicroseconds(span.startTime);
+      const endTime = toMicroseconds(span.endTime);
 
       // Use Complete events (X) - they show up properly under "Process 1"
       // Perfetto should handle overlapping via proper parent-child nesting from OpenTelemetry
@@ -173,10 +172,49 @@ export class Tracer {
   }
 
   /**
+   * Export to Chrome trace format with each span in its own lane
+   * Each span gets a unique thread ID (tid) for separate visualization
+   * Useful for seeing all spans at once without nesting/overlap
+   */
+  toChromeLanePerSpan(): any {
+    // Force flush to ensure all spans are exported
+    this.provider.forceFlush();
+
+    const spans = this.exporter.getFinishedSpans();
+    const events: any[] = [];
+
+    // Assign each span a unique thread ID
+    spans.forEach((span, index) => {
+      const startTime = toMicroseconds(span.startTime);
+      const endTime = toMicroseconds(span.endTime);
+
+      events.push({
+        name: span.name,
+        cat: "function",
+        ph: "X",
+        ts: startTime,
+        dur: endTime - startTime,
+        pid: 1,
+        tid: index + 1, // Unique lane for each span
+        args: span.attributes || {},
+      });
+    });
+
+    return {
+      traceEvents: events,
+      displayTimeUnit: "ms",
+    };
+  }
+
+  /**
    * Reset tracer state
    * Clears all collected spans for the next tracing session
    */
   reset(): void {
     this.exporter.reset();
   }
+}
+
+function toMicroseconds(time: HrTime): number {
+  return time[0] * 1_000_000 + Math.floor(time[1] / 1000);
 }

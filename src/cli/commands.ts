@@ -250,19 +250,36 @@ export async function init(
     }
     out.success("INITIALIZED", rootHandle.url);
 
-    // Export flame graph if debug mode is enabled
+    // Export flame graphs if debug mode is enabled
     if (options.debug) {
       const tracer = trace(false);
+
+      // Export nested view (default)
       const traceFile = path.join(resolvedPath, ".pushwork", "trace.json");
       await fs.writeFile(
         traceFile,
         JSON.stringify(tracer.toChromeTrace(), null, 2)
       );
 
+      // Export lane-per-span view
+      const traceLanesFile = path.join(
+        resolvedPath,
+        ".pushwork",
+        "trace-lanes.json"
+      );
+      await fs.writeFile(
+        traceLanesFile,
+        JSON.stringify(tracer.toChromeLanePerSpan(), null, 2)
+      );
+
       out.log("");
       out.special(
-        `FLAME GRAPH`,
+        `FLAME GRAPH (nested)`,
         `file://${traceFile} (Open in https://ui.perfetto.dev)`
+      );
+      out.special(
+        `FLAME GRAPH (lanes)`,
+        `file://${traceLanesFile} (Open in https://ui.perfetto.dev)`
       );
     }
   } catch (error) {
@@ -374,19 +391,36 @@ export async function sync(
           }
         }
 
-        // Export flame graph if debug mode is enabled
+        // Export flame graphs if debug mode is enabled
         if (options.debug) {
           const tracer = trace(false);
+
+          // Export nested view (default)
           const traceFile = path.join(workingDir, ".pushwork", "trace.json");
           await fs.writeFile(
             traceFile,
             JSON.stringify(tracer.toChromeTrace(), null, 2)
           );
 
+          // Export lane-per-span view
+          const traceLanesFile = path.join(
+            workingDir,
+            ".pushwork",
+            "trace-lanes.json"
+          );
+          await fs.writeFile(
+            traceLanesFile,
+            JSON.stringify(tracer.toChromeLanePerSpan(), null, 2)
+          );
+
           out.log("");
           out.special(
-            `FLAME GRAPH`,
+            `FLAME GRAPH (nested)`,
             `file://${traceFile} (Open in https://ui.perfetto.dev)`
+          );
+          out.special(
+            `FLAME GRAPH (lanes)`,
+            `file://${traceLanesFile} (Open in https://ui.perfetto.dev)`
           );
         }
       } else {
