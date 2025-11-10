@@ -474,7 +474,12 @@ export class ChangeDetector {
 
     const doc = await span("view_at_heads", handle.view(heads).doc());
 
-    return (doc as FileDocument | undefined)?.content as string | Uint8Array;
+    const content = (doc as FileDocument | undefined)?.content;
+    // Convert ImmutableString to regular string
+    if (content instanceof A.ImmutableString) {
+      return content.toString();
+    }
+    return content as string | Uint8Array;
   }
 
   /**
@@ -491,7 +496,12 @@ export class ChangeDetector {
       if (!doc) return null;
 
       const fileDoc = doc as FileDocument;
-      return fileDoc.content as string | Uint8Array;
+      const content = fileDoc.content;
+      // Convert ImmutableString to regular string
+      if (content instanceof A.ImmutableString) {
+        return content.toString();
+      }
+      return content as string | Uint8Array;
     } catch (error) {
       console.warn(
         `❌ Failed to get current remote content for ${url}: ${error}`

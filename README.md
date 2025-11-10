@@ -400,6 +400,17 @@ test/
 └── integration/   # Integration tests
 ```
 
+### Profiling
+
+```bash
+# install clinic or 0x
+clinic flame -- node $(pnpm root -g)/pushwork/dist/cli.js sync
+# or
+0x -- node $(pnpm root -g)/pushwork/dist/cli.js sync
+```
+
+or run with `--debug`
+
 ## Real-World Collaboration Example
 
 ```bash

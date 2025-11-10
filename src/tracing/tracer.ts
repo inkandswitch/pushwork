@@ -58,6 +58,28 @@ export class Tracer {
   }
 
   /**
+   * Add a mark/instant event to the trace
+   * Creates a zero-duration span using OpenTelemetry's API
+   *
+   * Usage:
+   *   mark("🎯 Starting expensive operation")
+   *   mark("checkpoint", { step: 3, status: "processing" })
+   */
+  mark(name: string, attributes?: Record<string, any>): void {
+    if (!this.enabled) return;
+
+    // Create a proper zero-duration span using OpenTelemetry
+    const span = this.tracer.startSpan(name);
+    if (attributes) {
+      for (const [key, value] of Object.entries(attributes)) {
+        span.setAttribute(key, value);
+      }
+    }
+    // Immediately end it - this creates a zero-duration span
+    span.end();
+  }
+
+  /**
    * Trace a synchronous operation
    * Uses OpenTelemetry's standard span API with proper context propagation
    */

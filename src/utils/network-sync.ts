@@ -1,6 +1,6 @@
 import { DocHandle, StorageId } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
-import { span, spanSync, attr } from "../tracing";
+import { span, spanSync, attr, mark } from "../tracing";
 
 /**
  * Wait for documents to sync to the remote server
@@ -255,6 +255,8 @@ export async function waitForSync(
     console.error(`❌ Sync wait failed after ${elapsed}ms: ${error}`);
     throw error;
   }
+
+  mark("exit_wait_for_sync");
 }
 
 /**

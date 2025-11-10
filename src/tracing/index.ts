@@ -47,4 +47,16 @@ export function attr(key: string, value: any): void {
   globalTracer.attr(key, value);
 }
 
+/**
+ * Add a mark/instant event to the trace
+ * Shows up as a vertical line in the timeline for easy identification
+ *
+ * Usage:
+ *   mark("🎯 Starting ImmutableString conversion")
+ *   mark("checkpoint", { filesProcessed: 42 })
+ */
+export function mark(name: string, attributes?: Record<string, any>): void {
+  globalTracer.mark(name, attributes);
+}
+
 export { Tracer } from "./tracer";

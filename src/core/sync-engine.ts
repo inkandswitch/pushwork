@@ -1,7 +1,6 @@
 import {
   AutomergeUrl,
   Repo,
-  updateText,
   DocHandle,
   UrlHeads,
 } from "@automerge/automerge-repo";
@@ -650,9 +649,8 @@ export class SyncEngine {
 
             // If new content is provided, update it (handles move + modification case)
             if (move.newContent !== undefined) {
-              const isText = this.isTextContent(move.newContent);
-              if (isText && typeof move.newContent === "string") {
-                updateText(doc, ["content"], move.newContent);
+              if (typeof move.newContent === "string") {
+                doc.content = new A.ImmutableString(move.newContent);
               } else {
                 doc.content = move.newContent;
               }
@@ -664,9 +662,8 @@ export class SyncEngine {
 
             // If new content is provided, update it (handles move + modification case)
             if (move.newContent !== undefined) {
-              const isText = this.isTextContent(move.newContent);
-              if (isText && typeof move.newContent === "string") {
-                updateText(doc, ["content"], move.newContent);
+              if (typeof move.newContent === "string") {
+                doc.content = new A.ImmutableString(move.newContent);
               } else {
                 doc.content = move.newContent;
               }
@@ -710,7 +707,11 @@ export class SyncEngine {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
       mimeType: getEnhancedMimeType(change.path),
-      content: isText ? "" : change.localContent, // Empty string for text, actual content for binary
+      content: isText
+        ? new A.ImmutableString("")
+        : typeof change.localContent === "string"
+        ? new A.ImmutableString(change.localContent)
+        : change.localContent, // Empty ImmutableString for text, wrap strings for safety, actual content for binary
       metadata: {
         permissions: 0o644,
       },
@@ -718,10 +719,10 @@ export class SyncEngine {
 
     const handle = this.repo.create(fileDoc);
 
-    // For text files, use updateText to set the content properly
+    // For text files, use ImmutableString for better performance
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
-        updateText(doc, ["content"], change.localContent as string);
+        doc.content = new A.ImmutableString(change.localContent as string);
       });
     }
 
@@ -778,9 +779,8 @@ export class SyncEngine {
     }
 
     handle.changeAt(heads, (doc: FileDocument) => {
-      const isText = this.isTextContent(content);
-      if (isText && typeof content === "string") {
-        updateText(doc, ["content"], content);
+      if (typeof content === "string") {
+        doc.content = new A.ImmutableString(content);
       } else {
         doc.content = content;
       }
@@ -820,11 +820,11 @@ export class SyncEngine {
     }
     if (heads) {
       handle.changeAt(heads, (doc: FileDocument) => {
-        doc.content = "";
+        doc.content = new A.ImmutableString("");
       });
     } else {
       handle.change((doc: FileDocument) => {
-        doc.content = "";
+        doc.content = new A.ImmutableString("");
       });
     }
   }
