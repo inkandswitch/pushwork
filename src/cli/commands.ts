@@ -323,8 +323,7 @@ export async function sync(
         return;
       }
 
-      out.info("CHANGES", "Pending");
-      out.pair("Directory", workingDir);
+      out.info("CHANGES", "");
       out.pair("Changes", preview.changes.length.toString());
       if (preview.moves.length > 0) {
         out.pair("Moves", preview.moves.length.toString());
@@ -497,70 +496,66 @@ export async function diff(
           ? "[remote] "
           : "[conflict]";
 
-      if (!options.tool) {
-        try {
-          // Get old content (from snapshot/remote)
-          const oldContent = change.remoteContent || "";
-          // Get new content (current local)
-          const newContent = change.localContent || "";
+      try {
+        // Get old content (from snapshot/remote)
+        const oldContent = change.remoteContent || "";
+        // Get new content (current local)
+        const newContent = change.localContent || "";
 
-          // Convert binary content to string representation if needed
-          const oldText =
-            typeof oldContent === "string"
-              ? oldContent
-              : `<binary content: ${oldContent.length} bytes>`;
-          const newText =
-            typeof newContent === "string"
-              ? newContent
-              : `<binary content: ${newContent.length} bytes>`;
+        // Convert binary content to string representation if needed
+        const oldText =
+          typeof oldContent === "string"
+            ? oldContent
+            : `<binary content: ${oldContent.length} bytes>`;
+        const newText =
+          typeof newContent === "string"
+            ? newContent
+            : `<binary content: ${newContent.length} bytes>`;
 
-          // Generate unified diff
-          const diffResult = diffLib.createPatch(
-            change.path,
-            oldText,
-            newText,
-            "previous",
-            "current"
-          );
+        // Generate unified diff
+        const diffResult = diffLib.createPatch(
+          change.path,
+          oldText,
+          newText,
+          "previous",
+          "current"
+        );
 
-          // Skip the header lines and process the diff
-          const lines = diffResult.split("\n").slice(4); // Skip index, ===, ---, +++ lines
+        // Skip the header lines and process the diff
+        const lines = diffResult.split("\n").slice(4); // Skip index, ===, ---, +++ lines
 
-          if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
-            out.log(`${prefix}${change.path} (content identical)`, "cyan");
-            continue;
-          }
-
-          // Extract first hunk header and show inline with path
-          let firstHunk = "";
-          let diffLines = lines;
-          if (lines[0]?.startsWith("@@")) {
-            firstHunk = ` ${lines[0]}`;
-            diffLines = lines.slice(1);
-          }
-
-          out.log(`${prefix}${change.path}${firstHunk}`, "cyan");
-
-          for (const line of diffLines) {
-            if (line.startsWith("@@")) {
-              // Additional hunk headers
-              out.log(line, "dim");
-            } else if (line.startsWith("+")) {
-              // Added line
-              out.log(line, "green");
-            } else if (line.startsWith("-")) {
-              // Removed line
-              out.log(line, "red");
-            } else if (line.startsWith(" ") || line === "") {
-              // Context line or empty
-              out.log(line, "dim");
-            }
-          }
-        } catch (error) {
-          out.log(`${prefix}${change.path} (diff error: ${error})`, "cyan");
+        if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
+          out.log(`${prefix}${change.path} (content identical)`, "cyan");
+          continue;
         }
-      } else {
-        out.log(`${prefix} ${change.path}`);
+
+        // Extract first hunk header and show inline with path
+        let firstHunk = "";
+        let diffLines = lines;
+        if (lines[0]?.startsWith("@@")) {
+          firstHunk = ` ${lines[0]}`;
+          diffLines = lines.slice(1);
+        }
+
+        out.log(`${prefix}${change.path}${firstHunk}`, "cyan");
+
+        for (const line of diffLines) {
+          if (line.startsWith("@@")) {
+            // Additional hunk headers
+            out.log(line, "dim");
+          } else if (line.startsWith("+")) {
+            // Added line
+            out.log(line, "green");
+          } else if (line.startsWith("-")) {
+            // Removed line
+            out.log(line, "red");
+          } else if (line.startsWith(" ") || line === "") {
+            // Context line or empty
+            out.log(line, "dim");
+          }
+        }
+      } catch (error) {
+        out.log(`${prefix}${change.path} (diff error: ${error})`, "cyan");
       }
     }
 
@@ -580,7 +575,7 @@ export async function status(targetPath: string = "."): Promise<void> {
   try {
     out.task("Loading status");
 
-    const { repo, syncEngine, workingDir, config } = await setupCommandContext(
+    const { repo, syncEngine, config } = await setupCommandContext(
       targetPath,
       undefined,
       undefined,
@@ -590,7 +585,7 @@ export async function status(targetPath: string = "."): Promise<void> {
 
     out.done();
 
-    out.info("STATUS", workingDir);
+    out.info("STATUS", "");
 
     if (syncStatus.snapshot?.rootDirectoryUrl) {
       out.pair("URL", syncStatus.snapshot.rootDirectoryUrl);
@@ -901,7 +896,7 @@ export async function debug(
   try {
     out.task("Loading debug info");
 
-    const { repo, syncEngine, workingDir } = await setupCommandContext(
+    const { repo, syncEngine } = await setupCommandContext(
       targetPath,
       undefined,
       undefined,
@@ -911,7 +906,7 @@ export async function debug(
 
     out.done("done");
 
-    out.info("DEBUG", workingDir);
+    out.info("DEBUG", "");
 
     if (debugStatus.snapshot?.rootDirectoryUrl) {
       out.pair("URL", debugStatus.snapshot.rootDirectoryUrl);
@@ -1060,7 +1055,7 @@ export async function config(
       }
     } else {
       // Show basic config info
-      out.info("CONFIGURATION", resolvedPath);
+      out.info("CONFIGURATION", "");
       out.pair("Sync server", config.sync_server || "default");
       out.pair("Sync enabled", config.sync_enabled ? "yes" : "no");
       out.pair(

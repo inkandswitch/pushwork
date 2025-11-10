@@ -93,7 +93,6 @@ export interface SyncOptions extends CommandOptions {
  * Diff command specific options
  */
 export interface DiffOptions extends CommandOptions {
-  tool?: string;
   nameOnly: boolean;
 }
 

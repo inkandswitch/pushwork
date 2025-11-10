@@ -42,7 +42,7 @@ const version = require("../package.json").version;
 program
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(version);
+  .version(version, "-V, --version", "output the version number");
 
 // Configure help colors using Commander v13's built-in color support
 program.configureHelp({
@@ -184,12 +184,10 @@ program
     "Limit diff to specific path (default: current directory)",
     "."
   )
-  .option("--tool <tool>", "Use external diff tool (meld, vimdiff, etc.)")
   .option("--name-only", "Show only changed file names")
   .action(
     withErrorHandling(async (path: string, options) => {
       await diff(path, {
-        tool: options.tool,
         nameOnly: options.nameOnly || false,
         dryRun: false,
         verbose: false,
@@ -299,12 +297,10 @@ program
   .summary("List tracked files")
   .argument("[path]", "Directory path (default: current directory)", ".")
   .option("-l, --long", "Show long format with Automerge URLs")
-  .option("--debug", "Show detailed performance timing information")
   .action(
     withErrorHandling(async (path: string, cmdOptions) => {
       await ls(path, {
         long: cmdOptions.long || false,
-        debug: cmdOptions.debug || false,
       });
     })
   );
