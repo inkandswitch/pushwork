@@ -6,7 +6,6 @@ import {
   isEnhancedTextFile,
   shouldForceAsText,
   getMimeType,
-  isTextFile,
 } from "../../src/utils";
 
 describe("Enhanced MIME Detection", () => {
@@ -27,18 +26,11 @@ describe("Enhanced MIME Detection", () => {
 
       // Standard MIME detection (broken)
       const standardMime = getMimeType(tsFile);
-      const standardIsText = await isTextFile(tsFile);
 
       // Enhanced MIME detection (fixed)
       const enhancedMime = getEnhancedMimeType(tsFile);
       const enhancedIsText = await isEnhancedTextFile(tsFile);
       const shouldForce = shouldForceAsText(tsFile);
-
-      console.log("TypeScript file (.ts) detection:");
-      console.log(`  Standard MIME: ${standardMime}, Text: ${standardIsText}`);
-      console.log(
-        `  Enhanced MIME: ${enhancedMime}, Text: ${enhancedIsText}, Force: ${shouldForce}`
-      );
 
       // Verify the fix
       expect(enhancedMime).toBe("text/typescript"); // Fixed!
@@ -56,10 +48,6 @@ describe("Enhanced MIME Detection", () => {
       const standardMime = getMimeType(tsxFile);
       const enhancedMime = getEnhancedMimeType(tsxFile);
       const enhancedIsText = await isEnhancedTextFile(tsxFile);
-
-      console.log("TSX file detection:");
-      console.log(`  Standard MIME: ${standardMime}`);
-      console.log(`  Enhanced MIME: ${enhancedMime}, Text: ${enhancedIsText}`);
 
       expect(enhancedMime).toBe("text/tsx"); // Fixed!
       expect(enhancedIsText).toBe(true); // Fixed!
@@ -180,9 +168,6 @@ div { color: blue; }
         { name: "font.woff2", mime: "font/woff2", text: false },
       ];
 
-      console.log("\nComprehensive Developer File Detection:");
-      console.log("=====================================");
-
       for (const file of developerFiles) {
         const filePath = path.join(testDir, file.name);
 
@@ -195,13 +180,6 @@ div { color: blue; }
 
         const enhancedMime = getEnhancedMimeType(filePath);
         const enhancedIsText = await isEnhancedTextFile(filePath);
-        const forced = shouldForceAsText(filePath);
-
-        console.log(
-          `${file.name.padEnd(20)} | MIME: ${enhancedMime.padEnd(
-            25
-          )} | Text: ${enhancedIsText} | Forced: ${forced}`
-        );
 
         expect(enhancedMime).toBe(file.mime);
         expect(enhancedIsText).toBe(file.text);

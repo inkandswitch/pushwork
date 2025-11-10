@@ -28,8 +28,6 @@ describe("Sync Timing Analysis", () => {
       await Promise.all(promises);
       const totalTime = Date.now() - startTime;
 
-      console.log(`Created 10 files in ${totalTime}ms`);
-
       // Verify all files exist
       const files = await fs.readdir(testDir);
       expect(files).toHaveLength(10);
@@ -57,10 +55,6 @@ describe("Sync Timing Analysis", () => {
       await Promise.all(promises);
       const parallelTime = Date.now() - parallelStart;
 
-      console.log(
-        `Sequential: ${sequentialTime}ms, Parallel: ${parallelTime}ms`
-      );
-
       // Parallel should generally be faster
       expect(parallelTime).toBeLessThanOrEqual(sequentialTime);
 
@@ -86,8 +80,6 @@ describe("Sync Timing Analysis", () => {
       // Check final content (should be one of the updates)
       const finalContent = await fs.readFile(filePath, "utf8");
       expect(finalContent).toMatch(/updated content \d/);
-
-      console.log(`Final content after rapid writes: "${finalContent}"`);
     });
   });
 
@@ -110,11 +102,6 @@ describe("Sync Timing Analysis", () => {
       await fs.writeFile(path.join(testDir, "network.txt"), "network content");
       const networkTime = Date.now() - networkStart;
       results.push({ operation: "network write", time: networkTime });
-
-      console.log("Operation timing:");
-      results.forEach((r) => {
-        console.log(`  ${r.operation}: ${r.time}ms`);
-      });
 
       // This demonstrates why we might need to wait for slower operations
       expect(networkTime).toBeGreaterThan(localTime);
@@ -140,14 +127,12 @@ describe("Sync Timing Analysis", () => {
 
       // Check immediately (before operations complete)
       const filesImmediate = await fs.readdir(testDir);
-      console.log(`Files immediately: ${filesImmediate.length}`);
 
       // Now wait for operations to complete
       await Promise.all(promises);
 
       // Check after completion
       const filesAfter = await fs.readdir(testDir);
-      console.log(`Files after completion: ${filesAfter.length}`);
 
       // This shows the difference between checking immediately vs waiting
       expect(filesAfter.length).toBeGreaterThanOrEqual(filesImmediate.length);
@@ -171,8 +156,6 @@ describe("Sync Timing Analysis", () => {
       // Only one operation should "win"
       const content = await fs.readFile(sharedFile, "utf8");
       expect(["operation1", "operation2", "operation3"]).toContain(content);
-
-      console.log(`Final content from race condition: "${content}"`);
     });
   });
 });
