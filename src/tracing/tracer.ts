@@ -1,6 +1,5 @@
 import {
   trace,
-  context,
   SpanStatusCode,
   Tracer as OtelTracer,
 } from "@opentelemetry/api";

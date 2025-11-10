@@ -227,10 +227,8 @@ Examples:
   pushwork status ./my-folder  # Show status for specific directory`
   )
   .action(
-    withErrorHandling(async (path: string, cmdOptions) => {
-      await status(path, {
-        debug: cmdOptions.debug || false,
-      });
+    withErrorHandling(async (path: string) => {
+      await status(path);
     })
   );
 

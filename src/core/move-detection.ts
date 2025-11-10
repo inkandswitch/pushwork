@@ -1,5 +1,5 @@
-import { SyncSnapshot, MoveCandidate, SnapshotFileEntry } from "../types";
-import { calculateContentHash, isTextFile } from "../utils";
+import { SyncSnapshot, MoveCandidate } from "../types";
+import { isTextFile } from "../utils";
 import { stringSimilarity } from "../utils/string-similarity";
 import { DetectedChange, ChangeType } from "./change-detection";
 
@@ -15,8 +15,7 @@ export class MoveDetector {
    */
   async detectMoves(
     changes: DetectedChange[],
-    snapshot: SyncSnapshot,
-    rootPath: string
+    snapshot: SyncSnapshot
   ): Promise<{ moves: MoveCandidate[]; remainingChanges: DetectedChange[] }> {
     const deletedFiles = changes.filter(
       (c) => !c.localContent && c.changeType === ChangeType.LOCAL_ONLY

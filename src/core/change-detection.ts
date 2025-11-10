@@ -4,18 +4,15 @@ import {
   ChangeType,
   FileType,
   SyncSnapshot,
-  SnapshotFileEntry,
-  SnapshotDirectoryEntry,
   FileDocument,
   DirectoryDocument,
 } from "../types";
 import { span, spanSync, attr } from "../tracing";
 import {
   readFileContent,
-  getFileSystemEntry,
   listDirectory,
-  getRelativePath,
   normalizePath,
+  getRelativePath,
 } from "../utils";
 
 // Re-export ChangeType for other modules

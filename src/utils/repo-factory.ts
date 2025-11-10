@@ -2,7 +2,6 @@ import { Repo, StorageId } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import * as path from "path";
-import chalk from "chalk";
 import { ConfigManager } from "../config";
 
 export interface RepoFactoryOptions {

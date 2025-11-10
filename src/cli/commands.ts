@@ -24,18 +24,6 @@ import { Output } from "./output";
 import { trace, span } from "../tracing";
 
 /**
- * Simple key transformation for debug output: snake_case -> Title Case
- */
-function prettifyKey(key: string): string {
-  return (
-    key
-      .split("_")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(" ") + ":"
-  );
-}
-
-/**
  * Shared context that commands can use
  */
 interface CommandContext {
@@ -43,6 +31,37 @@ interface CommandContext {
   syncEngine: SyncEngine;
   config: DirectoryConfig;
   workingDir: string;
+}
+
+/**
+ * Create default DirectoryConfig with optional sync server overrides
+ */
+function createDefaultConfig(
+  syncServer?: string,
+  syncServerStorageId?: string
+): DirectoryConfig {
+  const defaultSyncServer = syncServer || "wss://sync3.automerge.org";
+  const defaultStorageId =
+    syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
+
+  return {
+    sync_server: defaultSyncServer,
+    sync_server_storage_id: defaultStorageId,
+    sync_enabled: true,
+    defaults: {
+      exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
+      large_file_threshold: "100MB",
+    },
+    diff: {
+      show_binary: false,
+    },
+    sync: {
+      move_detection_threshold: 0.8,
+      prompt_threshold: 0.5,
+      auto_sync: false,
+      parallel_operations: 4,
+    },
+  };
 }
 
 /**
@@ -189,24 +208,10 @@ export async function init(
     const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
     const defaultStorageId =
       options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
-    const config: DirectoryConfig = {
-      sync_server: defaultSyncServer,
-      sync_server_storage_id: defaultStorageId,
-      sync_enabled: true,
-      defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
-        large_file_threshold: "100MB",
-      },
-      diff: {
-        show_binary: false,
-      },
-      sync: {
-        move_detection_threshold: 0.8,
-        prompt_threshold: 0.5,
-        auto_sync: false,
-        parallel_operations: 4,
-      },
-    };
+    const config = createDefaultConfig(
+      options.syncServer,
+      options.syncServerStorageId
+    );
     await configManager.save(config);
 
     out.update("Creating root directory");
@@ -228,7 +233,7 @@ export async function init(
       resolvedPath,
       config.defaults.exclude_patterns,
       true,
-      config.sync_server_storage_id
+      defaultStorageId
     );
 
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
@@ -585,7 +590,7 @@ export async function status(targetPath: string = "."): Promise<void> {
  */
 export async function log(
   targetPath = ".",
-  options: LogOptions
+  _options: LogOptions
 ): Promise<void> {
   const out = new Output();
 
@@ -620,7 +625,7 @@ export async function log(
 export async function checkout(
   syncId: string,
   targetPath = ".",
-  options: CheckoutOptions
+  _options: CheckoutOptions
 ): Promise<void> {
   const out = new Output();
 
@@ -685,24 +690,10 @@ export async function clone(
     const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
     const defaultStorageId =
       options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
-    const config: DirectoryConfig = {
-      sync_server: defaultSyncServer,
-      sync_server_storage_id: defaultStorageId,
-      sync_enabled: true,
-      defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
-        large_file_threshold: "100MB",
-      },
-      diff: {
-        show_binary: false,
-      },
-      sync: {
-        move_detection_threshold: 0.8,
-        prompt_threshold: 0.5,
-        auto_sync: false,
-        parallel_operations: 4,
-      },
-    };
+    const config = createDefaultConfig(
+      options.syncServer,
+      options.syncServerStorageId
+    );
     await configManager.save(config);
 
     out.update("Connecting to sync server");
@@ -780,7 +771,7 @@ export async function url(targetPath: string = "."): Promise<void> {
 
 export async function commit(
   targetPath: string,
-  options: CommitOptions = {}
+  _options: CommitOptions = {}
 ): Promise<void> {
   const out = new Output();
 

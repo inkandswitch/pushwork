@@ -1,38 +1,26 @@
-import {
-  AutomergeUrl,
-  Repo,
-  DocHandle,
-  UrlHeads,
-} from "@automerge/automerge-repo";
+import { AutomergeUrl, Repo, DocHandle } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   SyncSnapshot,
   SyncResult,
-  SyncError,
   FileDocument,
   DirectoryDocument,
-  FileType,
   ChangeType,
   MoveCandidate,
 } from "../types";
 import {
-  readFileContent,
   writeFileContent,
   removePath,
-  movePath,
-  ensureDirectoryExists,
   getFileExtension,
   normalizePath,
-  getRelativePath,
   getEnhancedMimeType,
-  isEnhancedTextFile,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { waitForSync, getSyncServerStorageId } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector, DetectedChange } from "./change-detection";
 import { MoveDetector } from "./move-detection";
-import { span, attr, getTracer } from "../tracing";
+import { span, attr } from "../tracing";
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -109,8 +97,7 @@ export class SyncEngine {
       // Detect moves
       const { moves, remainingChanges } = await this.moveDetector.detectMoves(
         changes,
-        snapshot,
-        this.rootPath
+        snapshot
       );
 
       // Apply local changes only (no network sync)
@@ -188,7 +175,7 @@ export class SyncEngine {
       // Detect moves
       const { moves, remainingChanges } = await span(
         "detect_moves",
-        this.moveDetector.detectMoves(changes, snapshot, this.rootPath)
+        this.moveDetector.detectMoves(changes, snapshot)
       );
 
       // Phase 1: Push local changes to remote
@@ -571,10 +558,6 @@ export class SyncEngine {
     if (!fromEntry) return;
 
     // Parse paths
-    const fromParts = move.fromPath.split("/");
-    const fromFileName = fromParts.pop() || "";
-    const fromDirPath = fromParts.join("/");
-
     const toParts = move.toPath.split("/");
     const toFileName = toParts.pop() || "";
     const toDirPath = toParts.join("/");
@@ -1161,11 +1144,7 @@ export class SyncEngine {
     }
 
     const changes = await this.changeDetector.detectChanges(snapshot);
-    const { moves } = await this.moveDetector.detectMoves(
-      changes,
-      snapshot,
-      this.rootPath
-    );
+    const { moves } = await this.moveDetector.detectMoves(changes, snapshot);
 
     const summary = this.generateChangeSummary(changes, moves);
 
