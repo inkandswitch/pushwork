@@ -237,7 +237,7 @@ export async function init(
     );
 
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
-    const result = await span("sync", () => syncEngine.sync(false));
+    const result = await span("sync", syncEngine.sync(false));
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
@@ -345,7 +345,7 @@ export async function sync(
       out.log("Run without --dry-run to apply these changes");
     } else {
       out.update("Synchronizing");
-      const result = await span("sync", () => syncEngine.sync(false));
+      const result = await span("sync", syncEngine.sync(false));
 
       out.update("Writing to disk");
       await safeRepoShutdown(repo, "sync");
@@ -730,7 +730,7 @@ export async function clone(
     );
 
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-    const result = await span("sync", () => syncEngine.sync(false));
+    const result = await span("sync", syncEngine.sync(false));
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "clone");

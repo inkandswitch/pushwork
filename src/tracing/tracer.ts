@@ -1,50 +1,41 @@
-import { AsyncLocalStorage } from "async_hooks";
+import {
+  trace,
+  context,
+  SpanStatusCode,
+  Tracer as OtelTracer,
+} from "@opentelemetry/api";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import {
+  InMemorySpanExporter,
+  BatchSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 
 /**
- * Span represents a single timed operation
- */
-interface Span {
-  name: string;
-  startTime: number;
-  endTime?: number;
-  parent: Span | null;
-  children: Span[];
-  attributes: Record<string, any>;
-}
-
-/**
- * Accumulated timing data for operations that may be called multiple times
- */
-interface TimingEntry {
-  total: number; // Total time in ms
-  count: number; // Number of times called
-  min?: number; // Minimum duration
-  max?: number; // Maximum duration
-}
-
-/**
- * Context stored in AsyncLocalStorage for each async call chain
- */
-interface SpanContext {
-  currentSpan: Span | null;
-}
-
-/**
- * Hierarchical tracer using AsyncLocalStorage for concurrency support
+ * OpenTelemetry-based tracer for performance instrumentation
  */
 export class Tracer {
-  private rootSpan: Span | null = null;
-  private timings: Map<string, TimingEntry> = new Map();
-  private contextStorage = new AsyncLocalStorage<SpanContext>();
+  private provider: NodeTracerProvider;
+  private exporter: InMemorySpanExporter;
+  private tracer: OtelTracer;
   private enabled: boolean = false;
+
+  constructor() {
+    this.exporter = new InMemorySpanExporter();
+    const processor = new BatchSpanProcessor(this.exporter);
+    this.provider = new NodeTracerProvider({
+      spanProcessors: [processor],
+    });
+    this.provider.register();
+    this.tracer = trace.getTracer("pushwork");
+  }
 
   /**
    * Enable/disable tracing
    */
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    if (enabled && !this.rootSpan) {
-      // Initialize on first enable
+    if (enabled) {
+      this.reset();
     }
   }
 
@@ -56,209 +47,106 @@ export class Tracer {
   }
 
   /**
-   * Get current span from AsyncLocalStorage context
-   */
-  private getCurrentSpan(): Span | null {
-    if (!this.enabled) return null;
-    const context = this.contextStorage.getStore();
-    return context?.currentSpan || null;
-  }
-
-  /**
-   * Set current span in AsyncLocalStorage context
-   */
-  private setCurrentSpan(span: Span | null): void {
-    if (!this.enabled) return;
-    const context = this.contextStorage.getStore();
-    if (context) {
-      context.currentSpan = span;
-    }
-  }
-
-  /**
-   * Start a new span
-   * Uses AsyncLocalStorage for proper concurrency handling
-   */
-  private startSpan(name: string): Span {
-    if (!this.enabled) {
-      // Return a dummy span when disabled
-      return {
-        name,
-        startTime: -1,
-        parent: null,
-        children: [],
-        attributes: {},
-      };
-    }
-
-    const parent = this.getCurrentSpan();
-
-    const span: Span = {
-      name,
-      startTime: Date.now(),
-      parent,
-      children: [],
-      attributes: {},
-    };
-
-    if (!this.rootSpan) {
-      this.rootSpan = span;
-    }
-
-    if (parent) {
-      parent.children.push(span);
-    }
-
-    this.setCurrentSpan(span);
-    return span;
-  }
-
-  /**
-   * End a specific span
-   */
-  private endSpan(span: Span): void {
-    if (!this.enabled) return;
-
-    span.endTime = Date.now();
-    const duration = span.endTime - span.startTime;
-
-    // Accumulate timing data
-    const existing = this.timings.get(span.name) || {
-      total: 0,
-      count: 0,
-    };
-
-    this.timings.set(span.name, {
-      total: existing.total + duration,
-      count: existing.count + 1,
-      min:
-        existing.min !== undefined
-          ? Math.min(existing.min, duration)
-          : duration,
-      max:
-        existing.max !== undefined
-          ? Math.max(existing.max, duration)
-          : duration,
-    });
-
-    // Restore parent in AsyncLocalStorage context
-    this.setCurrentSpan(span.parent);
-  }
-
-  /**
-   * Set an attribute on the current span
+   * Set an attribute on the current active span
    */
   attr(key: string, value: any): void {
     if (!this.enabled) return;
-    const span = this.getCurrentSpan();
+    const span = trace.getActiveSpan();
     if (span) {
-      span.attributes[key] = value;
+      span.setAttribute(key, value);
     }
   }
 
   /**
    * Trace a synchronous operation
+   * Uses OpenTelemetry's standard span API with proper context propagation
    */
   spanSync<T>(name: string, fn: () => T): T {
     if (!this.enabled) return fn();
 
-    return this.contextStorage.run(
-      { currentSpan: this.getCurrentSpan() },
-      () => {
-        const span = this.startSpan(name);
-        try {
-          return fn();
-        } finally {
-          this.endSpan(span);
-        }
+    return this.tracer.startActiveSpan(name, (span) => {
+      try {
+        const result = fn();
+        span.end();
+        return result;
+      } catch (error) {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.end();
+        throw error;
       }
-    );
+    });
   }
 
   /**
    * Trace an async operation
-   */
-  async span<T>(name: string, fn: () => Promise<T>): Promise<T> {
-    if (!this.enabled) return fn();
-
-    return this.contextStorage.run(
-      { currentSpan: this.getCurrentSpan() },
-      async () => {
-        const span = this.startSpan(name);
-        try {
-          return await fn();
-        } finally {
-          this.endSpan(span);
-        }
-      }
-    );
-  }
-
-  /**
-   * Get accumulated timings (compatible with current format)
-   */
-  getTimings(): Record<string, number> {
-    const result: Record<string, number> = {};
-
-    for (const [name, entry] of this.timings.entries()) {
-      result[name] = entry.total;
-
-      // Add count if called multiple times
-      if (entry.count > 1) {
-        result[`${name}.count`] = entry.count;
-        result[`${name}.avg`] = entry.total / entry.count;
-        if (entry.min !== undefined) result[`${name}.min`] = entry.min;
-        if (entry.max !== undefined) result[`${name}.max`] = entry.max;
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Export to Chrome DevTools trace format for flame graphs
-   * Open the JSON in chrome://tracing
+   * Pass the Promise directly - this prevents accidentally passing sync functions
+   * that return Promises, which would end the span too early.
    *
-   * Robustly handles unclosed spans by auto-closing them
+   * Usage:
+   *   await span("operation", someAsyncCall())
+   *   await span("operation", someAsyncCall(), { key: "value" })
+   */
+  async span<T>(
+    name: string,
+    promise: Promise<T>,
+    attributes?: Record<string, any>
+  ): Promise<T> {
+    if (!this.enabled) return promise;
+
+    return this.tracer.startActiveSpan(name, async (span) => {
+      try {
+        if (attributes) {
+          for (const [key, value] of Object.entries(attributes)) {
+            span.setAttribute(key, value);
+          }
+        }
+        const result = await promise;
+        span.end();
+        return result;
+      } catch (error) {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.end();
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Export to Chrome DevTools trace format
+   * This is the standard format for file-based trace visualization
+   * Supported by chrome://tracing and ui.perfetto.dev
    */
   toChromeTrace(): any {
-    if (!this.rootSpan) return { traceEvents: [] };
+    // Force flush to ensure all spans are exported
+    this.provider.forceFlush();
 
+    const spans = this.exporter.getFinishedSpans();
     const events: any[] = [];
-    const processId = 1;
-    const threadId = 1;
-    const now = Date.now();
 
-    const addSpan = (span: Span) => {
-      // Auto-close unclosed spans with current time
-      const endTime = span.endTime || now;
+    for (const span of spans) {
+      // OpenTelemetry stores time as [seconds, nanoseconds]
+      // Chrome trace format uses microseconds
+      const startTime =
+        span.startTime[0] * 1_000_000 + Math.floor(span.startTime[1] / 1000);
+      const endTime =
+        span.endTime[0] * 1_000_000 + Math.floor(span.endTime[1] / 1000);
 
-      // Begin event
+      // Duration event (X phase) - Chrome trace format standard
+      // See: https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU
       events.push({
         name: span.name,
         cat: "function",
-        ph: "B", // Begin
-        ts: span.startTime * 1000, // microseconds
-        pid: processId,
-        tid: threadId,
+        ph: "X", // Complete event with begin and end in single record
+        ts: startTime,
+        dur: endTime - startTime,
+        pid: 1,
+        tid: 1,
         args: span.attributes,
       });
+    }
 
-      // Process children FIRST (so they're nested inside)
-      span.children.forEach(addSpan);
-
-      // End event
-      events.push({
-        name: span.name,
-        cat: "function",
-        ph: "E", // End
-        ts: endTime * 1000, // microseconds
-        pid: processId,
-        tid: threadId,
-      });
-    };
-
-    addSpan(this.rootSpan);
+    // Sort by start time for proper visualization
+    events.sort((a, b) => a.ts - b.ts);
 
     return {
       traceEvents: events,
@@ -268,9 +156,9 @@ export class Tracer {
 
   /**
    * Reset tracer state
+   * Clears all collected spans for the next tracing session
    */
   reset(): void {
-    this.rootSpan = null;
-    this.timings.clear();
+    this.exporter.reset();
   }
 }

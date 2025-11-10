@@ -19,9 +19,18 @@ export function getTracer(): Tracer {
 
 /**
  * Trace an async operation
+ * Pass the Promise directly for type safety
+ *
+ * Usage:
+ *   await span("operation", someAsyncCall())
+ *   await span("operation", someAsyncCall(), { key: "value" })
  */
-export async function span<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  return globalTracer.span(name, fn);
+export async function span<T>(
+  name: string,
+  promise: Promise<T>,
+  attributes?: Record<string, any>
+): Promise<T> {
+  return globalTracer.span(name, promise, attributes);
 }
 
 /**
