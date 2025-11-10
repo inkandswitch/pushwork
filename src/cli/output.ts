@@ -39,8 +39,18 @@ export class Output {
   done(message?: string, showTime: boolean = true): void {
     let text = message || this.taskMessage || "done";
     if (showTime && this.taskStartTime) {
-      const duration = ((Date.now() - this.taskStartTime) / 1000).toFixed(1);
-      text += ` (${duration}s)`;
+      const durationMs = Date.now() - this.taskStartTime;
+      const durationText = (() => {
+        switch (true) {
+          case durationMs < 1000:
+            return `${durationMs}ms`;
+          case durationMs < 2000:
+            return `${(durationMs / 1000).toFixed(2)}s`;
+          default:
+            return `${(durationMs / 1000).toFixed(1)}s`;
+        }
+      })();
+      text += ` (${durationText})`;
     }
 
     if (this.spinner) {

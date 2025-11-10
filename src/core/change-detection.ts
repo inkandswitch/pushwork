@@ -238,68 +238,72 @@ export class ChangeDetector {
   ): Promise<DetectedChange[]> {
     const changes: DetectedChange[] = [];
 
-    for (const [relativePath, snapshotEntry] of snapshot.files.entries()) {
-      // CRITICAL FIX: Check if file still exists in remote directory listing
-      // Files can be removed from the directory without their document heads changing
-      const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
-        snapshot.rootDirectoryUrl,
-        relativePath
-      );
+    await Promise.all(
+      Array.from(snapshot.files.entries()).map(
+        async ([relativePath, snapshotEntry]) => {
+          // CRITICAL FIX: Check if file still exists in remote directory listing
+          // Files can be removed from the directory without their document heads changing
+          const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
+            snapshot.rootDirectoryUrl,
+            relativePath
+          );
 
-      if (!stillExistsInDirectory) {
-        // File was removed from remote directory listing
-        const localContent = await this.getLocalContent(relativePath);
+          if (!stillExistsInDirectory) {
+            // File was removed from remote directory listing
+            const localContent = await this.getLocalContent(relativePath);
 
-        // Only report as deleted if local file still exists
-        // (if local file is also deleted, detectLocalChanges handles it)
-        if (localContent !== null) {
-          changes.push({
-            path: relativePath,
-            changeType: ChangeType.REMOTE_ONLY,
-            fileType: FileType.TEXT,
-            localContent,
-            remoteContent: null, // File deleted remotely
-            localHead: snapshotEntry.head,
-            remoteHead: snapshotEntry.head,
-          });
+            // Only report as deleted if local file still exists
+            // (if local file is also deleted, detectLocalChanges handles it)
+            if (localContent !== null) {
+              changes.push({
+                path: relativePath,
+                changeType: ChangeType.REMOTE_ONLY,
+                fileType: FileType.TEXT,
+                localContent,
+                remoteContent: null, // File deleted remotely
+                localHead: snapshotEntry.head,
+                remoteHead: snapshotEntry.head,
+              });
+            }
+            return;
+          }
+
+          const currentRemoteHead = await this.getCurrentRemoteHead(
+            snapshotEntry.url
+          );
+
+          if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
+            // Remote document has changed
+            const currentRemoteContent = await this.getCurrentRemoteContent(
+              snapshotEntry.url
+            );
+            const localContent = await this.getLocalContent(relativePath);
+            const lastKnownContent = await this.getContentAtHead(
+              snapshotEntry.url,
+              snapshotEntry.head
+            );
+
+            const localChanged = localContent
+              ? !this.isContentEqual(localContent, lastKnownContent)
+              : false;
+
+            const changeType = localChanged
+              ? ChangeType.BOTH_CHANGED
+              : ChangeType.REMOTE_ONLY;
+
+            changes.push({
+              path: relativePath,
+              changeType,
+              fileType: await this.getFileTypeFromContent(currentRemoteContent),
+              localContent,
+              remoteContent: currentRemoteContent,
+              localHead: snapshotEntry.head,
+              remoteHead: currentRemoteHead,
+            });
+          }
         }
-        continue;
-      }
-
-      const currentRemoteHead = await this.getCurrentRemoteHead(
-        snapshotEntry.url
-      );
-
-      if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
-        // Remote document has changed
-        const currentRemoteContent = await this.getCurrentRemoteContent(
-          snapshotEntry.url
-        );
-        const localContent = await this.getLocalContent(relativePath);
-        const lastKnownContent = await this.getContentAtHead(
-          snapshotEntry.url,
-          snapshotEntry.head
-        );
-
-        const localChanged = localContent
-          ? !this.isContentEqual(localContent, lastKnownContent)
-          : false;
-
-        const changeType = localChanged
-          ? ChangeType.BOTH_CHANGED
-          : ChangeType.REMOTE_ONLY;
-
-        changes.push({
-          path: relativePath,
-          changeType,
-          fileType: await this.getFileTypeFromContent(currentRemoteContent),
-          localContent,
-          remoteContent: currentRemoteContent,
-          localHead: snapshotEntry.head,
-          remoteHead: currentRemoteHead,
-        });
-      }
-    }
+      )
+    );
 
     return changes;
   }
@@ -433,7 +437,6 @@ export class ChangeDetector {
       await span(
         "read_all_files",
         (async () => {
-          // Parallelize all file reads for significant performance improvement
           const fileEntries = entries.filter(
             (entry) => entry.type !== FileType.DIRECTORY
           );
