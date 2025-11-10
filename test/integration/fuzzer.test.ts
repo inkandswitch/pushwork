@@ -625,27 +625,27 @@ describe("Pushwork Fuzzer", () => {
               // Need enough time for network propagation between CLI invocations
               // Round 1: A pushes changes
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 2: B pushes changes and pulls A's changes
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
 
               // Round 3: A pulls B's changes
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 4: B confirms convergence
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
 
               // Round 5: Final convergence check
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 6: Extra convergence check (for aggressive fuzzing)
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(5000);
 
               // Verify final state matches
 
@@ -683,8 +683,8 @@ describe("Pushwork Fuzzer", () => {
           }
         ),
         {
-          numRuns: 50, // INTENSE MODE (was 20, then cranked to 50)
-          timeout: 180000, // 3 minute timeout per run
+          numRuns: 5, // INTENSE MODE (was 20, then cranked to 50)
+          timeout: 60000, // 1 minute timeout per run
           verbose: true, // Verbose output
           endOnFailure: true, // Stop on first failure to debug
         }

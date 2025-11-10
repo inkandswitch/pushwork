@@ -188,7 +188,7 @@ export async function init(
   try {
     const resolvedPath = path.resolve(targetPath);
 
-    out.task(`Initializing ${resolvedPath}`);
+    out.task(`Initializing`);
 
     await ensureDirectoryExists(resolvedPath);
 
@@ -259,14 +259,12 @@ export async function init(
         JSON.stringify(tracer.toChromeTrace(), null, 2)
       );
 
-      const fileUrl = `file://${traceFile}`;
       out.log("");
-      out.log(`Flame graph: ${fileUrl}`);
-      out.log(`Open in https://ui.perfetto.dev`);
+      out.special(
+        `FLAME GRAPH`,
+        `file://${traceFile} (Open in https://ui.perfetto.dev)`
+      );
     }
-
-    out.log("");
-    out.log(`Run 'pushwork sync' to start synchronizing`);
   } catch (error) {
     out.error("FAILED", "Initialization failed");
     out.log(`  ${error}`);
@@ -385,10 +383,11 @@ export async function sync(
             JSON.stringify(tracer.toChromeTrace(), null, 2)
           );
 
-          const fileUrl = `file://${traceFile}`;
           out.log("");
-          out.log(`Flame graph: ${fileUrl}`);
-          out.log(`Open in https://ui.perfetto.dev`);
+          out.special(
+            `FLAME GRAPH`,
+            `file://${traceFile} (Open in https://ui.perfetto.dev)`
+          );
         }
       } else {
         out.done("partial", false);

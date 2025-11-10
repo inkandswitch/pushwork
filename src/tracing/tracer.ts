@@ -152,22 +152,19 @@ export class Tracer {
       const endTime =
         span.endTime[0] * 1_000_000 + Math.floor(span.endTime[1] / 1000);
 
-      // Duration event (X phase) - Chrome trace format standard
-      // See: https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU
+      // Use Complete events (X) - they show up properly under "Process 1"
+      // Perfetto should handle overlapping via proper parent-child nesting from OpenTelemetry
       events.push({
         name: span.name,
         cat: "function",
-        ph: "X", // Complete event with begin and end in single record
+        ph: "X",
         ts: startTime,
         dur: endTime - startTime,
         pid: 1,
         tid: 1,
-        args: span.attributes,
+        args: span.attributes || {},
       });
     }
-
-    // Sort by start time for proper visualization
-    events.sort((a, b) => a.ts - b.ts);
 
     return {
       traceEvents: events,
