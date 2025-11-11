@@ -143,9 +143,9 @@ export interface ConfigOptions extends CommandOptions {
 }
 
 /**
- * Debug command specific options
+ * Status command specific options
  */
-export interface DebugOptions extends CommandOptions {
+export interface StatusOptions extends CommandOptions {
   verbose?: boolean;
 }
 

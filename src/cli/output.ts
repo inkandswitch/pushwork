@@ -210,6 +210,19 @@ export class Output {
   }
 
   /**
+   * Display array as bulleted list
+   * Each item shown with dim bullet and white text
+   */
+  arr(items: any[]): void {
+    this.#stopTask();
+
+    for (const item of items) {
+      const bullet = chalk.dim("• ");
+      console.log(`${bullet}${String(item)}`);
+    }
+  }
+
+  /**
    * Show plain message with optional color
    */
   log(

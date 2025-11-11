@@ -13,7 +13,6 @@ import {
   commit,
   url,
   rm,
-  debug,
   ls,
   config,
   watch,
@@ -201,10 +200,12 @@ program
   .command("status")
   .summary("Show sync status summary")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("--debug", "Show detailed performance timing information")
+  .option("-v, --verbose", "Show detailed status including document info and all tracked files")
   .action(
-    withErrorHandling(async (path: string) => {
-      await status(path);
+    withErrorHandling(async (path: string, cmdOptions) => {
+      await status(path, {
+        verbose: cmdOptions.verbose || false,
+      });
     })
   );
 
@@ -272,23 +273,6 @@ program
   .action(
     withErrorHandling(async (path: string) => {
       await rm(path);
-    })
-  );
-
-// Debug command
-program
-  .command("debug")
-  .summary("Show internal debug information")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .option(
-    "-v, --verbose",
-    "Show verbose debug information including full document contents"
-  )
-  .action(
-    withErrorHandling(async (path: string, options) => {
-      await debug(path, {
-        verbose: options.verbose || false,
-      });
     })
   );
 

@@ -14,7 +14,7 @@ import {
   CommitOptions,
   ListOptions,
   ConfigOptions,
-  DebugOptions,
+  StatusOptions,
   WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
@@ -370,15 +370,12 @@ export async function sync(
       await safeRepoShutdown(repo, "sync");
 
       if (result.success) {
+        out.done("Synced");
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-          out.done();
-          out.success("Already synced");
         } else {
-          out.done();
           out.successBlock(
             "SYNCED",
-            `${result.filesChanged} ${plural("file", result.filesChanged)} 
-            `
+            `${result.filesChanged} ${plural("file", result.filesChanged)}`
           );
         }
 
@@ -476,7 +473,7 @@ export async function diff(
 
     if (options.nameOnly) {
       for (const change of preview.changes) {
-        console.log(change.path);
+        out.log(change.path);
       }
       return;
     }
@@ -571,10 +568,11 @@ export async function diff(
 /**
  * Show sync status
  */
-export async function status(targetPath: string = "."): Promise<void> {
+export async function status(
+  targetPath: string = ".",
+  options: StatusOptions = {}
+): Promise<void> {
   try {
-    out.task("Loading status");
-
     const { repo, syncEngine, config } = await setupCommandContext(
       targetPath,
       undefined,
@@ -583,24 +581,73 @@ export async function status(targetPath: string = "."): Promise<void> {
     );
     const syncStatus = await syncEngine.getStatus();
 
-    out.done();
-
     out.infoBlock("STATUS");
 
+    const statusInfo: Record<string, any> = {};
     const fileCount = syncStatus.snapshot?.files.size || 0;
-    out.obj({
-      URL: syncStatus.snapshot?.rootDirectoryUrl,
-      Files: syncStatus.snapshot ? `${fileCount} tracked` : undefined,
-      Sync: config?.sync_server || "wss://sync3.automerge.org",
-      Changes: syncStatus.hasChanges
-        ? `${syncStatus.changeCount} pending`
-        : undefined,
-      Status: !syncStatus.hasChanges ? "up to date" : undefined,
-    });
 
-    if (syncStatus.hasChanges) {
-      out.log("");
-      out.log("Run 'pushwork diff' to see changes");
+    statusInfo["URL"] = syncStatus.snapshot?.rootDirectoryUrl;
+    statusInfo["Files"] = syncStatus.snapshot
+      ? `${fileCount} tracked`
+      : undefined;
+    statusInfo["Sync"] = config?.sync_server || "wss://sync3.automerge.org";
+
+    // Add more detailed info in verbose mode
+    if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
+      try {
+        const rootHandle = await repo.find<DirectoryDocument>(
+          syncStatus.snapshot.rootDirectoryUrl
+        );
+        const rootDoc = await rootHandle.doc();
+
+        if (rootDoc) {
+          statusInfo["Entries"] = rootDoc.docs.length;
+          statusInfo["Directories"] = syncStatus.snapshot.directories.size;
+          if (rootDoc.lastSyncAt) {
+            const lastSyncDate = new Date(rootDoc.lastSyncAt);
+            statusInfo["Last sync"] = lastSyncDate.toISOString();
+          }
+        }
+      } catch (error) {
+        out.warn(`Warning: Could not load detailed info: ${error}`);
+      }
+    }
+
+    statusInfo["Changes"] = syncStatus.hasChanges
+      ? `${syncStatus.changeCount} pending`
+      : undefined;
+    statusInfo["Status"] = !syncStatus.hasChanges ? "up to date" : undefined;
+
+    out.obj(statusInfo);
+
+    // Show verbose details if requested
+    if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
+      try {
+        const rootHandle = await repo.find<DirectoryDocument>(
+          syncStatus.snapshot.rootDirectoryUrl
+        );
+        const rootDoc = await rootHandle.doc();
+
+        if (rootDoc) {
+          out.infoBlock("HEADS");
+          out.arr(rootHandle.heads());
+
+          if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
+            out.infoBlock("TRACKED FILES");
+            const filesObj: Record<string, string> = {};
+            syncStatus.snapshot.files.forEach((entry, filePath) => {
+              filesObj[filePath] = entry.url;
+            });
+            out.obj(filesObj);
+          }
+        }
+      } catch (error) {
+        out.warn(`Warning: Could not load verbose details: ${error}`);
+      }
+    }
+
+    if (syncStatus.hasChanges && !options.verbose) {
+      out.info("Run 'pushwork diff' to see changes");
     }
 
     await safeRepoShutdown(repo, "status");
@@ -779,7 +826,7 @@ export async function url(targetPath: string = "."): Promise<void> {
 
     if (snapshot.rootDirectoryUrl) {
       // Output just the URL for easy use in scripts
-      console.log(snapshot.rootDirectoryUrl);
+      out.log(snapshot.rootDirectoryUrl);
     } else {
       out.error("No root URL found in snapshot");
       out.exit(1);
@@ -873,80 +920,6 @@ export async function commit(
 }
 
 /**
- * Debug command to inspect internal document state
- */
-export async function debug(
-  targetPath: string = ".",
-  options: DebugOptions = {}
-): Promise<void> {
-  try {
-    out.task("Loading debug info");
-
-    const { repo, syncEngine } = await setupCommandContext(
-      targetPath,
-      undefined,
-      undefined,
-      false
-    );
-    const debugStatus = await syncEngine.getStatus();
-
-    out.done("done");
-
-    out.infoBlock("DEBUG");
-
-    const debugInfo: Record<string, any> = {};
-
-    if (debugStatus.snapshot?.rootDirectoryUrl) {
-      debugInfo["URL"] = debugStatus.snapshot.rootDirectoryUrl;
-
-      try {
-        const rootHandle = await repo.find<DirectoryDocument>(
-          debugStatus.snapshot.rootDirectoryUrl
-        );
-        const rootDoc = await rootHandle.doc();
-
-        if (rootDoc) {
-          debugInfo.Entries = rootDoc.docs.length;
-          if (rootDoc.lastSyncAt) {
-            const lastSyncDate = new Date(rootDoc.lastSyncAt);
-            debugInfo["Last sync"] = lastSyncDate.toISOString();
-          }
-
-          if (options.verbose) {
-            out.info("Document:");
-            out.obj(rootDoc);
-            out.info("Heads:");
-            out.obj(rootHandle.heads());
-          }
-        }
-      } catch (error) {
-        out.warn(`Error loading root document: ${error}`);
-      }
-    }
-
-    if (debugStatus.snapshot) {
-      debugInfo.Files = debugStatus.snapshot.files.size;
-      debugInfo.Directories = debugStatus.snapshot.directories.size;
-    }
-
-    out.obj(debugInfo);
-
-    if (options.verbose && debugStatus.snapshot) {
-      out.log("");
-      out.log("All tracked files:");
-      debugStatus.snapshot.files.forEach((entry, filePath) => {
-        out.log(`  ${filePath} -> ${entry.url}`);
-      });
-    }
-
-    await safeRepoShutdown(repo, "debug");
-  } catch (error) {
-    out.error(`Debug failed: ${error}`);
-    out.exit(1);
-  }
-}
-
-/**
  * List tracked files
  */
 export async function ls(
@@ -983,12 +956,12 @@ export async function ls(
       // Long format with URLs
       for (const [filePath, entry] of files) {
         const url = entry?.url || "unknown";
-        console.log(`${filePath} -> ${url}`);
+        out.log(`${filePath} -> ${url}`);
       }
     } else {
       // Simple list
       for (const [filePath] of files) {
-        console.log(filePath);
+        out.log(filePath);
       }
     }
 
@@ -1030,7 +1003,7 @@ export async function config(
         value = value?.[key];
       }
       if (value !== undefined) {
-        console.log(
+        out.log(
           typeof value === "object" ? JSON.stringify(value, null, 2) : value
         );
       } else {
