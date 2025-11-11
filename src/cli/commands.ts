@@ -320,14 +320,12 @@ export async function sync(
       out.update("Analyzing changes");
       const preview = await syncEngine.previewChanges();
 
-      out.done();
-
       if (preview.changes.length === 0 && preview.moves.length === 0) {
-        out.info("No changes detected");
-        out.log("Everything is already in sync");
+        out.done("Already synced");
         return;
       }
 
+      out.done();
       out.infoBlock("CHANGES");
       out.obj({
         Changes: preview.changes.length.toString(),
@@ -374,7 +372,7 @@ export async function sync(
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
           out.done();
-          out.success("Already in sync");
+          out.success("Already synced");
         } else {
           out.done();
           out.successBlock(
@@ -1123,14 +1121,15 @@ export async function watch(
         out.info("Build completed, syncing...");
 
         // Run sync
+        out.task("Syncing");
         const result = await syncEngine.sync();
 
         if (result.success) {
           if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-            out.success("Already in sync");
+            out.done("Already synced");
           } else {
-            out.success(
-              `✓ Synced ${result.filesChanged} ${plural(
+            out.done(
+              `Synced ${result.filesChanged} ${plural(
                 "file",
                 result.filesChanged
               )}`
