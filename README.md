@@ -38,6 +38,8 @@ export PATH="$PATH:$PNPM_HOME"
 
 Note: you can also run this from NPX.
 
+pnpm v10 is recommended.
+
 ### Basic Usage
 
 1. **Initialize a new repository:**
