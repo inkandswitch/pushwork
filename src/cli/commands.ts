@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
-import { Repo, AutomergeUrl, StorageId } from "@automerge/automerge-repo";
+import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
 import * as diffLib from "diff";
 import { spawn } from "child_process";
 import {
@@ -18,8 +18,6 @@ import {
   WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
-  DEFAULT_SYNC_SERVER,
-  DEFAULT_SYNC_SERVER_STORAGE_ID,
 } from "../types";
 import { SyncEngine } from "../core";
 import {
@@ -44,53 +42,27 @@ interface CommandContext {
 }
 
 /**
- * Create default DirectoryConfig with optional sync server overrides
+ * Initialize repository directory structure and configuration
+ * Shared logic for init and clone commands
  */
-function createDefaultConfig(
-  syncServer?: string,
-  syncServerStorageId?: StorageId
-): DirectoryConfig {
-  return {
-    sync_server: syncServer || DEFAULT_SYNC_SERVER,
-    sync_server_storage_id:
-      syncServerStorageId || DEFAULT_SYNC_SERVER_STORAGE_ID,
-    sync_enabled: true,
-    defaults: {
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".pushwork",
-        ".DS_Store",
-      ],
-    },
-    sync: {
-      move_detection_threshold: 0.7,
-    },
-  };
-}
+async function initializeRepository(
+  resolvedPath: string,
+  overrides: Partial<DirectoryConfig>
+): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
+  // Create .pushwork directory structure
+  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  await ensureDirectoryExists(syncToolDir);
+  await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-/**
- * Validate that sync server options are used together
- */
-function validateSyncServerOptions(
-  syncServer?: string,
-  syncServerStorageId?: string
-): void {
-  const hasSyncServer = !!syncServer;
-  const hasSyncServerStorageId = !!syncServerStorageId;
+  // Create configuration with overrides
+  const configManager = new ConfigManager(resolvedPath);
+  const config = await configManager.initializeWithOverrides(overrides);
 
-  if (hasSyncServer && !hasSyncServerStorageId) {
-    throw new Error(
-      "--sync-server requires --sync-server-storage-id\nBoth arguments must be provided together."
-    );
-  }
+  // Create repository and sync engine
+  const repo = await createRepo(resolvedPath, config);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
-  if (hasSyncServerStorageId && !hasSyncServer) {
-    throw new Error(
-      "--sync-server-storage-id requires --sync-server\nBoth arguments must be provided together."
-    );
-  }
+  return { config, repo, syncEngine };
 }
 
 /**
@@ -174,9 +146,6 @@ export async function init(
   targetPath: string,
   options: InitOptions = {}
 ): Promise<void> {
-  // Validate sync server options
-  validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
-
   // Enable tracing if debug mode
   if (options.debug) {
     trace(true);
@@ -196,37 +165,33 @@ export async function init(
       out.exit(1);
     }
 
-    out.update("Creating sync directory");
-    await ensureDirectoryExists(syncToolDir);
-    await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
-
-    out.update("Setting up configuration");
-    const configManager = new ConfigManager(resolvedPath);
-    const config = createDefaultConfig(
-      options.syncServer,
-      options.syncServerStorageId
+    // Initialize repository with optional CLI overrides
+    out.update("Setting up repository");
+    const { config, repo, syncEngine } = await initializeRepository(
+      resolvedPath,
+      {
+        sync_server: options.syncServer,
+        sync_server_storage_id: options.syncServerStorageId,
+      }
     );
-    await configManager.save(config);
 
+    // Create new root directory document
     out.update("Creating root directory");
-    const repo = await createRepo(resolvedPath, config);
-
     const rootDoc: DirectoryDocument = {
       "@patchwork": { type: "folder" },
       docs: [],
     };
     const rootHandle = repo.create(rootDoc);
 
+    // Scan and sync existing files
     out.update("Scanning existing files");
-    const syncEngine = new SyncEngine(repo, resolvedPath, config);
-
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
     const result = await span("sync", syncEngine.sync());
 
     out.update("Writing to disk");
     await safeRepoShutdown(repo, "init");
 
-    out.done();
+    out.done("Initialized");
 
     out.obj({
       Sync: config.sync_server,
@@ -689,9 +654,6 @@ export async function clone(
   targetPath: string,
   options: CloneOptions
 ): Promise<void> {
-  // Validate sync server options
-  validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
-
   try {
     const resolvedPath = path.resolve(targetPath);
 
@@ -718,24 +680,18 @@ export async function clone(
       await fs.rm(syncToolDir, { recursive: true, force: true });
     }
 
-    out.update("Creating sync directory");
-    await ensureDirectoryExists(syncToolDir);
-    await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
-
-    out.update("Setting up configuration");
-    const configManager = new ConfigManager(resolvedPath);
-    const config = createDefaultConfig(
-      options.syncServer,
-      options.syncServerStorageId
+    // Initialize repository with optional CLI overrides
+    out.update("Setting up repository");
+    const { config, repo, syncEngine } = await initializeRepository(
+      resolvedPath,
+      {
+        sync_server: options.syncServer,
+        sync_server_storage_id: options.syncServerStorageId,
+      }
     );
-    await configManager.save(config);
 
-    out.update("Connecting to sync server");
-    const repo = await createRepo(resolvedPath, config);
-
+    // Connect to existing root directory and download files
     out.update("Downloading files");
-    const syncEngine = new SyncEngine(repo, resolvedPath, config);
-
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
     const result = await span("sync", syncEngine.sync());
 

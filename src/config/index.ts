@@ -119,26 +119,37 @@ export class ConfigManager {
   }
 
   /**
+   * Get default configuration
+   */
+  private getDefaultConfig(): DirectoryConfig {
+    return {
+      sync_enabled: true,
+      sync_server: DEFAULT_SYNC_SERVER,
+      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      defaults: {
+        exclude_patterns: [
+          ".git",
+          "node_modules",
+          "*.tmp",
+          ".pushwork",
+          ".DS_Store",
+        ],
+      },
+      sync: {
+        move_detection_threshold: 0.7,
+      },
+    };
+  }
+
+  /**
    * Get merged configuration (global + local)
    */
   async getMerged(): Promise<DirectoryConfig> {
     const globalConfig = await this.loadGlobal();
     const localConfig = await this.load();
 
-    // Create default configuration
-    const defaultConfig: DirectoryConfig = {
-      sync_enabled: true,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
-      defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
-      },
-      sync: {
-        move_detection_threshold: 0.7,
-      },
-    };
-
     // Merge configurations: default < global < local
-    let merged = { ...defaultConfig };
+    let merged = this.getDefaultConfig();
 
     if (globalConfig) {
       merged = this.mergeConfigs(merged, globalConfig);
@@ -149,6 +160,18 @@ export class ConfigManager {
     }
 
     return merged;
+  }
+
+  /**
+   * Initialize with CLI option overrides
+   * Creates a new config with defaults + CLI overrides and saves it
+   */
+  async initializeWithOverrides(
+    overrides: Partial<DirectoryConfig> = {}
+  ): Promise<DirectoryConfig> {
+    const config = this.mergeConfigs(this.getDefaultConfig(), overrides);
+    await this.save(config);
+    return config;
   }
 
   /**
