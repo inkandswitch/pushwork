@@ -87,7 +87,3 @@ pids/
 
 # Optional stylelint cache
 .stylelintcache 
-
-# Demo scripts
-demo-output.ts
-demo-errors.ts 
