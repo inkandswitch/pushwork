@@ -36,6 +36,12 @@ export PNPM_HOME="/Users/username/Library/pnpm" # wherever you have pnpm install
 export PATH="$PATH:$PNPM_HOME"
 ```
 
+Optionally you can alias `pushwork` to something shorter, e.g in your .zshrc or .bashrc:
+
+```bash
+alias pw="pushwork"
+```
+
 Note: you can also run this from NPX.
 
 pnpm v10 is recommended.
