@@ -13,7 +13,9 @@ import {
   listDirectory,
   normalizePath,
   getRelativePath,
+  findFileInDirectoryHierarchy,
 } from "../utils";
+import { isContentEqual } from "../utils/content";
 import { out } from "../cli/output";
 
 // Re-export ChangeType for other modules
@@ -130,7 +132,7 @@ export class ChangeDetector {
                 this.getContentAtHead(snapshotEntry.url, snapshotEntry.head)
               );
 
-              const contentChanged = !this.isContentEqual(
+              const contentChanged = !isContentEqual(
                 fileInfo.content,
                 lastKnownContent
               );
@@ -143,7 +145,7 @@ export class ChangeDetector {
                   this.getCurrentRemoteContent(snapshotEntry.url)
                 );
 
-                const remoteChanged = !this.isContentEqual(
+                const remoteChanged = !isContentEqual(
                   lastKnownContent,
                   currentRemoteContent
                 );
@@ -199,7 +201,7 @@ export class ChangeDetector {
                 this.getContentAtHead(snapshotEntry.url, snapshotEntry.head)
               );
 
-              const remoteChanged = !this.isContentEqual(
+              const remoteChanged = !isContentEqual(
                 lastKnownContent,
                 currentRemoteContent
               );
@@ -285,7 +287,7 @@ export class ChangeDetector {
             );
 
             const localChanged = localContent
-              ? !this.isContentEqual(localContent, lastKnownContent)
+              ? !isContentEqual(localContent, lastKnownContent)
               : false;
 
             const changeType = localChanged
@@ -545,35 +547,6 @@ export class ChangeDetector {
   }
 
   /**
-   * Compare two content pieces for equality
-   */
-  private isContentEqual(
-    content1: string | Uint8Array | null,
-    content2: string | Uint8Array | null
-  ): boolean {
-    if (content1 === content2) return true;
-    if (!content1 || !content2) return false;
-
-    if (typeof content1 !== typeof content2) return false;
-
-    if (typeof content1 === "string") {
-      return content1 === content2;
-    } else {
-      // Compare Uint8Array
-      const buf1 = content1 as Uint8Array;
-      const buf2 = content2 as Uint8Array;
-
-      if (buf1.length !== buf2.length) return false;
-
-      for (let i = 0; i < buf1.length; i++) {
-        if (buf1[i] !== buf2[i]) return false;
-      }
-
-      return true;
-    }
-  }
-
-  /**
    * Classify change type for a path
    */
   async classifyChange(
@@ -597,9 +570,9 @@ export class ChangeDetector {
     );
 
     const localChanged = localContent
-      ? !this.isContentEqual(localContent, lastKnownContent)
+      ? !isContentEqual(localContent, lastKnownContent)
       : true;
-    const remoteChanged = !this.isContentEqual(
+    const remoteChanged = !isContentEqual(
       lastKnownContent,
       currentRemoteContent
     );
@@ -623,61 +596,11 @@ export class ChangeDetector {
     filePath: string
   ): Promise<boolean> {
     if (!rootDirectoryUrl) return false;
-    const entry = await this.findFileInDirectoryHierarchy(
+    const entry = await findFileInDirectoryHierarchy(
+      this.repo,
       rootDirectoryUrl,
       filePath
     );
     return entry !== null;
-  }
-
-  /**
-   * Find a file in the directory hierarchy by path
-   */
-  private async findFileInDirectoryHierarchy(
-    directoryUrl: AutomergeUrl,
-    filePath: string
-  ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-    try {
-      const pathParts = filePath.split("/");
-      let currentDirUrl = directoryUrl;
-
-      // Navigate through directories to find the parent directory
-      for (let i = 0; i < pathParts.length - 1; i++) {
-        const dirName = pathParts[i];
-        const dirHandle = await this.repo.find<DirectoryDocument>(
-          currentDirUrl
-        );
-        const dirDoc = await dirHandle.doc();
-
-        if (!dirDoc) return null;
-
-        const subDirEntry = dirDoc.docs.find(
-          (entry: { name: string; type: string; url: AutomergeUrl }) =>
-            entry.name === dirName && entry.type === "folder"
-        );
-
-        if (!subDirEntry) return null;
-        currentDirUrl = subDirEntry.url;
-      }
-
-      // Now look for the file in the final directory
-      const fileName = pathParts[pathParts.length - 1];
-      const finalDirHandle = await this.repo.find<DirectoryDocument>(
-        currentDirUrl
-      );
-      const finalDirDoc = await finalDirHandle.doc();
-
-      if (!finalDirDoc) return null;
-
-      const fileEntry = finalDirDoc.docs.find(
-        (entry: { name: string; type: string; url: AutomergeUrl }) =>
-          entry.name === fileName && entry.type === "file"
-      );
-
-      return fileEntry || null;
-    } catch (error) {
-      out.taskLine(`Failed to find file in hierarchy: ${error}`, true);
-      return null;
-    }
   }
 }

@@ -13,16 +13,12 @@ export function isContentEqual(
   if (typeof content1 === "string") {
     return content1 === content2;
   } else {
-    // Compare Uint8Array
+    // Compare Uint8Array using native Buffer.equals() for better performance
     const buf1 = content1 as Uint8Array;
     const buf2 = content2 as Uint8Array;
 
     if (buf1.length !== buf2.length) return false;
 
-    for (let i = 0; i < buf1.length; i++) {
-      if (buf1[i] !== buf2[i]) return false;
-    }
-
-    return true;
+    return Buffer.from(buf1).equals(Buffer.from(buf2));
   }
 }

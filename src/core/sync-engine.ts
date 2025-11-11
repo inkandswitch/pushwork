@@ -15,6 +15,7 @@ import {
   normalizePath,
   getEnhancedMimeType,
   formatRelativePath,
+  findFileInDirectoryHierarchy,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { waitForSync, getSyncServerStorageId } from "../utils/network-sync";
@@ -23,6 +24,15 @@ import { ChangeDetector, DetectedChange } from "./change-detection";
 import { MoveDetector } from "./move-detection";
 import { span, attr } from "../tracing";
 import { out } from "../cli/output";
+
+/**
+ * Post-sync delay constants for network propagation
+ * These delays allow the WebSocket protocol to propagate peer changes after
+ * our changes reach the server. waitForSync only ensures OUR changes reached
+ * the server, not that we've RECEIVED changes from other peers.
+ */
+const POST_SYNC_DELAY_WITH_CHANGES_MS = 200; // After we pushed changes
+const POST_SYNC_DELAY_NO_CHANGES_MS = 100; // When no changes pushed (shorter delay)
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -233,7 +243,10 @@ export class SyncEngine {
                 await span(
                   "post_sync_delay",
                   (async () => {
-                    const delayMs = phase1Result.filesChanged > 0 ? 200 : 100;
+                    const delayMs =
+                      phase1Result.filesChanged > 0
+                        ? POST_SYNC_DELAY_WITH_CHANGES_MS
+                        : POST_SYNC_DELAY_NO_CHANGES_MS;
                     await new Promise((resolve) =>
                       setTimeout(resolve, delayMs)
                     );
@@ -522,7 +535,8 @@ export class SyncEngine {
       // We need to find the remote file's URL from the directory hierarchy
       if (snapshot.rootDirectoryUrl) {
         try {
-          const fileEntry = await this.findFileInDirectoryHierarchy(
+          const fileEntry = await findFileInDirectoryHierarchy(
+            this.repo,
             snapshot.rootDirectoryUrl,
             change.path
           );
@@ -1016,57 +1030,6 @@ export class SyncEngine {
     } catch (error) {
       // Failed to remove from directory - re-throw for caller to handle
       throw error;
-    }
-  }
-
-  /**
-   * Find a file in the directory hierarchy by path
-   */
-  private async findFileInDirectoryHierarchy(
-    directoryUrl: AutomergeUrl,
-    filePath: string
-  ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-    try {
-      const pathParts = filePath.split("/");
-      let currentDirUrl = directoryUrl;
-
-      // Navigate through directories to find the parent directory
-      for (let i = 0; i < pathParts.length - 1; i++) {
-        const dirName = pathParts[i];
-        const dirHandle = await this.repo.find<DirectoryDocument>(
-          currentDirUrl
-        );
-        const dirDoc = await dirHandle.doc();
-
-        if (!dirDoc) return null;
-
-        const subDirEntry = dirDoc.docs.find(
-          (entry: { name: string; type: string; url: AutomergeUrl }) =>
-            entry.name === dirName && entry.type === "folder"
-        );
-
-        if (!subDirEntry) return null;
-        currentDirUrl = subDirEntry.url;
-      }
-
-      // Now look for the file in the final directory
-      const fileName = pathParts[pathParts.length - 1];
-      const finalDirHandle = await this.repo.find<DirectoryDocument>(
-        currentDirUrl
-      );
-      const finalDirDoc = await finalDirHandle.doc();
-
-      if (!finalDirDoc) return null;
-
-      const fileEntry = finalDirDoc.docs.find(
-        (entry: { name: string; type: string; url: AutomergeUrl }) =>
-          entry.name === fileName && entry.type === "file"
-      );
-
-      return fileEntry || null;
-    } catch (error) {
-      // Failed to find file in hierarchy
-      return null;
     }
   }
 

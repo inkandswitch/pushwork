@@ -5,3 +5,6 @@ export * from "./fs";
 
 // Enhanced MIME type detection
 export * from "./mime-types";
+
+// Directory utilities
+export * from "./directory";
