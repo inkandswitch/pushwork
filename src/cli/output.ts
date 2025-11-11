@@ -43,11 +43,16 @@ export class Output {
 
   /**
    * Start a task with spinner - updates in place
+   * Completes any previous task before starting the new one
    * @param message - The task message
    * @param maxLines - Maximum number of task lines to show (0 = unlimited, lines scroll)
    */
   task(message: string, maxLines: number = 0): void {
-    this.#stopTask();
+    // Complete any existing task first
+    if (this.spinner) {
+      this.done();
+    }
+
     this.taskStartTime = Date.now();
     this.taskOriginalMessage = message;
     this.taskCurrentMessage = message;
@@ -67,13 +72,14 @@ export class Output {
   }
 
   /**
-   * Add a line to the active task (appears above spinner, scrolls if max-lines set)
+   * Add a line to the active task (appears below spinner, scrolls if max-lines set)
    * Lines are dimmed and temporary - they disappear when task completes unless kept
+   * If no task is active, displays as a regular log message
    */
   taskLine(message: string, keepOnComplete: boolean = false): void {
     if (!this.spinner) {
-      // No active task, just log normally
-      console.log(chalk.dim(message));
+      // No active task, just log normally as regular output
+      console.log(message);
       return;
     }
 

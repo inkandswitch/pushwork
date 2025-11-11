@@ -11,6 +11,7 @@ import {
   SnapshotDirectoryEntry,
 } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
+import { out } from "../cli/output";
 
 /**
  * Manages sync snapshots for local state tracking
@@ -57,7 +58,7 @@ export class SnapshotManager {
 
       return this.deserializeSnapshot(serializable);
     } catch (error) {
-      console.warn(`Failed to load snapshot: ${error}`);
+      out.taskLine(`Failed to load snapshot: ${error}`);
       return null;
     }
   }

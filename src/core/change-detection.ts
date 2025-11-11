@@ -14,6 +14,7 @@ import {
   normalizePath,
   getRelativePath,
 } from "../utils";
+import { out } from "../cli/output";
 
 // Re-export ChangeType for other modules
 export { ChangeType } from "../types";
@@ -331,7 +332,7 @@ export class ChangeDetector {
         changes
       );
     } catch (error) {
-      console.warn(`❌ Failed to discover remote documents: ${error}`);
+      out.taskLine(`Failed to discover remote documents: ${error}`, true);
     }
 
     return changes;
@@ -413,7 +414,7 @@ export class ChangeDetector {
         }
       }
     } catch (error) {
-      console.warn(`❌ Failed to process directory ${currentPath}: ${error}`);
+      out.taskLine(`Failed to process directory: ${error}`, true);
     }
   }
 
@@ -455,7 +456,7 @@ export class ChangeDetector {
         })()
       );
     } catch (error) {
-      console.warn(`Failed to scan filesystem: ${error}`);
+      out.taskLine(`Failed to scan filesystem: ${error}`, true);
     }
 
     return fileMap;
@@ -515,9 +516,7 @@ export class ChangeDetector {
       }
       return content as string | Uint8Array;
     } catch (error) {
-      console.warn(
-        `❌ Failed to get current remote content for ${url}: ${error}`
-      );
+      out.taskLine(`Failed to get remote content: ${error}`, true);
       return null;
     }
   }
@@ -677,9 +676,7 @@ export class ChangeDetector {
 
       return fileEntry || null;
     } catch (error) {
-      console.warn(
-        `Failed to find file ${filePath} in directory hierarchy: ${error}`
-      );
+      out.taskLine(`Failed to find file in hierarchy: ${error}`, true);
       return null;
     }
   }

@@ -52,7 +52,7 @@ export class ConfigManager {
       const content = await fs.readFile(configPath, "utf8");
       return JSON.parse(content) as GlobalConfig;
     } catch (error) {
-      console.warn(`Failed to load global config: ${error}`);
+      // Failed to load global config
       return null;
     }
   }
@@ -89,7 +89,7 @@ export class ConfigManager {
       const content = await fs.readFile(configPath, "utf8");
       return JSON.parse(content) as DirectoryConfig;
     } catch (error) {
-      console.warn(`Failed to load local config: ${error}`);
+      // Failed to load local config
       return null;
     }
   }

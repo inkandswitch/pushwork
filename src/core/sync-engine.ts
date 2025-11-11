@@ -240,7 +240,7 @@ export class SyncEngine {
                 );
               }
             } catch (error) {
-              out.taskLine(`❌ Network sync failed: ${error}`, true);
+              out.taskLine(`Network sync failed: ${error}`, true);
               result.warnings.push(`Network sync failed: ${error}`);
             }
           }
@@ -289,8 +289,7 @@ export class SyncEngine {
                 });
               }
             } catch (error) {
-              // Handle might not exist if file was deleted, skip
-              console.warn(`Could not update heads for ${filePath}: ${error}`);
+              // Handle might not exist if file was deleted
             }
           }
 
@@ -310,10 +309,7 @@ export class SyncEngine {
                 });
               }
             } catch (error) {
-              // Handle might not exist if directory was deleted, skip
-              console.warn(
-                `Could not update heads for directory ${dirPath}: ${error}`
-              );
+              // Handle might not exist if directory was deleted
             }
           }
         })()
@@ -540,8 +536,10 @@ export class SyncEngine {
             });
           }
         } catch (error) {
-          console.warn(
-            `Failed to update snapshot for remote file ${change.path}: ${error}`
+          // Failed to update snapshot - file may have been deleted
+          out.taskLine(
+            `Warning: Failed to update snapshot for remote file ${change.path}`,
+            true
           );
         }
       }
@@ -608,8 +606,10 @@ export class SyncEngine {
       // Track file handle for network sync
       this.handlesToWaitOn.push(handle);
     } catch (e) {
-      console.warn(
-        `Failed to update file name for move ${move.fromPath} -> ${move.toPath}: ${e}`
+      // Failed to update file name - file may have been deleted
+      out.taskLine(
+        `Warning: Failed to rename ${move.fromPath} to ${move.toPath}`,
+        true
       );
     }
 
@@ -696,9 +696,6 @@ export class SyncEngine {
     if (!contentChanged) {
       // Content is identical, but we've updated the snapshot heads above
       // This prevents fresh change detection from seeing stale heads
-      console.log(
-        `🔍 Content is identical, but we've updated the snapshot heads above`
-      );
       return;
     }
 
@@ -883,17 +880,12 @@ export class SyncEngine {
 
             return existingDirEntry.url;
           } catch (resolveErr) {
-            console.warn(
-              `Failed to resolve child directory ${currentDirName} at ${directoryPath}: ${resolveErr}`
-            );
-            // Fall through to create a fresh directory document
+            // Failed to resolve directory - fall through to create a fresh directory document
           }
         }
       }
     } catch (error) {
-      console.warn(
-        `Failed to check for existing directory ${currentDirName}: ${error}`
-      );
+      // Failed to check for existing directory - will create new one
     }
 
     // CREATE: Directory doesn't exist, create new one
@@ -968,9 +960,7 @@ export class SyncEngine {
     } else {
       const existingDir = snapshot.directories.get(directoryPath);
       if (!existingDir) {
-        console.warn(
-          `Directory ${directoryPath} not found in snapshot for file removal`
-        );
+        // Directory not found - file may already be removed
         return;
       }
       parentDirUrl = existingDir.url;
@@ -994,9 +984,7 @@ export class SyncEngine {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
             out.taskLine(
-              `🗑️  Removed ${fileName} from directory ${
-                directoryPath || "root"
-              }`
+              `Removed ${fileName} from directory ${directoryPath || "root"}`
             );
           }
         });
@@ -1009,9 +997,7 @@ export class SyncEngine {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
             out.taskLine(
-              `🗑️  Removed ${fileName} from directory ${
-                directoryPath || "root"
-              }`
+              `Removed ${fileName} from directory ${directoryPath || "root"}`
             );
           }
         });
@@ -1023,11 +1009,7 @@ export class SyncEngine {
         snapshotEntry.head = dirHandle.heads();
       }
     } catch (error) {
-      console.warn(
-        `Failed to remove ${fileName} from directory ${
-          directoryPath || "root"
-        }: ${error}`
-      );
+      // Failed to remove from directory - re-throw for caller to handle
       throw error;
     }
   }
@@ -1078,9 +1060,7 @@ export class SyncEngine {
 
       return fileEntry || null;
     } catch (error) {
-      console.warn(
-        `Failed to find file ${filePath} in directory hierarchy: ${error}`
-      );
+      // Failed to find file in hierarchy
       return null;
     }
   }
@@ -1240,14 +1220,8 @@ export class SyncEngine {
       if (snapshotEntry) {
         snapshotEntry.head = rootHandle.heads();
       }
-
-      console.log(
-        `🕒 Updated root directory lastSyncAt to ${new Date(
-          timestamp
-        ).toISOString()}`
-      );
     } catch (error) {
-      console.warn(`Failed to update root directory lastSyncAt: ${error}`);
+      // Failed to update root directory timestamp
     }
   }
 }

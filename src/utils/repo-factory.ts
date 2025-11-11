@@ -52,12 +52,9 @@ export async function createRepo(
       const str = args[0]?.toString() || "";
       // Filter out Automerge internal messages and sync progress
       if (
-        str.includes("emitting") ||
+        str.includes("emitting saved") ||
         str.includes("lastSyncAt") ||
         str.includes("Updated root directory") ||
-        str.includes("🔄") ||
-        str.includes("⬇️") ||
-        str.includes("🔀") ||
         str.includes("Syncing")
       ) {
         return;

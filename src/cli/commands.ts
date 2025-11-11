@@ -283,7 +283,7 @@ export async function init(
     }
   } catch (error) {
     out.errorBlock("FAILED", "Initialization failed");
-    out.log(`  ${error}`);
+    out.error(error);
     out.exit(1);
   }
   process.exit();
@@ -371,11 +371,9 @@ export async function sync(
           out.done();
           out.successBlock(
             "SYNCED",
-            `${result.filesChanged} file${
-              result.filesChanged !== 1 ? "s" : ""
-            } updated`
+            `${result.filesChanged} ${plural("file", result.filesChanged)} 
+            `
           );
-          out.obj({ Files: result.filesChanged.toString() });
         }
 
         if (result.warnings.length > 0) {
@@ -444,7 +442,7 @@ export async function sync(
     }
   } catch (error) {
     out.errorBlock("FAILED", "Sync failed");
-    out.log(`  ${error}`);
+    out.error(error);
     out.exit(1);
   }
   process.exit();
@@ -745,7 +743,7 @@ export async function clone(
     out.successBlock("CLONED", rootUrl);
   } catch (error) {
     out.errorBlock("FAILED", "Clone failed");
-    out.log(`  ${error}`);
+    out.error(error);
     out.exit(1);
   }
   process.exit();
@@ -1051,3 +1049,7 @@ export async function config(
 }
 
 // TODO: Add push and pull commands later
+
+function plural(word: string, count: number): string {
+  return count === 1 ? word : `${word}s`;
+}

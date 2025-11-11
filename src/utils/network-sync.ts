@@ -1,6 +1,7 @@
 import { DocHandle, StorageId } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import { span, attr } from "../tracing";
+import { out } from "../cli/output";
 
 /**
  * Wait for documents to sync to the remote server
@@ -13,37 +14,13 @@ export async function waitForSync(
   const startTime = Date.now();
 
   if (!syncServerStorageId) {
-    console.warn(
-      "No sync server storage ID provided. Skipping network sync wait."
-    );
+    // No sync server storage ID - skip network sync
     return;
   }
 
   if (handlesToWaitOn.length === 0) {
-    console.log("🔄 No documents to sync");
+    // No documents to sync
     return;
-  }
-
-  // Debug logging only in verbose mode (can be controlled via env var later)
-  const verbose = false;
-
-  if (verbose) {
-    console.log(
-      `🔄 Waiting for ${handlesToWaitOn.length} documents to sync...`
-    );
-    console.log(`📡 Using sync server storage ID: ${syncServerStorageId}`);
-
-    handlesToWaitOn.forEach((handle, i) => {
-      const localHeads = handle.heads();
-      const syncInfo = handle.getSyncInfo(syncServerStorageId);
-      const remoteHeads = syncInfo?.lastHeads;
-      console.log(`  📄 Document ${i + 1}: ${handle.url}`);
-      console.log(`    🏠 Local heads: ${JSON.stringify(localHeads)}`);
-      console.log(`    🌐 Remote heads: ${JSON.stringify(remoteHeads)}`);
-      console.log(
-        `    ✅ Already synced: ${A.equals(localHeads, remoteHeads)}`
-      );
-    });
   }
 
   let alreadySynced = 0;
@@ -85,9 +62,6 @@ export async function waitForSync(
               const onConverged = () => {
                 attr("elapsed_ms", Date.now() - docStartTime);
                 attr("poll_count", pollCount);
-                if (verbose) {
-                  console.log(`✅ Document ${index + 1} synced: ${handle.url}`);
-                }
                 cleanup();
                 resolve();
               };
@@ -118,11 +92,6 @@ export async function waitForSync(
                 storageId: StorageId;
                 heads: any;
               }) => {
-                if (verbose) {
-                  console.log(
-                    `📡 Received remote heads event for ${handle.url}`
-                  );
-                }
                 if (storageId === syncServerStorageId && isConverged()) {
                   onConverged();
                 }
@@ -130,9 +99,6 @@ export async function waitForSync(
 
               // Polling fallback
               const poll = () => {
-                if (verbose) {
-                  console.log(`🔍 Poll ${pollCount} for ${handle.url}`);
-                }
                 if (isConverged()) {
                   onConverged();
                   return true;
@@ -167,14 +133,12 @@ export async function waitForSync(
         const elapsed = Date.now() - startTime;
         attr("total_elapsed_ms", elapsed);
         attr("already_synced_count", alreadySynced);
-        if (verbose) {
-          console.log(`✅ All documents synced to network (took ${elapsed}ms)`);
-        }
       })()
     );
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    console.error(`❌ Sync wait failed after ${elapsed}ms: ${error}`);
+    out.errorBlock("FAILED", `after ${elapsed}ms`);
+    out.crash(error);
     throw error;
   }
 }
