@@ -20,7 +20,7 @@ import { SyncEngine } from "../core";
 import { pathExists, ensureDirectoryExists } from "../utils";
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
-import { Output } from "./output";
+import { out } from "./output";
 import { trace, span } from "../tracing";
 
 /**
@@ -183,8 +183,6 @@ export async function init(
     trace(true);
   }
 
-  const out = new Output();
-
   try {
     const resolvedPath = path.resolve(targetPath);
 
@@ -244,11 +242,12 @@ export async function init(
 
     out.done();
 
-    out.pair("Sync", defaultSyncServer);
-    if (result.filesChanged > 0) {
-      out.pair("Files", `${result.filesChanged} added`);
-    }
-    out.success("INITIALIZED", rootHandle.url);
+    out.obj({
+      Sync: defaultSyncServer,
+      Files:
+        result.filesChanged > 0 ? `${result.filesChanged} added` : undefined,
+    });
+    out.successBlock("INITIALIZED", rootHandle.url);
 
     // Export flame graphs if debug mode is enabled
     if (options.debug) {
@@ -273,17 +272,17 @@ export async function init(
       );
 
       out.log("");
-      out.special(
-        `FLAME GRAPH (nested)`,
-        `file://${traceFile} (Open in https://ui.perfetto.dev)`
+      out.log(
+        `FLAME GRAPH (nested): file://${traceFile} (Open in https://ui.perfetto.dev)`,
+        "cyan"
       );
-      out.special(
-        `FLAME GRAPH (lanes)`,
-        `file://${traceLanesFile} (Open in https://ui.perfetto.dev)`
+      out.log(
+        `FLAME GRAPH (lanes): file://${traceLanesFile} (Open in https://ui.perfetto.dev)`,
+        "cyan"
       );
     }
   } catch (error) {
-    out.error("FAILED", "Initialization failed");
+    out.errorBlock("FAILED", "Initialization failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -301,8 +300,6 @@ export async function sync(
   if (options.debug) {
     trace(true);
   }
-
-  const out = new Output();
 
   try {
     out.task("Syncing");
@@ -323,11 +320,14 @@ export async function sync(
         return;
       }
 
-      out.info("CHANGES", "");
-      out.pair("Changes", preview.changes.length.toString());
-      if (preview.moves.length > 0) {
-        out.pair("Moves", preview.moves.length.toString());
-      }
+      out.infoBlock("CHANGES");
+      out.obj({
+        Changes: preview.changes.length.toString(),
+        Moves:
+          preview.moves.length > 0
+            ? preview.moves.length.toString()
+            : undefined,
+      });
 
       out.log("");
       out.log("Files:");
@@ -358,10 +358,9 @@ export async function sync(
       out.log("");
       out.log("Run without --dry-run to apply these changes");
     } else {
-      out.update("Synchronizing");
       const result = await span("sync", syncEngine.sync());
 
-      out.update("Writing to disk");
+      out.taskLine("Writing to disk");
       await safeRepoShutdown(repo, "sync");
 
       if (result.success) {
@@ -370,18 +369,18 @@ export async function sync(
           out.success("Already in sync");
         } else {
           out.done();
-          out.success(
+          out.successBlock(
             "SYNCED",
             `${result.filesChanged} file${
               result.filesChanged !== 1 ? "s" : ""
             } updated`
           );
-          out.pair("Files", result.filesChanged.toString());
+          out.obj({ Files: result.filesChanged.toString() });
         }
 
         if (result.warnings.length > 0) {
           out.log("");
-          out.warn("WARNINGS", `${result.warnings.length} warnings`);
+          out.warnBlock("WARNINGS", `${result.warnings.length} warnings`);
           for (const warning of result.warnings.slice(0, 5)) {
             out.log(`  ${warning}`);
           }
@@ -413,37 +412,38 @@ export async function sync(
           );
 
           out.log("");
-          out.special(
-            `FLAME GRAPH (nested)`,
-            `file://${traceFile} (Open in https://ui.perfetto.dev)`
+          out.log(
+            `FLAME GRAPH (nested): file://${traceFile} (Open in https://ui.perfetto.dev)`,
+            "cyan"
           );
-          out.special(
-            `FLAME GRAPH (lanes)`,
-            `file://${traceLanesFile} (Open in https://ui.perfetto.dev)`
+          out.log(
+            `FLAME GRAPH (lanes): file://${traceLanesFile} (Open in https://ui.perfetto.dev)`,
+            "cyan"
           );
         }
       } else {
         out.done("partial", false);
-        out.warn(
+        out.warnBlock(
           "PARTIAL",
           `${result.filesChanged} updated, ${result.errors.length} errors`
         );
-        out.pair("Files", result.filesChanged.toString());
-        out.pair("Errors", result.errors.length.toString());
+        out.obj({
+          Files: result.filesChanged,
+          Errors: result.errors.length,
+        });
 
-        out.log("");
-        for (const error of result.errors.slice(0, 5)) {
-          out.error("ERROR", error.path);
-          out.log(`  ${error.error.message}`);
-          out.log("");
-        }
+        result.errors
+          .slice(0, 5)
+          .forEach((error) =>
+            out.error(`${error.path}: ${error.error.message}`)
+          );
         if (result.errors.length > 5) {
-          out.log(`... and ${result.errors.length - 5} more errors`);
+          out.warn(`... and ${result.errors.length - 5} more errors`);
         }
       }
     }
   } catch (error) {
-    out.error("FAILED", "Sync failed");
+    out.errorBlock("FAILED", "Sync failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -457,8 +457,6 @@ export async function diff(
   targetPath = ".",
   options: DiffOptions
 ): Promise<void> {
-  const out = new Output();
-
   try {
     out.task("Analyzing changes");
 
@@ -570,8 +568,6 @@ export async function diff(
  * Show sync status
  */
 export async function status(targetPath: string = "."): Promise<void> {
-  const out = new Output();
-
   try {
     out.task("Loading status");
 
@@ -585,25 +581,22 @@ export async function status(targetPath: string = "."): Promise<void> {
 
     out.done();
 
-    out.info("STATUS", "");
+    out.infoBlock("STATUS");
 
-    if (syncStatus.snapshot?.rootDirectoryUrl) {
-      out.pair("URL", syncStatus.snapshot.rootDirectoryUrl);
-    }
-
-    if (syncStatus.snapshot) {
-      const fileCount = syncStatus.snapshot.files.size;
-      out.pair("Files", `${fileCount} tracked`);
-    }
-
-    out.pair("Sync", config?.sync_server || "wss://sync3.automerge.org");
+    const fileCount = syncStatus.snapshot?.files.size || 0;
+    out.obj({
+      URL: syncStatus.snapshot?.rootDirectoryUrl,
+      Files: syncStatus.snapshot ? `${fileCount} tracked` : undefined,
+      Sync: config?.sync_server || "wss://sync3.automerge.org",
+      Changes: syncStatus.hasChanges
+        ? `${syncStatus.changeCount} pending`
+        : undefined,
+      Status: !syncStatus.hasChanges ? "up to date" : undefined,
+    });
 
     if (syncStatus.hasChanges) {
-      out.pair("Changes", `${syncStatus.changeCount} pending`);
       out.log("");
       out.log("Run 'pushwork diff' to see changes");
-    } else {
-      out.pair("Status", "up to date");
     }
 
     await safeRepoShutdown(repo, "status");
@@ -620,8 +613,6 @@ export async function log(
   targetPath = ".",
   _options: LogOptions
 ): Promise<void> {
-  const out = new Output();
-
   try {
     const { repo: logRepo, workingDir } = await setupCommandContext(
       targetPath,
@@ -634,8 +625,8 @@ export async function log(
     const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
     if (await pathExists(snapshotPath)) {
       const stats = await fs.stat(snapshotPath);
-      out.info("HISTORY", "Sync history (stub)");
-      out.pair("Last sync", stats.mtime.toISOString());
+      out.infoBlock("HISTORY", "Sync history (stub)");
+      out.obj({ "Last sync": stats.mtime.toISOString() });
     } else {
       out.info("No sync history found");
     }
@@ -655,15 +646,15 @@ export async function checkout(
   targetPath = ".",
   _options: CheckoutOptions
 ): Promise<void> {
-  const out = new Output();
-
   try {
     const { workingDir } = await setupCommandContext(targetPath);
 
     // TODO: Implement checkout functionality
-    out.warn("NOT IMPLEMENTED", "Checkout not yet implemented");
-    out.pair("Sync ID", syncId);
-    out.pair("Path", workingDir);
+    out.warnBlock("NOT IMPLEMENTED", "Checkout not yet implemented");
+    out.obj({
+      "Sync ID": syncId,
+      Path: workingDir,
+    });
   } catch (error) {
     out.error(`Checkout failed: ${error}`);
     out.exit(1);
@@ -680,8 +671,6 @@ export async function clone(
 ): Promise<void> {
   // Validate sync server options
   validateSyncServerOptions(options.syncServer, options.syncServerStorageId);
-
-  const out = new Output();
 
   try {
     const resolvedPath = path.resolve(targetPath);
@@ -748,12 +737,14 @@ export async function clone(
 
     out.done();
 
-    out.pair("Path", resolvedPath);
-    out.pair("Files", `${result.filesChanged} downloaded`);
-    out.pair("Sync", defaultSyncServer);
-    out.success("CLONED", rootUrl);
+    out.obj({
+      Path: resolvedPath,
+      Files: `${result.filesChanged} downloaded`,
+      Sync: defaultSyncServer,
+    });
+    out.successBlock("CLONED", rootUrl);
   } catch (error) {
-    out.error("FAILED", "Clone failed");
+    out.errorBlock("FAILED", "Clone failed");
     out.log(`  ${error}`);
     out.exit(1);
   }
@@ -764,8 +755,6 @@ export async function clone(
  * Get the root URL for the current pushwork repository
  */
 export async function url(targetPath: string = "."): Promise<void> {
-  const out = new Output();
-
   try {
     const resolvedPath = path.resolve(targetPath);
     const syncToolDir = path.join(resolvedPath, ".pushwork");
@@ -801,8 +790,6 @@ export async function url(targetPath: string = "."): Promise<void> {
  * Remove local pushwork data and log URL for recovery
  */
 export async function rm(targetPath: string = "."): Promise<void> {
-  const out = new Output();
-
   try {
     const resolvedPath = path.resolve(targetPath);
     const syncToolDir = path.join(resolvedPath, ".pushwork");
@@ -831,7 +818,7 @@ export async function rm(targetPath: string = "."): Promise<void> {
     await fs.rm(syncToolDir, { recursive: true, force: true });
     out.done();
 
-    out.warn("REMOVED", recoveryUrl);
+    out.warnBlock("REMOVED", recoveryUrl);
   } catch (error) {
     out.error(`Remove failed: ${error}`);
     out.exit(1);
@@ -843,8 +830,6 @@ export async function commit(
   targetPath: string,
   _options: CommitOptions = {}
 ): Promise<void> {
-  const out = new Output();
-
   try {
     out.task("Committing local changes");
 
@@ -861,24 +846,23 @@ export async function commit(
     out.done();
 
     if (result.errors.length > 0) {
-      out.error("ERRORS", `${result.errors.length} errors`);
-      result.errors.forEach((error) => {
-        out.log(`  ${error.path}: ${error.error.message}`);
-      });
+      out.errorBlock("ERROR", `${result.errors.length} errors`);
+      result.errors.forEach((error) => out.error(error));
       out.exit(1);
     }
 
-    out.success("COMMITTED", `${result.filesChanged} files committed`);
-    out.pair("Files", result.filesChanged.toString());
-    out.pair("Directories", result.directoriesChanged.toString());
+    out.successBlock("COMMITTED", `${result.filesChanged} files`);
+    out.obj({
+      Files: result.filesChanged,
+      Directories: result.directoriesChanged,
+    });
 
     if (result.warnings.length > 0) {
-      out.log("");
-      out.warn("WARNINGS", `${result.warnings.length} warnings`);
-      result.warnings.forEach((warning: string) => out.log(`  ${warning}`));
+      result.warnings.forEach((warning) => out.warn(warning));
     }
   } catch (error) {
-    out.error(`Commit failed: ${error}`);
+    out.errorBlock("FAILED", "Commit failed");
+    out.error(error);
     out.exit(1);
   }
   process.exit();
@@ -891,8 +875,6 @@ export async function debug(
   targetPath: string = ".",
   options: DebugOptions = {}
 ): Promise<void> {
-  const out = new Output();
-
   try {
     out.task("Loading debug info");
 
@@ -906,10 +888,12 @@ export async function debug(
 
     out.done("done");
 
-    out.info("DEBUG", "");
+    out.infoBlock("DEBUG");
+
+    const debugInfo: Record<string, any> = {};
 
     if (debugStatus.snapshot?.rootDirectoryUrl) {
-      out.pair("URL", debugStatus.snapshot.rootDirectoryUrl);
+      debugInfo["URL"] = debugStatus.snapshot.rootDirectoryUrl;
 
       try {
         const rootHandle = await repo.find<DirectoryDocument>(
@@ -918,19 +902,17 @@ export async function debug(
         const rootDoc = await rootHandle.doc();
 
         if (rootDoc) {
-          out.pair("Entries", rootDoc.docs.length.toString());
+          debugInfo.Entries = rootDoc.docs.length;
           if (rootDoc.lastSyncAt) {
             const lastSyncDate = new Date(rootDoc.lastSyncAt);
-            out.pair("Last sync", lastSyncDate.toISOString());
+            debugInfo["Last sync"] = lastSyncDate.toISOString();
           }
 
           if (options.verbose) {
-            out.log("");
-            out.log("Document:");
-            out.log(JSON.stringify(rootDoc, null, 2));
-            out.log("");
-            out.log("Heads:");
-            out.log(JSON.stringify(rootHandle.heads(), null, 2));
+            out.info("Document:");
+            out.obj(rootDoc);
+            out.info("Heads:");
+            out.obj(rootHandle.heads());
           }
         }
       } catch (error) {
@@ -939,16 +921,18 @@ export async function debug(
     }
 
     if (debugStatus.snapshot) {
-      out.pair("Files", debugStatus.snapshot.files.size.toString());
-      out.pair("Directories", debugStatus.snapshot.directories.size.toString());
+      debugInfo.Files = debugStatus.snapshot.files.size;
+      debugInfo.Directories = debugStatus.snapshot.directories.size;
+    }
 
-      if (options.verbose) {
-        out.log("");
-        out.log("All tracked files:");
-        debugStatus.snapshot.files.forEach((entry, filePath) => {
-          out.log(`  ${filePath} -> ${entry.url}`);
-        });
-      }
+    out.obj(debugInfo);
+
+    if (options.verbose && debugStatus.snapshot) {
+      out.log("");
+      out.log("All tracked files:");
+      debugStatus.snapshot.files.forEach((entry, filePath) => {
+        out.log(`  ${filePath} -> ${entry.url}`);
+      });
     }
 
     await safeRepoShutdown(repo, "debug");
@@ -965,8 +949,6 @@ export async function ls(
   targetPath: string = ".",
   options: ListOptions = {}
 ): Promise<void> {
-  const out = new Output();
-
   try {
     const { repo, syncEngine } = await setupCommandContext(
       targetPath,
@@ -1020,8 +1002,6 @@ export async function config(
   targetPath: string = ".",
   options: ConfigOptions = {}
 ): Promise<void> {
-  const out = new Output();
-
   try {
     const resolvedPath = path.resolve(targetPath);
     const syncToolDir = path.join(resolvedPath, ".pushwork");
@@ -1036,7 +1016,7 @@ export async function config(
 
     if (options.list) {
       // List all configuration
-      out.info("CONFIGURATION", "Full configuration");
+      out.infoBlock("CONFIGURATION", "Full configuration");
       out.log(JSON.stringify(config, null, 2));
     } else if (options.get) {
       // Get specific config value
@@ -1055,13 +1035,12 @@ export async function config(
       }
     } else {
       // Show basic config info
-      out.info("CONFIGURATION", "");
-      out.pair("Sync server", config.sync_server || "default");
-      out.pair("Sync enabled", config.sync_enabled ? "yes" : "no");
-      out.pair(
-        "Exclusions",
-        config.defaults.exclude_patterns.length.toString()
-      );
+      out.infoBlock("CONFIGURATION");
+      out.obj({
+        "Sync server": config.sync_server || "default",
+        "Sync enabled": config.sync_enabled ? "yes" : "no",
+        Exclusions: config.defaults.exclude_patterns.length,
+      });
       out.log("");
       out.log("Use --list to see full configuration");
     }

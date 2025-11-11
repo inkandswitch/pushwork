@@ -21,6 +21,7 @@ import { SnapshotManager } from "./snapshot";
 import { ChangeDetector, DetectedChange } from "./change-detection";
 import { MoveDetector } from "./move-detection";
 import { span, attr } from "../tracing";
+import { out } from "../cli/output";
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -239,7 +240,7 @@ export class SyncEngine {
                 );
               }
             } catch (error) {
-              console.error(`❌ Network sync failed: ${error}`);
+              out.taskLine(`❌ Network sync failed: ${error}`, true);
               result.warnings.push(`Network sync failed: ${error}`);
             }
           }
@@ -992,7 +993,7 @@ export class SyncEngine {
           if (indexToRemove !== -1) {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
-            console.log(
+            out.taskLine(
               `🗑️  Removed ${fileName} from directory ${
                 directoryPath || "root"
               }`
@@ -1007,7 +1008,7 @@ export class SyncEngine {
           if (indexToRemove !== -1) {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
-            console.log(
+            out.taskLine(
               `🗑️  Removed ${fileName} from directory ${
                 directoryPath || "root"
               }`

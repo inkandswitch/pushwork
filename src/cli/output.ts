@@ -2,24 +2,57 @@ import chalk from "chalk";
 import ora, { Ora } from "ora";
 
 /**
- * Clean terminal output manager
+ * Clean terminal output manager (Singleton)
  * - Progress stays on one line (spinner updates in place)
  * - No emojis
  * - Background colors for section headers
  * - Minimal output
+ * - Supports scrolling task lines (max-lines)
  */
 export class Output {
+  private static instance: Output | null = null;
   private spinner: Ora | null = null;
   private taskStartTime: number | null = null;
-  private taskMessage: string | null = null;
+  private taskOriginalMessage: string | null = null; // Original task message for done()
+  private taskCurrentMessage: string | null = null; // Current display message (can be updated)
+  private taskLines: string[] = []; // Lines written during active task
+  private taskMaxLines: number = 0; // 0 = unlimited
+
+  private constructor() {}
+
+  /**
+   * Get the singleton instance
+   */
+  static getInstance(): Output {
+    if (!Output.instance) {
+      Output.instance = new Output();
+    }
+    return Output.instance;
+  }
+
+  /**
+   * Reset the singleton (useful for testing)
+   */
+  static reset(): void {
+    if (Output.instance?.spinner) {
+      Output.instance.spinner.stop();
+      Output.instance.spinner.clear();
+    }
+    Output.instance = null;
+  }
 
   /**
    * Start a task with spinner - updates in place
+   * @param message - The task message
+   * @param maxLines - Maximum number of task lines to show (0 = unlimited, lines scroll)
    */
-  task(message: string): void {
+  task(message: string, maxLines: number = 0): void {
     this.#stopTask();
     this.taskStartTime = Date.now();
-    this.taskMessage = message;
+    this.taskOriginalMessage = message;
+    this.taskCurrentMessage = message;
+    this.taskMaxLines = maxLines;
+    this.taskLines = [];
     this.spinner = ora(message).start();
   }
 
@@ -28,16 +61,78 @@ export class Output {
    */
   update(message: string): void {
     if (this.spinner) {
-      this.spinner.text = message;
+      this.taskCurrentMessage = message;
+      this.#updateTaskDisplay();
     }
+  }
+
+  /**
+   * Add a line to the active task (appears above spinner, scrolls if max-lines set)
+   * Lines are dimmed and temporary - they disappear when task completes unless kept
+   */
+  taskLine(message: string, keepOnComplete: boolean = false): void {
+    if (!this.spinner) {
+      // No active task, just log normally
+      console.log(chalk.dim(message));
+      return;
+    }
+
+    // Add to task lines buffer with keep flag
+    this.taskLines.push(keepOnComplete ? `[keep]${message}` : message);
+
+    // If max lines set, trim from the start (scroll)
+    if (this.taskMaxLines > 0 && this.taskLines.length > this.taskMaxLines) {
+      this.taskLines = this.taskLines.slice(-this.taskMaxLines);
+    }
+
+    this.#updateTaskDisplay();
+  }
+
+  /**
+   * Clear all task lines (useful when you want to reset the scrolling window)
+   */
+  clearTaskLines(): void {
+    this.taskLines = [];
+    this.#updateTaskDisplay();
+  }
+
+  /**
+   * Update the task display (spinner + task lines)
+   * Uses ora's multiline text support to keep spinner at top with lines below
+   */
+  #updateTaskDisplay(): void {
+    if (!this.spinner) return;
+
+    const currentText =
+      this.taskCurrentMessage || this.spinner.text.split("\n")[0] || "";
+
+    // If no task lines, show just the spinner message
+    if (this.taskLines.length === 0) {
+      this.spinner.text = currentText;
+      return;
+    }
+
+    // Build multiline text: spinner message + task lines below
+    const taskLinesText = this.taskLines
+      .map((line) => {
+        const cleanLine = line.startsWith("[keep]") ? line.slice(6) : line;
+        return chalk.dim(`  ${cleanLine}`);
+      })
+      .join("\n");
+
+    // Set spinner text to include task lines (ora handles multiline rendering)
+    this.spinner.text = `${currentText}\n${taskLinesText}`;
   }
 
   /**
    * Complete task with optional duration display
    * Defaults to showing the original task message with duration
+   * Task lines marked with keepOnComplete will be preserved, others are cleared
    */
   done(message?: string, showTime: boolean = true): void {
-    let text = message || this.taskMessage || "done";
+    if (!this.spinner) return;
+
+    let text = message || this.taskOriginalMessage || "done";
     if (showTime && this.taskStartTime) {
       const durationMs = Date.now() - this.taskStartTime;
       const durationText = (() => {
@@ -50,24 +145,27 @@ export class Output {
             return `${(durationMs / 1000).toFixed(1)}s`;
         }
       })();
-      text += ` (${durationText})`;
+      text += chalk.dim(` (${durationText})`);
     }
 
-    if (this.spinner) {
-      this.spinner.succeed(text);
-      this.spinner = null;
+    // Clear multiline text and set to just completion message
+    this.spinner.text = text;
+    this.spinner.succeed();
+    this.spinner = null;
+
+    // Print kept task lines after completion
+    const keptLines = this.taskLines.filter((line) =>
+      line.startsWith("[keep]")
+    );
+    for (const line of keptLines) {
+      console.log(chalk.dim(`  ${line.slice(6)}`));
     }
+
     this.taskStartTime = null;
-    this.taskMessage = null;
-  }
-
-  /**
-   * Show a key-value pair (indented, aligned)
-   */
-  pair(key: string, value: string | number): void {
-    this.#stopTask();
-    const keyFormatted = chalk.dim(key.padEnd(12));
-    console.log(`${keyFormatted}${value}`);
+    this.taskOriginalMessage = null;
+    this.taskCurrentMessage = null;
+    this.taskLines = [];
+    this.taskMaxLines = 0;
   }
 
   /**
@@ -131,93 +229,123 @@ export class Output {
   }
 
   /**
-   * Show success message (green)
-   * - 1 arg: green text
-   * - 2 args: green background label + message
+   * Show success message (green text)
    */
-  success(labelOrMessage: string, message?: string): void {
+  success(message: string): void {
+    this.#stopTask();
+    console.log(chalk.green(message));
+  }
+
+  /**
+   * Show success block (green background label + optional message)
+   */
+  successBlock(label: string, message: string = ""): void {
     this.#stopTask();
     console.log(
-      this.#fmt(
-        labelOrMessage,
-        message,
-        (text) => chalk.bgGreen.black(text),
-        (text) => chalk.green(text)
-      )
+      `\n${chalk.bgGreen.black(` ${label} `)}${message && ` ${message}`}`
     );
   }
 
   /**
-   * Show info message (dim/grey)
-   * - 1 arg: dim text
-   * - 2 args: grey background label + message
+   * Show info message (dim text)
    */
-  info(labelOrMessage: string, message?: string): void {
+  info(message: string): void {
+    this.#stopTask();
+    console.log(chalk.dim(message));
+  }
+
+  /**
+   * Show info block (grey background label + optional message)
+   */
+  infoBlock(label: string, message: string = ""): void {
     this.#stopTask();
     console.log(
-      this.#fmt(
-        labelOrMessage,
-        message,
-        (text) => chalk.bgGrey.white(text),
-        (text) => chalk.dim(text)
-      )
+      `\n${chalk.bgGrey.white(` ${label} `)}${message && ` ${message}`}`
     );
   }
 
   /**
-   * Show info message (dim/grey)
-   * - 1 arg: dim text
-   * - 2 args: grey background label + message
+   * Show error message (red text) - fails spinner if running
    */
-  special(labelOrMessage: string, message?: string): void {
-    this.#stopTask();
-    console.log(
-      this.#fmt(
-        labelOrMessage,
-        message,
-        (text) => chalk.bgCyan.black(text),
-        (text) => chalk.cyan(text)
-      )
-    );
-  }
-
-  /**
-   * Show error message (red) - fails spinner if running
-   * - 1 arg: red text
-   * - 2 args: red background label + message
-   */
-  error(labelOrMessage: string, message?: string): void {
+  error(message: string | Error | unknown): void {
     if (this.spinner) {
       this.spinner.fail("failed");
       this.spinner = null;
       this.taskStartTime = null;
-      this.taskMessage = null;
+      this.taskOriginalMessage = null;
+      this.taskCurrentMessage = null;
     }
     console.log(
-      this.#fmt(
-        labelOrMessage,
-        message,
-        (text) => chalk.bgRed.white(text),
-        (text) => chalk.red(text)
+      chalk.red(
+        message instanceof Error
+          ? message.message
+          : message instanceof Object
+          ? JSON.stringify(message)
+          : String(message)
       )
     );
   }
 
   /**
-   * Show warning message (yellow)
-   * - 1 arg: yellow text
-   * - 2 args: yellow background label + message
+   * Show error block (red background label + optional message) - fails spinner if running
    */
-  warn(labelOrMessage: string, message?: string): void {
+  errorBlock(label: string, message: string = ""): void {
+    if (this.spinner) {
+      this.spinner.fail("failed");
+      this.spinner = null;
+      this.taskStartTime = null;
+      this.taskOriginalMessage = null;
+      this.taskCurrentMessage = null;
+    }
+    console.log(
+      `\n${chalk.bgRed.white(` ${label} `)}${message && ` ${message}`}`
+    );
+  }
+
+  /**
+   * Show warning message (yellow text)
+   */
+  warn(message: string): void {
+    this.#stopTask();
+    console.log(chalk.yellow(message));
+  }
+
+  /**
+   * Show warning block (yellow background label + optional message)
+   */
+  warnBlock(label: string, message: string = ""): void {
     this.#stopTask();
     console.log(
-      this.#fmt(
-        labelOrMessage,
-        message,
-        (text) => chalk.bgYellow.black(text),
-        (text) => chalk.yellow(text)
-      )
+      `\n${chalk.bgYellow.black(` ${label} `)}${message && ` ${message}`}`
     );
+  }
+
+  /**
+   * Show detailed error information and exit the program
+   * Use this when an unexpected/unrecoverable error occurs
+   * Shows error message and stack trace, then exits
+   */
+  crash(error: unknown, exitCode: number = 1): never {
+    this.#stopTask();
+
+    if (error instanceof Error) {
+      // Error type and message
+      console.log(chalk.red(`${error.name}: ${error.message}`));
+
+      // Stack trace
+      if (error.stack) {
+        console.log("");
+        console.log(chalk.dim("Stack trace:"));
+        const stackLines = error.stack.split("\n").slice(1); // Skip first line (error message)
+        stackLines.forEach((line) =>
+          console.log(chalk.dim(`  ${line.trim()}`))
+        );
+      }
+    } else {
+      console.log(chalk.red(String(error)));
+    }
+
+    process.exit(exitCode);
   }
 
   /**
@@ -237,18 +365,16 @@ export class Output {
       this.spinner.clear();
       this.spinner = null;
     }
-  }
-
-  #fmt(
-    labelOrMessage: string,
-    message: string | undefined,
-    bgColorFn: (text: string) => string,
-    fgColorFn: (text: string) => string
-  ): string {
-    if (message !== undefined) {
-      const styled = bgColorFn(` ${labelOrMessage} `);
-      return `\n${styled} ${message}`;
-    }
-    return fgColorFn(labelOrMessage);
+    this.taskStartTime = null;
+    this.taskOriginalMessage = null;
+    this.taskCurrentMessage = null;
+    this.taskLines = [];
+    this.taskMaxLines = 0;
   }
 }
+
+/**
+ * Global singleton output instance
+ * Import and use this anywhere in your code
+ */
+export const out = Output.getInstance();
