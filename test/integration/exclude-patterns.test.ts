@@ -107,16 +107,9 @@ describe("Exclude Patterns", () => {
       sync_enabled: true,
       defaults: {
         exclude_patterns: [".git", "*.tmp", ".pushwork", "*.env"],
-        large_file_threshold: "100MB",
-      },
-      diff: {
-        show_binary: false,
       },
       sync: {
         move_detection_threshold: 0.8,
-        prompt_threshold: 0.5,
-        auto_sync: false,
-        parallel_operations: 4,
       },
     };
     await configManager.save(localConfig);

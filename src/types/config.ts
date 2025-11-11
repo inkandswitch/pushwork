@@ -1,29 +1,22 @@
+import { StorageId } from "@automerge/automerge-repo";
+
+/**
+ * Default sync server configuration
+ */
+export const DEFAULT_SYNC_SERVER = "wss://sync3.automerge.org";
+export const DEFAULT_SYNC_SERVER_STORAGE_ID =
+  "3760df37-a4c6-4f66-9ecd-732039a9385d" as StorageId;
+
 /**
  * Global configuration options
  */
 export interface GlobalConfig {
   sync_server?: string;
-  sync_server_storage_id?: string;
+  sync_server_storage_id?: StorageId;
   exclude_patterns?: string[];
-  large_file_threshold?: string;
-  diff?: {
-    external_tool?: string;
-    show_binary?: boolean;
-  };
   sync?: {
     move_detection_threshold?: number;
-    prompt_threshold?: number;
-    auto_sync?: boolean;
-    parallel_operations?: number;
   };
-}
-
-/**
- * Diff tool settings
- */
-export interface DiffSettings {
-  external_tool?: string;
-  show_binary: boolean;
 }
 
 /**
@@ -31,9 +24,6 @@ export interface DiffSettings {
  */
 export interface SyncSettings {
   move_detection_threshold: number;
-  prompt_threshold: number;
-  auto_sync: boolean;
-  parallel_operations: number;
 }
 
 /**
@@ -41,22 +31,14 @@ export interface SyncSettings {
  */
 export interface DirectoryConfig {
   sync_server?: string;
-  sync_server_storage_id?: string;
+  sync_server_storage_id?: StorageId;
   sync_enabled: boolean;
   root_directory_url?: string; // AutomergeUrl of the root directory document
   defaults: {
     exclude_patterns: string[];
-    large_file_threshold: string;
-  };
-  diff: {
-    external_tool?: string;
-    show_binary: boolean;
   };
   sync: {
     move_detection_threshold: number;
-    prompt_threshold: number;
-    auto_sync: boolean;
-    parallel_operations: number;
   };
 }
 
@@ -67,10 +49,6 @@ export interface CommandOptions {
   dryRun?: boolean;
   verbose?: boolean;
   debug?: boolean;
-  tool?: string;
-  nameOnly?: boolean;
-  oneline?: boolean;
-  remote?: string;
 }
 
 /**
@@ -79,7 +57,7 @@ export interface CommandOptions {
 export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
   syncServer?: string; // Custom sync server URL
-  syncServerStorageId?: string; // Custom sync server storage ID
+  syncServerStorageId?: StorageId; // Custom sync server storage ID
 }
 
 /**
@@ -117,7 +95,7 @@ export interface CheckoutOptions extends CommandOptions {
  */
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
-  syncServerStorageId?: string;
+  syncServerStorageId?: StorageId;
 }
 
 /**

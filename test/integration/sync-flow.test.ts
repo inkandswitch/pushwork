@@ -28,16 +28,9 @@ describe("Sync Flow Integration", () => {
         sync_enabled: true,
         defaults: {
           exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "1MB",
-        },
-        diff: {
-          show_binary: false,
         },
         sync: {
           move_detection_threshold: 0.8,
-          prompt_threshold: 0.5,
-          auto_sync: false,
-          parallel_operations: 2,
         },
       };
 
@@ -59,16 +52,9 @@ describe("Sync Flow Integration", () => {
         sync_enabled: true,
         defaults: {
           exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "5MB",
-        },
-        diff: {
-          show_binary: true,
         },
         sync: {
           move_detection_threshold: 0.9,
-          prompt_threshold: 0.6,
-          auto_sync: true,
-          parallel_operations: 1,
         },
       };
 
@@ -78,8 +64,6 @@ describe("Sync Flow Integration", () => {
       const mergedConfig = await configManager.getMerged();
       expect(mergedConfig.sync_server).toBe("wss://local.server.com");
       expect(mergedConfig.defaults?.exclude_patterns).toContain(".git");
-      expect(mergedConfig.defaults?.large_file_threshold).toBe("5MB");
-      expect(mergedConfig.diff?.show_binary).toBe(true);
       expect(mergedConfig.sync?.move_detection_threshold).toBe(0.9);
     });
   });

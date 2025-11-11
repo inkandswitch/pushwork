@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
-import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
+import { Repo, AutomergeUrl, StorageId } from "@automerge/automerge-repo";
 import * as diffLib from "diff";
 import { spawn } from "child_process";
 import {
@@ -18,6 +18,8 @@ import {
   WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
+  DEFAULT_SYNC_SERVER,
+  DEFAULT_SYNC_SERVER_STORAGE_ID,
 } from "../types";
 import { SyncEngine } from "../core";
 import {
@@ -46,28 +48,24 @@ interface CommandContext {
  */
 function createDefaultConfig(
   syncServer?: string,
-  syncServerStorageId?: string
+  syncServerStorageId?: StorageId
 ): DirectoryConfig {
-  const defaultSyncServer = syncServer || "wss://sync3.automerge.org";
-  const defaultStorageId =
-    syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
-
   return {
-    sync_server: defaultSyncServer,
-    sync_server_storage_id: defaultStorageId,
+    sync_server: syncServer || DEFAULT_SYNC_SERVER,
+    sync_server_storage_id:
+      syncServerStorageId || DEFAULT_SYNC_SERVER_STORAGE_ID,
     sync_enabled: true,
     defaults: {
-      exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
-      large_file_threshold: "100MB",
-    },
-    diff: {
-      show_binary: false,
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".pushwork",
+        ".DS_Store",
+      ],
     },
     sync: {
-      move_detection_threshold: 0.8,
-      prompt_threshold: 0.5,
-      auto_sync: false,
-      parallel_operations: 4,
+      move_detection_threshold: 0.7,
     },
   };
 }
@@ -101,9 +99,7 @@ function validateSyncServerOptions(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  customSyncServer?: string,
-  customStorageId?: string,
-  enableNetwork: boolean = true
+  syncEnabled?: boolean
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
 
@@ -117,23 +113,18 @@ async function setupCommandContext(
 
   // Load configuration
   const configManager = new ConfigManager(resolvedPath);
-  const config = await configManager.getMerged();
+  let config = await configManager.getMerged();
 
-  // Create repo with configurable network setting
-  const repo = await createRepo(resolvedPath, {
-    enableNetwork,
-    syncServer: customSyncServer,
-    syncServerStorageId: customStorageId,
-  });
+  // Override sync_enabled if explicitly specified (e.g., for local-only operations)
+  if (syncEnabled !== undefined) {
+    config = { ...config, sync_enabled: syncEnabled };
+  }
 
-  // Create sync engine with configurable network sync
-  const syncEngine = new SyncEngine(
-    repo,
-    resolvedPath,
-    config.defaults.exclude_patterns,
-    enableNetwork,
-    config.sync_server_storage_id
-  );
+  // Create repo with config
+  const repo = await createRepo(resolvedPath, config);
+
+  // Create sync engine
+  const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
   return {
     repo,
@@ -211,9 +202,6 @@ export async function init(
 
     out.update("Setting up configuration");
     const configManager = new ConfigManager(resolvedPath);
-    const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
-    const defaultStorageId =
-      options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
     const config = createDefaultConfig(
       options.syncServer,
       options.syncServerStorageId
@@ -221,11 +209,7 @@ export async function init(
     await configManager.save(config);
 
     out.update("Creating root directory");
-    const repo = await createRepo(resolvedPath, {
-      enableNetwork: true,
-      syncServer: options.syncServer,
-      syncServerStorageId: options.syncServerStorageId,
-    });
+    const repo = await createRepo(resolvedPath, config);
 
     const rootDoc: DirectoryDocument = {
       "@patchwork": { type: "folder" },
@@ -234,13 +218,7 @@ export async function init(
     const rootHandle = repo.create(rootDoc);
 
     out.update("Scanning existing files");
-    const syncEngine = new SyncEngine(
-      repo,
-      resolvedPath,
-      config.defaults.exclude_patterns,
-      true,
-      defaultStorageId
-    );
+    const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
     await syncEngine.setRootDirectoryUrl(rootHandle.url);
     const result = await span("sync", syncEngine.sync());
@@ -251,7 +229,7 @@ export async function init(
     out.done();
 
     out.obj({
-      Sync: defaultSyncServer,
+      Sync: config.sync_server,
       Files:
         result.filesChanged > 0 ? `${result.filesChanged} added` : undefined,
     });
@@ -461,12 +439,7 @@ export async function diff(
   try {
     out.task("Analyzing changes");
 
-    const { repo, syncEngine } = await setupCommandContext(
-      targetPath,
-      undefined,
-      undefined,
-      false
-    );
+    const { repo, syncEngine } = await setupCommandContext(targetPath, false);
     const preview = await syncEngine.previewChanges();
 
     out.done();
@@ -575,8 +548,6 @@ export async function status(
   try {
     const { repo, syncEngine, config } = await setupCommandContext(
       targetPath,
-      undefined,
-      undefined,
       false
     );
     const syncStatus = await syncEngine.getStatus();
@@ -590,7 +561,7 @@ export async function status(
     statusInfo["Files"] = syncStatus.snapshot
       ? `${fileCount} tracked`
       : undefined;
-    statusInfo["Sync"] = config?.sync_server || "wss://sync3.automerge.org";
+    statusInfo["Sync"] = config?.sync_server;
 
     // Add more detailed info in verbose mode
     if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
@@ -667,8 +638,6 @@ export async function log(
   try {
     const { repo: logRepo, workingDir } = await setupCommandContext(
       targetPath,
-      undefined,
-      undefined,
       false
     );
 
@@ -755,9 +724,6 @@ export async function clone(
 
     out.update("Setting up configuration");
     const configManager = new ConfigManager(resolvedPath);
-    const defaultSyncServer = options.syncServer || "wss://sync3.automerge.org";
-    const defaultStorageId =
-      options.syncServerStorageId || "3760df37-a4c6-4f66-9ecd-732039a9385d";
     const config = createDefaultConfig(
       options.syncServer,
       options.syncServerStorageId
@@ -765,20 +731,10 @@ export async function clone(
     await configManager.save(config);
 
     out.update("Connecting to sync server");
-    const repo = await createRepo(resolvedPath, {
-      enableNetwork: true,
-      syncServer: options.syncServer,
-      syncServerStorageId: options.syncServerStorageId,
-    });
+    const repo = await createRepo(resolvedPath, config);
 
     out.update("Downloading files");
-    const syncEngine = new SyncEngine(
-      repo,
-      resolvedPath,
-      config.defaults.exclude_patterns,
-      true,
-      defaultStorageId
-    );
+    const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
     await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
     const result = await span("sync", syncEngine.sync());
@@ -791,7 +747,7 @@ export async function clone(
     out.obj({
       Path: resolvedPath,
       Files: `${result.filesChanged} downloaded`,
-      Sync: defaultSyncServer,
+      Sync: config.sync_server,
     });
     out.successBlock("CLONED", rootUrl);
   } catch (error) {
@@ -884,12 +840,7 @@ export async function commit(
   try {
     out.task("Committing local changes");
 
-    const { repo, syncEngine } = await setupCommandContext(
-      targetPath,
-      undefined,
-      undefined,
-      false
-    );
+    const { repo, syncEngine } = await setupCommandContext(targetPath, false);
 
     const result = await syncEngine.commitLocal();
     await safeRepoShutdown(repo, "commit");
@@ -927,12 +878,7 @@ export async function ls(
   options: ListOptions = {}
 ): Promise<void> {
   try {
-    const { repo, syncEngine } = await setupCommandContext(
-      targetPath,
-      undefined,
-      undefined,
-      false
-    );
+    const { repo, syncEngine } = await setupCommandContext(targetPath, false);
     const syncStatus = await syncEngine.getStatus();
 
     if (!syncStatus.snapshot) {

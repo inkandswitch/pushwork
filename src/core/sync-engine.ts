@@ -7,6 +7,7 @@ import {
   DirectoryDocument,
   ChangeType,
   MoveCandidate,
+  DirectoryConfig,
 } from "../types";
 import {
   writeFileContent,
@@ -18,7 +19,7 @@ import {
   findFileInDirectoryHierarchy,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
-import { waitForSync, getSyncServerStorageId } from "../utils/network-sync";
+import { waitForSync } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector, DetectedChange } from "./change-detection";
 import { MoveDetector } from "./move-detection";
@@ -41,22 +42,22 @@ export class SyncEngine {
   private snapshotManager: SnapshotManager;
   private changeDetector: ChangeDetector;
   private moveDetector: MoveDetector;
-  private networkSyncEnabled: boolean = true;
   private handlesToWaitOn: DocHandle<unknown>[] = [];
-  private syncServerStorageId?: string;
+  private config: DirectoryConfig;
 
   constructor(
     private repo: Repo,
     private rootPath: string,
-    excludePatterns: string[] = [],
-    networkSyncEnabled: boolean = true,
-    syncServerStorageId?: string
+    config: DirectoryConfig
   ) {
+    this.config = config;
     this.snapshotManager = new SnapshotManager(rootPath);
-    this.changeDetector = new ChangeDetector(repo, rootPath, excludePatterns);
-    this.moveDetector = new MoveDetector();
-    this.networkSyncEnabled = networkSyncEnabled;
-    this.syncServerStorageId = syncServerStorageId;
+    this.changeDetector = new ChangeDetector(
+      repo,
+      rootPath,
+      config.defaults.exclude_patterns
+    );
+    this.moveDetector = new MoveDetector(config.sync.move_detection_threshold);
   }
 
   /**
@@ -209,7 +210,7 @@ export class SyncEngine {
         (async () => {
           attr("documents_to_sync", this.handlesToWaitOn.length);
 
-          if (this.networkSyncEnabled) {
+          if (this.config.sync_enabled) {
             try {
               // If we have a root directory URL, wait for it to sync
               if (snapshot.rootDirectoryUrl) {
@@ -226,7 +227,7 @@ export class SyncEngine {
                   "network_sync",
                   waitForSync(
                     this.handlesToWaitOn,
-                    getSyncServerStorageId(this.syncServerStorageId)
+                    this.config.sync_server_storage_id
                   )
                 );
 

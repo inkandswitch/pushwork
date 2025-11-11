@@ -142,12 +142,3 @@ export async function waitForSync(
     throw error;
   }
 }
-
-/**
- * Get the storage ID for the sync server
- * Using the same ID as patchwork-cli for consistency
- */
-export function getSyncServerStorageId(customStorageId?: string): StorageId {
-  return (customStorageId ||
-    "3760df37-a4c6-4f66-9ecd-732039a9385d") as StorageId;
-}

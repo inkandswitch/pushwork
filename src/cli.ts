@@ -200,7 +200,10 @@ program
   .command("status")
   .summary("Show sync status summary")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("-v, --verbose", "Show detailed status including document info and all tracked files")
+  .option(
+    "-v, --verbose",
+    "Show detailed status including document info and all tracked files"
+  )
   .action(
     withErrorHandling(async (path: string, cmdOptions) => {
       await status(path, {
@@ -298,7 +301,7 @@ program
   .option("--list", "Show full configuration")
   .option(
     "--get <key>",
-    "Get specific config value (dot notation, e.g., sync.auto_sync)"
+    "Get specific config value (dot notation, e.g., sync.move_detection_threshold)"
   )
   .option("--debug", "Show detailed performance timing information")
   .action(
