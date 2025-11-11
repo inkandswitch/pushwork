@@ -971,30 +971,13 @@ export async function watch(
     }
   };
 
-  // Set up file watcher
+  // Set up file watcher - watches everything in the specified directory
   const watcher = fsSync.watch(
     absoluteWatchDir,
     { recursive: true },
     (_eventType, filename) => {
       if (filename) {
-        // Ignore certain files/directories
-        // TODO: Make this configurable
-        const ignored = [
-          "node_modules",
-          ".git",
-          ".pushwork",
-          "dist",
-          "build",
-          ".DS_Store",
-        ];
-
-        const shouldIgnore = ignored.some((pattern) =>
-          filename.includes(pattern)
-        );
-
-        if (!shouldIgnore) {
-          runBuildAndSync();
-        }
+        runBuildAndSync();
       }
     }
   );
