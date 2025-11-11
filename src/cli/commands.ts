@@ -537,27 +537,23 @@ export async function status(
 
   // Show verbose details if requested
   if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
-    try {
-      const rootHandle = await repo.find<DirectoryDocument>(
-        syncStatus.snapshot.rootDirectoryUrl
-      );
-      const rootDoc = await rootHandle.doc();
+    const rootHandle = await repo.find<DirectoryDocument>(
+      syncStatus.snapshot.rootDirectoryUrl
+    );
+    const rootDoc = await rootHandle.doc();
 
-      if (rootDoc) {
-        out.infoBlock("HEADS");
-        out.arr(rootHandle.heads());
+    if (rootDoc) {
+      out.infoBlock("HEADS");
+      out.arr(rootHandle.heads());
 
-        if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
-          out.infoBlock("TRACKED FILES");
-          const filesObj: Record<string, string> = {};
-          syncStatus.snapshot.files.forEach((entry, filePath) => {
-            filesObj[filePath] = entry.url;
-          });
-          out.obj(filesObj);
-        }
+      if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
+        out.infoBlock("TRACKED FILES");
+        const filesObj: Record<string, string> = {};
+        syncStatus.snapshot.files.forEach((entry, filePath) => {
+          filesObj[filePath] = entry.url;
+        });
+        out.obj(filesObj);
       }
-    } catch (error) {
-      out.warn(`Warning: Could not load verbose details: ${error}`);
     }
   }
 
