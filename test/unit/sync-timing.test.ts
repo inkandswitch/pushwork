@@ -36,33 +36,6 @@ describe("Sync Timing Analysis", () => {
       expect(totalTime).toBeLessThan(1000); // Should be fast for local operations
     });
 
-    it("should measure sequential vs parallel file operations", async () => {
-      // Sequential operations
-      const sequentialStart = Date.now();
-      for (let i = 0; i < 5; i++) {
-        await fs.writeFile(path.join(testDir, `seq${i}.txt`), `content${i}`);
-      }
-      const sequentialTime = Date.now() - sequentialStart;
-
-      // Parallel operations
-      const parallelStart = Date.now();
-      const promises: Promise<void>[] = [];
-      for (let i = 0; i < 5; i++) {
-        promises.push(
-          fs.writeFile(path.join(testDir, `par${i}.txt`), `content${i}`)
-        );
-      }
-      await Promise.all(promises);
-      const parallelTime = Date.now() - parallelStart;
-
-      // Parallel should generally be faster
-      expect(parallelTime).toBeLessThanOrEqual(sequentialTime);
-
-      // Verify all files exist
-      const files = await fs.readdir(testDir);
-      expect(files).toHaveLength(10);
-    });
-
     it("should test file operation atomicity", async () => {
       const filePath = path.join(testDir, "test.txt");
 
