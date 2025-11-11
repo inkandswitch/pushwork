@@ -1,7 +1,9 @@
 import * as path from "path";
 import * as fs from "fs/promises";
+import * as fsSync from "fs";
 import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
 import * as diffLib from "diff";
+import { spawn } from "child_process";
 import {
   CloneOptions,
   SyncOptions,
@@ -13,15 +15,21 @@ import {
   ListOptions,
   ConfigOptions,
   DebugOptions,
+  WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
 } from "../types";
 import { SyncEngine } from "../core";
-import { pathExists, ensureDirectoryExists } from "../utils";
+import {
+  pathExists,
+  ensureDirectoryExists,
+  formatRelativePath,
+} from "../utils";
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 import { out } from "./output";
 import { trace, span } from "../tracing";
+import chalk from "chalk";
 
 /**
  * Shared context that commands can use
@@ -1046,6 +1054,218 @@ export async function config(
     out.error(`Config failed: ${error}`);
     out.exit(1);
   }
+}
+
+/**
+ * Watch a directory and sync after build script completes
+ */
+export async function watch(
+  targetPath: string = ".",
+  options: WatchOptions = {}
+): Promise<void> {
+  const script = options.script || "pnpm build";
+  const watchDir = options.watchDir || "src"; // Default to watching 'src' directory
+  const verbose = options.verbose || false;
+
+  try {
+    const { repo, syncEngine, workingDir } = await setupCommandContext(
+      targetPath
+    );
+
+    const absoluteWatchDir = path.resolve(workingDir, watchDir);
+
+    // Check if watch directory exists
+    if (!(await pathExists(absoluteWatchDir))) {
+      out.error(`Watch directory does not exist: ${watchDir}`);
+      await safeRepoShutdown(repo, "watch");
+      out.exit(1);
+      return;
+    }
+
+    out.spicyBlock(
+      "WATCHING",
+      `${chalk.underline(formatRelativePath(watchDir))} for changes...`
+    );
+    out.info(`Build script: ${script}`);
+    out.info(`Working directory: ${workingDir}`);
+
+    let isProcessing = false;
+    let pendingChange = false;
+
+    // Function to run build and sync
+    const runBuildAndSync = async () => {
+      if (isProcessing) {
+        pendingChange = true;
+        return;
+      }
+
+      isProcessing = true;
+      pendingChange = false;
+
+      try {
+        out.spicy(`[${new Date().toLocaleTimeString()}] Changes detected...`);
+        // Run build script
+        const buildResult = await runScript(script, workingDir, verbose);
+
+        if (!buildResult.success) {
+          out.warn("Build script failed");
+          if (buildResult.output) {
+            out.log("");
+            out.log(buildResult.output);
+          }
+          isProcessing = false;
+          if (pendingChange) {
+            setImmediate(() => runBuildAndSync());
+          }
+          return;
+        }
+
+        out.info("Build completed, syncing...");
+
+        // Run sync
+        const result = await syncEngine.sync();
+
+        if (result.success) {
+          if (result.filesChanged === 0 && result.directoriesChanged === 0) {
+            out.success("Already in sync");
+          } else {
+            out.success(
+              `✓ Synced ${result.filesChanged} ${plural(
+                "file",
+                result.filesChanged
+              )}`
+            );
+          }
+        } else {
+          out.warn(
+            `⚠ Partial sync: ${result.filesChanged} updated, ${result.errors.length} errors`
+          );
+          result.errors
+            .slice(0, 3)
+            .forEach((error) =>
+              out.error(`  ${error.path}: ${error.error.message}`)
+            );
+          if (result.errors.length > 3) {
+            out.warn(`  ... and ${result.errors.length - 3} more errors`);
+          }
+        }
+
+        if (result.warnings.length > 0) {
+          result.warnings
+            .slice(0, 3)
+            .forEach((warning) => out.warn(`  ${warning}`));
+          if (result.warnings.length > 3) {
+            out.warn(`  ... and ${result.warnings.length - 3} more warnings`);
+          }
+        }
+      } catch (error) {
+        out.error(`Error during build/sync: ${error}`);
+      } finally {
+        isProcessing = false;
+
+        // If changes occurred while we were processing, run again
+        if (pendingChange) {
+          setImmediate(() => runBuildAndSync());
+        }
+      }
+    };
+
+    // Set up file watcher
+    const watcher = fsSync.watch(
+      absoluteWatchDir,
+      { recursive: true },
+      (_eventType, filename) => {
+        if (filename) {
+          // Ignore certain files/directories
+          // TODO: Make this configurable
+          const ignored = [
+            "node_modules",
+            ".git",
+            ".pushwork",
+            "dist",
+            "build",
+            ".DS_Store",
+          ];
+
+          const shouldIgnore = ignored.some((pattern) =>
+            filename.includes(pattern)
+          );
+
+          if (!shouldIgnore) {
+            runBuildAndSync();
+          }
+        }
+      }
+    );
+
+    // Handle graceful shutdown
+    const shutdown = async () => {
+      out.log("");
+      out.info("Shutting down...");
+      watcher.close();
+      await safeRepoShutdown(repo, "watch");
+      out.rainbow("Goodbye!");
+      process.exit(0);
+    };
+
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
+    // Run initial build and sync
+    await runBuildAndSync();
+
+    // Keep process alive
+    await new Promise(() => {}); // Never resolves, keeps watching
+  } catch (error) {
+    out.errorBlock("FAILED", "Watch failed");
+    out.error(error);
+    out.exit(1);
+  }
+}
+
+/**
+ * Run a shell script and wait for completion
+ */
+async function runScript(
+  script: string,
+  cwd: string,
+  verbose: boolean
+): Promise<{ success: boolean; output?: string }> {
+  return new Promise((resolve) => {
+    const [command, ...args] = script.split(" ");
+    const child = spawn(command, args, {
+      cwd,
+      stdio: verbose ? "inherit" : "pipe", // Show output directly if verbose, otherwise capture
+      shell: true,
+    });
+
+    let output = "";
+
+    // Capture output if not verbose (so we can show it on error)
+    if (!verbose) {
+      child.stdout?.on("data", (data) => {
+        output += data.toString();
+      });
+      child.stderr?.on("data", (data) => {
+        output += data.toString();
+      });
+    }
+
+    child.on("close", (code) => {
+      resolve({
+        success: code === 0,
+        output: !verbose ? output : undefined,
+      });
+    });
+
+    child.on("error", (error) => {
+      out.error(`Failed to run script: ${error.message}`);
+      resolve({
+        success: false,
+        output: !verbose ? output : undefined,
+      });
+    });
+  });
 }
 
 // TODO: Add push and pull commands later

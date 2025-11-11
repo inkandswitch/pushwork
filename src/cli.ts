@@ -16,6 +16,7 @@ import {
   debug,
   ls,
   config,
+  watch,
 } from "./cli/commands";
 
 /**
@@ -322,6 +323,37 @@ program
         list: cmdOptions.list || false,
         get: cmdOptions.get,
         debug: cmdOptions.debug || false,
+      });
+    })
+  );
+
+// Watch command
+program
+  .command("watch")
+  .summary("Watch directory for changes, build, and sync")
+  .argument(
+    "[path]",
+    "Directory path to sync (default: current directory)",
+    "."
+  )
+  .option(
+    "--script <command>",
+    "Build script to run before syncing",
+    "pnpm build"
+  )
+  .option(
+    "--dir <dir>",
+    "Directory to watch for changes (relative to working directory)",
+    "src"
+  )
+  .option("-v, --verbose", "Show build script output")
+  .action(
+    withErrorHandling(async (path: string, cmdOptions) => {
+      await watch(path, {
+        script: cmdOptions.script,
+        watchDir: cmdOptions.dir,
+        dryRun: false,
+        verbose: cmdOptions.verbose || false,
       });
     })
   );

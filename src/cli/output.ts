@@ -79,7 +79,7 @@ export class Output {
   taskLine(message: string, keepOnComplete: boolean = false): void {
     if (!this.spinner) {
       // No active task, just log normally as regular output
-      console.log(message);
+      this.info(message);
       return;
     }
 
@@ -250,6 +250,57 @@ export class Output {
     console.log(
       `\n${chalk.bgGreen.black(` ${label} `)}${message && ` ${message}`}`
     );
+  }
+
+  /**
+   * Show success message (green text)
+   */
+  spicy(message: string): void {
+    this.#stopTask();
+    console.log(chalk.cyan(message));
+  }
+
+  /**
+   * Show success block (green background label + optional message)
+   */
+  spicyBlock(label: string, message: string = ""): void {
+    this.#stopTask();
+    console.log(
+      `\n${chalk.bgCyan.black(` ${label} `)}${message && ` ${message}`}`
+    );
+  }
+
+  /**
+   * Show message with rainbow gradient
+   */
+  rainbow(message: string): void {
+    this.#stopTask();
+
+    // Rainbow colors in order
+    const colors = [
+      chalk.red,
+      chalk.rgb(255, 165, 0), // orange
+      chalk.yellow,
+      chalk.green,
+      chalk.cyan,
+      chalk.blue,
+      chalk.magenta,
+    ];
+
+    const chars = message.split("");
+    const colorCount = colors.length;
+
+    // Spread colors across the string
+    const rainbow = chars
+      .map((char, i) => {
+        // Calculate which color to use based on position
+        const colorIndex = Math.floor((i / chars.length) * colorCount);
+        const color = colors[Math.min(colorIndex, colorCount - 1)];
+        return color(char);
+      })
+      .join("");
+
+    console.log(rainbow);
   }
 
   /**

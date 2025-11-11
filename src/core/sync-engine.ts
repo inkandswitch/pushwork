@@ -14,6 +14,7 @@ import {
   getFileExtension,
   normalizePath,
   getEnhancedMimeType,
+  formatRelativePath,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { waitForSync, getSyncServerStorageId } from "../utils/network-sync";
@@ -984,7 +985,9 @@ export class SyncEngine {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
             out.taskLine(
-              `Removed ${fileName} from directory ${directoryPath || "root"}`
+              `Removed ${fileName} from ${
+                formatRelativePath(directoryPath) || "root"
+              }`
             );
           }
         });
@@ -997,7 +1000,9 @@ export class SyncEngine {
             doc.docs.splice(indexToRemove, 1);
             didChange = true;
             out.taskLine(
-              `Removed ${fileName} from directory ${directoryPath || "root"}`
+              `Removed ${fileName} from ${
+                formatRelativePath(directoryPath) || "root"
+              }`
             );
           }
         });

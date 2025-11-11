@@ -148,3 +148,11 @@ export interface ConfigOptions extends CommandOptions {
 export interface DebugOptions extends CommandOptions {
   verbose?: boolean;
 }
+
+/**
+ * Watch command specific options
+ */
+export interface WatchOptions extends CommandOptions {
+  script?: string; // Script to run before syncing
+  watchDir?: string; // Directory to watch (relative to working dir)
+}

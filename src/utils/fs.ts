@@ -271,3 +271,17 @@ export function normalizePath(filePath: string): string {
 export function getRelativePath(basePath: string, filePath: string): string {
   return normalizePath(path.relative(basePath, filePath));
 }
+
+/**
+ * Format a path as a relative path with proper prefix
+ * Ensures paths like "src" become "./src" for clarity
+ * Leaves absolute paths and paths already starting with . or .. unchanged
+ */
+export function formatRelativePath(filePath: string): string {
+  // Already starts with . or / - leave as-is
+  if (filePath.startsWith(".") || filePath.startsWith("/")) {
+    return filePath;
+  }
+  // Add ./ prefix for clarity
+  return `./${filePath}`;
+}
