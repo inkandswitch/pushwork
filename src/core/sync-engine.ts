@@ -101,9 +101,6 @@ export class SyncEngine {
         snapshot = this.snapshotManager.createEmpty();
       }
 
-      // Backup snapshot before starting
-      await this.snapshotManager.backup();
-
       // Detect all changes
       const changes = await this.changeDetector.detectChanges(snapshot);
 
@@ -175,9 +172,6 @@ export class SyncEngine {
           return s || this.snapshotManager.createEmpty();
         })()
       );
-
-      // Backup snapshot before starting
-      await span("backup_snapshot", this.snapshotManager.backup());
 
       // Detect all changes
       const changes = await span(

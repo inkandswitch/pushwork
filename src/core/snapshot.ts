@@ -191,17 +191,6 @@ export class SnapshotManager {
   }
 
   /**
-   * Backup current snapshot
-   */
-  async backup(): Promise<void> {
-    const snapshotPath = this.getSnapshotPath();
-    if (await pathExists(snapshotPath)) {
-      const backupPath = `${snapshotPath}.backup.${Date.now()}`;
-      await fs.copyFile(snapshotPath, backupPath);
-    }
-  }
-
-  /**
    * Validate snapshot integrity
    */
   validate(snapshot: SyncSnapshot): { valid: boolean; errors: string[] } {

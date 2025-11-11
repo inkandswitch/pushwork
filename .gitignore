@@ -58,8 +58,6 @@ pids/
 
 # Automerge/pushwork specific
 .pushwork/
-*.snapshot
-*.backup
 
 # Jest cache
 .jest/
