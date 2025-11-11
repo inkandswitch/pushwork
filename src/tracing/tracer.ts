@@ -9,6 +9,8 @@ import {
   InMemorySpanExporter,
   BatchSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
+import * as fs from "fs/promises";
+import * as path from "path";
 
 /**
  * OpenTelemetry-based tracer for performance instrumentation
@@ -204,6 +206,26 @@ export class Tracer {
       traceEvents: events,
       displayTimeUnit: "ms",
     };
+  }
+
+  /**
+   * Export traces to files in the .pushwork directory
+   * Creates both nested and lane-per-span views for visualization
+   */
+  async exportToFiles(
+    workingDir: string
+  ): Promise<{ nested: string; lanes: string }> {
+    const nested = path.join(workingDir, ".pushwork", "trace.json");
+    const lanes = path.join(workingDir, ".pushwork", "trace-lanes.json");
+
+    await fs.writeFile(nested, JSON.stringify(this.toChromeTrace(), null, 2));
+
+    await fs.writeFile(
+      lanes,
+      JSON.stringify(this.toChromeLanePerSpan(), null, 2)
+    );
+
+    return { nested, lanes };
   }
 
   /**

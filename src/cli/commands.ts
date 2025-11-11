@@ -201,32 +201,15 @@ export async function init(
   // Export flame graphs if debug mode is enabled
   if (options.debug) {
     const tracer = trace(false);
-
-    // Export nested view (default)
-    const traceFile = path.join(resolvedPath, ".pushwork", "trace.json");
-    await fs.writeFile(
-      traceFile,
-      JSON.stringify(tracer.toChromeTrace(), null, 2)
-    );
-
-    // Export lane-per-span view
-    const traceLanesFile = path.join(
-      resolvedPath,
-      ".pushwork",
-      "trace-lanes.json"
-    );
-    await fs.writeFile(
-      traceLanesFile,
-      JSON.stringify(tracer.toChromeLanePerSpan(), null, 2)
-    );
+    const traces = await tracer.exportToFiles(resolvedPath);
 
     out.log("");
     out.log(
-      `FLAME GRAPH (nested): file://${traceFile} (Open in https://ui.perfetto.dev)`,
+      `FLAME GRAPH (nested): file://${traces.nested} (Open in https://ui.perfetto.dev)`,
       "cyan"
     );
     out.log(
-      `FLAME GRAPH (lanes): file://${traceLanesFile} (Open in https://ui.perfetto.dev)`,
+      `FLAME GRAPH (lanes): file://${traces.lanes} (Open in https://ui.perfetto.dev)`,
       "cyan"
     );
   }
@@ -327,32 +310,15 @@ export async function sync(
       // Export flame graphs if debug mode is enabled
       if (options.debug) {
         const tracer = trace(false);
-
-        // Export nested view (default)
-        const traceFile = path.join(workingDir, ".pushwork", "trace.json");
-        await fs.writeFile(
-          traceFile,
-          JSON.stringify(tracer.toChromeTrace(), null, 2)
-        );
-
-        // Export lane-per-span view
-        const traceLanesFile = path.join(
-          workingDir,
-          ".pushwork",
-          "trace-lanes.json"
-        );
-        await fs.writeFile(
-          traceLanesFile,
-          JSON.stringify(tracer.toChromeLanePerSpan(), null, 2)
-        );
+        const traces = await tracer.exportToFiles(workingDir);
 
         out.log("");
         out.log(
-          `FLAME GRAPH (nested): file://${traceFile} (Open in https://ui.perfetto.dev)`,
+          `FLAME GRAPH (nested): file://${traces.nested} (Open in https://ui.perfetto.dev)`,
           "cyan"
         );
         out.log(
-          `FLAME GRAPH (lanes): file://${traceLanesFile} (Open in https://ui.perfetto.dev)`,
+          `FLAME GRAPH (lanes): file://${traces.lanes} (Open in https://ui.perfetto.dev)`,
           "cyan"
         );
       }
@@ -920,7 +886,7 @@ export async function watch(
         return;
       }
 
-      out.info("Build completed, syncing...");
+      out.info("Build completed...");
 
       // Run sync
       out.task("Syncing");
