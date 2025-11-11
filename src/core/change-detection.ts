@@ -105,111 +105,103 @@ export class ChangeDetector {
   ): Promise<DetectedChange[]> {
     const changes: DetectedChange[] = [];
 
-    // Check for new and modified files
-    let fileIndex = 0;
-    // Check all files in parallel for better performance
+    // Check for new and modified files in parallel for better performance
     await Promise.all(
-      Array.from(currentFiles.entries()).map(([relativePath, fileInfo]) =>
-        span(
-          `check_file_${fileIndex++}_${relativePath.replace(/\//g, "_")}`,
-          (async () => {
-            const snapshotEntry = snapshot.files.get(relativePath);
+      Array.from(currentFiles.entries()).map(
+        ([relativePath, fileInfo], index) =>
+          span(
+            `file_${index + 1}_${relativePath.replace(/\//g, "_").slice(-20)}`,
+            (async () => {
+              const snapshotEntry = snapshot.files.get(relativePath);
 
-            if (!snapshotEntry) {
-              // New file
-              attr("status", "new");
-              changes.push({
-                path: relativePath,
-                changeType: ChangeType.LOCAL_ONLY,
-                fileType: fileInfo.type,
-                localContent: fileInfo.content,
-                remoteContent: null,
-              });
-            } else {
-              // Check if content changed - instrument expensive operations
-              const lastKnownContent = await span(
-                "get_content_at_head",
-                this.getContentAtHead(snapshotEntry.url, snapshotEntry.head)
-              );
-
-              const contentChanged = !isContentEqual(
-                fileInfo.content,
-                lastKnownContent
-              );
-              attr("content_changed", contentChanged);
-
-              if (contentChanged) {
-                // Check remote state too - instrument expensive operations
-                const currentRemoteContent = await span(
-                  "get_current_remote_content",
-                  this.getCurrentRemoteContent(snapshotEntry.url)
-                );
-
-                const remoteChanged = !isContentEqual(
-                  lastKnownContent,
-                  currentRemoteContent
-                );
-                attr("remote_changed", remoteChanged);
-
-                const changeType = remoteChanged
-                  ? ChangeType.BOTH_CHANGED
-                  : ChangeType.LOCAL_ONLY;
-                attr("change_type", changeType);
-
-                const remoteHead = await span(
-                  "get_current_remote_head",
-                  this.getCurrentRemoteHead(snapshotEntry.url)
-                );
-
+              if (!snapshotEntry) {
+                // New file
+                attr("status", "new");
                 changes.push({
                   path: relativePath,
-                  changeType,
+                  changeType: ChangeType.LOCAL_ONLY,
                   fileType: fileInfo.type,
                   localContent: fileInfo.content,
-                  remoteContent: currentRemoteContent,
-                  localHead: snapshotEntry.head,
-                  remoteHead,
+                  remoteContent: null,
                 });
               } else {
-                attr("status", "unchanged");
+                // Check if content changed
+                const lastKnownContent = await this.getContentAtHead(
+                  snapshotEntry.url,
+                  snapshotEntry.head
+                );
+
+                const contentChanged = !isContentEqual(
+                  fileInfo.content,
+                  lastKnownContent
+                );
+
+                if (contentChanged) {
+                  // Check remote state too
+                  const currentRemoteContent =
+                    await this.getCurrentRemoteContent(snapshotEntry.url);
+
+                  const remoteChanged = !isContentEqual(
+                    lastKnownContent,
+                    currentRemoteContent
+                  );
+
+                  const changeType = remoteChanged
+                    ? ChangeType.BOTH_CHANGED
+                    : ChangeType.LOCAL_ONLY;
+
+                  attr("change_type", changeType);
+
+                  const remoteHead = await this.getCurrentRemoteHead(
+                    snapshotEntry.url
+                  );
+
+                  changes.push({
+                    path: relativePath,
+                    changeType,
+                    fileType: fileInfo.type,
+                    localContent: fileInfo.content,
+                    remoteContent: currentRemoteContent,
+                    localHead: snapshotEntry.head,
+                    remoteHead,
+                  });
+                } else {
+                  attr("status", "unchanged");
+                }
               }
-            }
-          })()
-        )
+            })()
+          )
       )
     );
 
     // Check for deleted files in parallel
-    let deletedIndex = 0;
     await Promise.all(
       Array.from(snapshot.files.entries())
         .filter(([relativePath]) => !currentFiles.has(relativePath))
-        .map(([relativePath, snapshotEntry]) =>
+        .map(([relativePath, snapshotEntry], index) =>
           span(
-            `check_deleted_${deletedIndex++}_${relativePath.replace(
-              /\//g,
-              "_"
-            )}`,
+            `deleted_${index + 1}_${relativePath
+              .replace(/\//g, "_")
+              .slice(-20)}`,
             (async () => {
               // File was deleted locally
-              const currentRemoteContent = await span(
-                "get_current_remote_content",
-                this.getCurrentRemoteContent(snapshotEntry.url)
+              const currentRemoteContent = await this.getCurrentRemoteContent(
+                snapshotEntry.url
               );
-              const lastKnownContent = await span(
-                "get_content_at_head",
-                this.getContentAtHead(snapshotEntry.url, snapshotEntry.head)
+              const lastKnownContent = await this.getContentAtHead(
+                snapshotEntry.url,
+                snapshotEntry.head
               );
 
               const remoteChanged = !isContentEqual(
                 lastKnownContent,
                 currentRemoteContent
               );
-              attr("remote_changed", remoteChanged);
 
               const changeType = remoteChanged
                 ? ChangeType.BOTH_CHANGED
                 : ChangeType.LOCAL_ONLY;
+
               attr("change_type", changeType);
 
               changes.push({
@@ -219,13 +211,9 @@ export class ChangeDetector {
                 localContent: null,
                 remoteContent: currentRemoteContent,
                 localHead: snapshotEntry.head,
-                remoteHead: await span(
-                  "get_current_remote_head",
-                  this.getCurrentRemoteHead(snapshotEntry.url)
-                ),
+                remoteHead: await this.getCurrentRemoteHead(snapshotEntry.url),
               });
-            })(),
-            { path: relativePath, status: "deleted_locally" }
+            })()
           )
         )
     );
@@ -485,9 +473,8 @@ export class ChangeDetector {
     url: AutomergeUrl,
     heads: UrlHeads
   ): Promise<string | Uint8Array | null> {
-    const handle = await span("repo_find", this.repo.find<FileDocument>(url));
-
-    const doc = await span("view_at_heads", handle.view(heads).doc());
+    const handle = await this.repo.find<FileDocument>(url);
+    const doc = await handle.view(heads).doc();
 
     const content = (doc as FileDocument | undefined)?.content;
     // Convert ImmutableString to regular string
@@ -504,9 +491,8 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      const handle = await span("repo_find", this.repo.find<FileDocument>(url));
-
-      const doc = await span("get_doc", handle.doc());
+      const handle = await this.repo.find<FileDocument>(url);
+      const doc = await handle.doc();
 
       if (!doc) return null;
 
@@ -527,7 +513,7 @@ export class ChangeDetector {
    * Get current head of Automerge document
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
-    const handle = await span("repo_find", this.repo.find<FileDocument>(url));
+    const handle = await this.repo.find<FileDocument>(url);
     return handle.heads();
   }
 

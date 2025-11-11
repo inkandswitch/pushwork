@@ -215,9 +215,8 @@ export class SyncEngine {
               // If we have a root directory URL, wait for it to sync
               if (snapshot.rootDirectoryUrl) {
                 const rootDirUrl = snapshot.rootDirectoryUrl;
-                const rootHandle = await span(
-                  "find_root_directory",
-                  this.repo.find<DirectoryDocument>(rootDirUrl)
+                const rootHandle = await this.repo.find<DirectoryDocument>(
+                  rootDirUrl
                 );
                 this.handlesToWaitOn.push(rootHandle);
               }
