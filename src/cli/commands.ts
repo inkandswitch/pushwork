@@ -28,7 +28,7 @@ import {
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 import { out } from "./output";
-import { trace, span } from "../tracing";
+import { span, setTracingEnabled } from "../utils/trace";
 import chalk from "chalk";
 
 /**
@@ -147,9 +147,7 @@ export async function init(
   options: InitOptions = {}
 ): Promise<void> {
   // Enable tracing if debug mode
-  if (options.debug) {
-    trace(true);
-  }
+  setTracingEnabled(options.debug || false);
 
   const resolvedPath = path.resolve(targetPath);
 
@@ -185,7 +183,7 @@ export async function init(
   // Scan and sync existing files
   out.update("Scanning existing files");
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
-  const result = await span("sync", syncEngine.sync());
+  const result = await span("sync", () => syncEngine.sync());
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo, "init");
@@ -198,22 +196,6 @@ export async function init(
   });
   out.successBlock("INITIALIZED", rootHandle.url);
 
-  // Export flame graphs if debug mode is enabled
-  if (options.debug) {
-    const tracer = trace(false);
-    const traces = await tracer.exportToFiles(resolvedPath);
-
-    out.log("");
-    out.log(
-      `FLAME GRAPH (nested): file://${traces.nested} (Open in https://ui.perfetto.dev)`,
-      "cyan"
-    );
-    out.log(
-      `FLAME GRAPH (lanes): file://${traces.lanes} (Open in https://ui.perfetto.dev)`,
-      "cyan"
-    );
-  }
-
   process.exit();
 }
 
@@ -225,15 +207,11 @@ export async function sync(
   options: SyncOptions
 ): Promise<void> {
   // Enable tracing if debug mode
-  if (options.debug) {
-    trace(true);
-  }
+  setTracingEnabled(options.debug || false);
 
   out.task("Syncing");
 
-  const { repo, syncEngine, workingDir } = await setupCommandContext(
-    targetPath
-  );
+  const { repo, syncEngine } = await setupCommandContext(targetPath);
 
   if (options.dryRun) {
     out.update("Analyzing changes");
@@ -281,7 +259,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await span("sync", syncEngine.sync());
+    const result = await span("sync", () => syncEngine.sync());
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo, "sync");
@@ -305,22 +283,6 @@ export async function sync(
         if (result.warnings.length > 5) {
           out.log(`  ... and ${result.warnings.length - 5} more`);
         }
-      }
-
-      // Export flame graphs if debug mode is enabled
-      if (options.debug) {
-        const tracer = trace(false);
-        const traces = await tracer.exportToFiles(workingDir);
-
-        out.log("");
-        out.log(
-          `FLAME GRAPH (nested): file://${traces.nested} (Open in https://ui.perfetto.dev)`,
-          "cyan"
-        );
-        out.log(
-          `FLAME GRAPH (lanes): file://${traces.lanes} (Open in https://ui.perfetto.dev)`,
-          "cyan"
-        );
       }
     } else {
       out.done("partial", false);
@@ -619,7 +581,7 @@ export async function clone(
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-  const result = await span("sync", syncEngine.sync());
+  const result = await span("sync", () => syncEngine.sync());
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo, "clone");

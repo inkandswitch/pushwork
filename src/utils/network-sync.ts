@@ -1,6 +1,5 @@
 import { DocHandle, StorageId } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
-import { span, attr } from "../tracing";
 import { out } from "../cli/output";
 
 /**
@@ -25,92 +24,83 @@ export async function waitForSync(
 
   let alreadySynced = 0;
 
-  const promises = handlesToWaitOn.map((handle, index) =>
-    span(
-      `doc_${index + 1}_${handle.url.slice(-8)}`,
-      (async () => {
-        // Check if already synced
-        const heads = handle.heads();
-        const syncInfo = handle.getSyncInfo(syncServerStorageId);
-        const remoteHeads = syncInfo?.lastHeads;
-        const wasAlreadySynced = A.equals(heads, remoteHeads);
+  const promises = handlesToWaitOn.map((handle) => {
+    // Check if already synced
+    const heads = handle.heads();
+    const syncInfo = handle.getSyncInfo(syncServerStorageId);
+    const remoteHeads = syncInfo?.lastHeads;
+    const wasAlreadySynced = A.equals(heads, remoteHeads);
 
-        if (wasAlreadySynced) {
-          attr("already_synced", true);
-          alreadySynced++;
-          return;
+    if (wasAlreadySynced) {
+      alreadySynced++;
+      return Promise.resolve();
+    }
+
+    // Wait for convergence
+    return new Promise<void>((resolve, reject) => {
+      let pollInterval: NodeJS.Timeout;
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        clearInterval(pollInterval);
+        handle.off("remote-heads", onRemoteHeads);
+      };
+
+      const onConverged = () => {
+        cleanup();
+        resolve();
+      };
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `Sync timeout after ${timeoutMs}ms for document ${handle.url}`
+          )
+        );
+      }, timeoutMs);
+
+      const isConverged = () => {
+        const localHeads = handle.heads();
+        const info = handle.getSyncInfo(syncServerStorageId);
+        return A.equals(localHeads, info?.lastHeads);
+      };
+
+      const onRemoteHeads = ({
+        storageId,
+      }: {
+        storageId: StorageId;
+        heads: any;
+      }) => {
+        if (storageId === syncServerStorageId && isConverged()) {
+          onConverged();
         }
+      };
 
-        // Wait for convergence
-        return new Promise<void>((resolve, reject) => {
-          let pollInterval: NodeJS.Timeout;
+      const poll = () => {
+        if (isConverged()) {
+          onConverged();
+          return true;
+        }
+        return false;
+      };
 
-          const cleanup = () => {
-            clearTimeout(timeout);
-            clearInterval(pollInterval);
-            handle.off("remote-heads", onRemoteHeads);
-          };
+      // Initial check
+      if (poll()) {
+        return;
+      }
 
-          const onConverged = () => {
-            cleanup();
-            resolve();
-          };
+      // Start polling and event listening
+      pollInterval = setInterval(() => {
+        poll();
+      }, 100);
 
-          const timeout = setTimeout(() => {
-            cleanup();
-            reject(
-              new Error(
-                `Sync timeout after ${timeoutMs}ms for document ${handle.url}`
-              )
-            );
-          }, timeoutMs);
-
-          const isConverged = () => {
-            const localHeads = handle.heads();
-            const info = handle.getSyncInfo(syncServerStorageId);
-            return A.equals(localHeads, info?.lastHeads);
-          };
-
-          const onRemoteHeads = ({
-            storageId,
-          }: {
-            storageId: StorageId;
-            heads: any;
-          }) => {
-            if (storageId === syncServerStorageId && isConverged()) {
-              onConverged();
-            }
-          };
-
-          const poll = () => {
-            if (isConverged()) {
-              onConverged();
-              return true;
-            }
-            return false;
-          };
-
-          // Initial check
-          if (poll()) {
-            return;
-          }
-
-          // Start polling and event listening
-          pollInterval = setInterval(() => {
-            poll();
-          }, 100);
-
-          handle.on("remote-heads", onRemoteHeads);
-        });
-      })()
-    )
-  );
+      handle.on("remote-heads", onRemoteHeads);
+    });
+  });
 
   try {
     await Promise.all(promises);
-    const elapsed = Date.now() - startTime;
-    attr("total_elapsed_ms", elapsed);
-    attr("already_synced_count", alreadySynced);
   } catch (error) {
     const elapsed = Date.now() - startTime;
     out.errorBlock("FAILED", `after ${elapsed}ms`);

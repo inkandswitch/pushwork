@@ -7,7 +7,7 @@ import {
   FileDocument,
   DirectoryDocument,
 } from "../types";
-import { span, attr } from "../tracing";
+import { span } from "../utils/trace";
 import {
   readFileContent,
   listDirectory,
@@ -51,46 +51,30 @@ export class ChangeDetector {
     const changes: DetectedChange[] = [];
 
     // Get current filesystem state
-    const currentFiles = await span(
-      "scan_filesystem",
-      (async () => {
-        const files = await this.getCurrentFilesystemState();
-        return files;
-      })()
-    );
-    attr("file_count", currentFiles.size);
+    const currentFiles = await span("scan_filesystem", async () => {
+      const files = await this.getCurrentFilesystemState();
+      return files;
+    });
 
     // Check for local changes (new, modified, deleted files)
-    const localChanges = await span(
-      "check_local",
-      (async () => {
-        const changes = await this.detectLocalChanges(snapshot, currentFiles);
-        return changes;
-      })()
-    );
-    attr("local_change_count", localChanges.length);
+    const localChanges = await span("check_local", async () => {
+      const changes = await this.detectLocalChanges(snapshot, currentFiles);
+      return changes;
+    });
     changes.push(...localChanges);
 
     // Check for remote changes (changes in Automerge documents)
-    const remoteChanges = await span(
-      "check_remote",
-      (async () => {
-        const changes = await this.detectRemoteChanges(snapshot);
-        return changes;
-      })()
-    );
-    attr("remote_change_count", remoteChanges.length);
+    const remoteChanges = await span("check_remote", async () => {
+      const changes = await this.detectRemoteChanges(snapshot);
+      return changes;
+    });
     changes.push(...remoteChanges);
 
     // Check for new remote documents not in snapshot (critical for clone scenarios)
-    const newRemoteDocuments = await span(
-      "check_new_remote",
-      (async () => {
-        const changes = await this.detectNewRemoteDocuments(snapshot);
-        return changes;
-      })()
-    );
-    attr("new_remote_count", newRemoteDocuments.length);
+    const newRemoteDocuments = await span("check_new_remote", async () => {
+      const changes = await this.detectNewRemoteDocuments(snapshot);
+      return changes;
+    });
     changes.push(...newRemoteDocuments);
 
     return changes;
@@ -108,89 +92,34 @@ export class ChangeDetector {
     // Check for new and modified files in parallel for better performance
     await Promise.all(
       Array.from(currentFiles.entries()).map(
-        ([relativePath, fileInfo], index) =>
-          span(
-            `file_${index + 1}_${relativePath.replace(/\//g, "_").slice(-20)}`,
-            (async () => {
-              const snapshotEntry = snapshot.files.get(relativePath);
+        async ([relativePath, fileInfo]) => {
+          const snapshotEntry = snapshot.files.get(relativePath);
 
-              if (!snapshotEntry) {
-                // New file
-                attr("status", "new");
-                changes.push({
-                  path: relativePath,
-                  changeType: ChangeType.LOCAL_ONLY,
-                  fileType: fileInfo.type,
-                  localContent: fileInfo.content,
-                  remoteContent: null,
-                });
-              } else {
-                // Check if content changed
-                const lastKnownContent = await this.getContentAtHead(
-                  snapshotEntry.url,
-                  snapshotEntry.head
-                );
+          if (!snapshotEntry) {
+            // New file
+            changes.push({
+              path: relativePath,
+              changeType: ChangeType.LOCAL_ONLY,
+              fileType: fileInfo.type,
+              localContent: fileInfo.content,
+              remoteContent: null,
+            });
+          } else {
+            // Check if content changed
+            const lastKnownContent = await this.getContentAtHead(
+              snapshotEntry.url,
+              snapshotEntry.head
+            );
 
-                const contentChanged = !isContentEqual(
-                  fileInfo.content,
-                  lastKnownContent
-                );
+            const contentChanged = !isContentEqual(
+              fileInfo.content,
+              lastKnownContent
+            );
 
-                if (contentChanged) {
-                  // Check remote state too
-                  const currentRemoteContent =
-                    await this.getCurrentRemoteContent(snapshotEntry.url);
-
-                  const remoteChanged = !isContentEqual(
-                    lastKnownContent,
-                    currentRemoteContent
-                  );
-
-                  const changeType = remoteChanged
-                    ? ChangeType.BOTH_CHANGED
-                    : ChangeType.LOCAL_ONLY;
-
-                  attr("change_type", changeType);
-
-                  const remoteHead = await this.getCurrentRemoteHead(
-                    snapshotEntry.url
-                  );
-
-                  changes.push({
-                    path: relativePath,
-                    changeType,
-                    fileType: fileInfo.type,
-                    localContent: fileInfo.content,
-                    remoteContent: currentRemoteContent,
-                    localHead: snapshotEntry.head,
-                    remoteHead,
-                  });
-                } else {
-                  attr("status", "unchanged");
-                }
-              }
-            })()
-          )
-      )
-    );
-
-    // Check for deleted files in parallel
-    await Promise.all(
-      Array.from(snapshot.files.entries())
-        .filter(([relativePath]) => !currentFiles.has(relativePath))
-        .map(([relativePath, snapshotEntry], index) =>
-          span(
-            `deleted_${index + 1}_${relativePath
-              .replace(/\//g, "_")
-              .slice(-20)}`,
-            (async () => {
-              // File was deleted locally
+            if (contentChanged) {
+              // Check remote state too
               const currentRemoteContent = await this.getCurrentRemoteContent(
                 snapshotEntry.url
-              );
-              const lastKnownContent = await this.getContentAtHead(
-                snapshotEntry.url,
-                snapshotEntry.head
               );
 
               const remoteChanged = !isContentEqual(
@@ -202,20 +131,58 @@ export class ChangeDetector {
                 ? ChangeType.BOTH_CHANGED
                 : ChangeType.LOCAL_ONLY;
 
-              attr("change_type", changeType);
+              const remoteHead = await this.getCurrentRemoteHead(
+                snapshotEntry.url
+              );
 
               changes.push({
                 path: relativePath,
                 changeType,
-                fileType: FileType.TEXT, // Will be determined from document
-                localContent: null,
+                fileType: fileInfo.type,
+                localContent: fileInfo.content,
                 remoteContent: currentRemoteContent,
                 localHead: snapshotEntry.head,
-                remoteHead: await this.getCurrentRemoteHead(snapshotEntry.url),
+                remoteHead,
               });
-            })()
-          )
-        )
+            }
+          }
+        }
+      )
+    );
+
+    // Check for deleted files in parallel
+    await Promise.all(
+      Array.from(snapshot.files.entries())
+        .filter(([relativePath]) => !currentFiles.has(relativePath))
+        .map(async ([relativePath, snapshotEntry]) => {
+          // File was deleted locally
+          const currentRemoteContent = await this.getCurrentRemoteContent(
+            snapshotEntry.url
+          );
+          const lastKnownContent = await this.getContentAtHead(
+            snapshotEntry.url,
+            snapshotEntry.head
+          );
+
+          const remoteChanged = !isContentEqual(
+            lastKnownContent,
+            currentRemoteContent
+          );
+
+          const changeType = remoteChanged
+            ? ChangeType.BOTH_CHANGED
+            : ChangeType.LOCAL_ONLY;
+
+          changes.push({
+            path: relativePath,
+            changeType,
+            fileType: FileType.TEXT, // Will be determined from document
+            localContent: null,
+            remoteContent: currentRemoteContent,
+            localHead: snapshotEntry.head,
+            remoteHead: await this.getCurrentRemoteHead(snapshotEntry.url),
+          });
+        })
     );
 
     return changes;
@@ -420,31 +387,27 @@ export class ChangeDetector {
     >();
 
     try {
-      const entries = await span(
-        "list_directory",
+      const entries = await span("list_directory", () =>
         listDirectory(this.rootPath, true, this.excludePatterns)
       );
 
-      await span(
-        "read_all_files",
-        (async () => {
-          const fileEntries = entries.filter(
-            (entry) => entry.type !== FileType.DIRECTORY
-          );
+      await span("read_all_files", async () => {
+        const fileEntries = entries.filter(
+          (entry) => entry.type !== FileType.DIRECTORY
+        );
 
-          await Promise.all(
-            fileEntries.map(async (entry) => {
-              const relativePath = getRelativePath(this.rootPath, entry.path);
-              const content = await readFileContent(entry.path);
+        await Promise.all(
+          fileEntries.map(async (entry) => {
+            const relativePath = getRelativePath(this.rootPath, entry.path);
+            const content = await readFileContent(entry.path);
 
-              fileMap.set(relativePath, {
-                content,
-                type: entry.type,
-              });
-            })
-          );
-        })()
-      );
+            fileMap.set(relativePath, {
+              content,
+              type: entry.type,
+            });
+          })
+        );
+      });
     } catch (error) {
       out.taskLine(`Failed to scan filesystem: ${error}`, true);
     }

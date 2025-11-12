@@ -392,7 +392,7 @@ describe("SnapshotManager", () => {
       const originalTimestamp = snapshot.timestamp;
 
       // Add small delay to ensure timestamp difference
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       snapshotManager.clear(snapshot);
 
