@@ -213,7 +213,7 @@ pnpm test                                              # Unit tests
 
 ```bash
 pushwork sync --debug                                  # Export flame graphs
-clinic flame -- node $(pnpm root -g)/pushwork/dist/cli.js sync
+clinic flame --collect-only -- node --enable-source-maps --prof $(pnpm root -g)/pushwork/dist/cli.js sync
 ```
 
 ## License
