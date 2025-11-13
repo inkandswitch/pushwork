@@ -32,9 +32,9 @@ import { out } from "../cli/output";
  * These delays allow the WebSocket protocol to propagate peer changes after
  * our changes reach the server. waitForSync only ensures OUR changes reached
  * the server, not that we've RECEIVED changes from other peers.
+ * TODO: remove need for this to exist.
  */
-const POST_SYNC_DELAY_WITH_CHANGES_MS = 200; // After we pushed changes
-const POST_SYNC_DELAY_NO_CHANGES_MS = 100; // When no changes pushed (shorter delay)
+const POST_SYNC_DELAY_MS = 500; // After we pushed changes
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -226,11 +226,9 @@ export class SyncEngine {
               // Optimization: Only wait if we pushed changes (shorter delay if no changes)
 
               await span("post_sync_delay", async () => {
-                const delayMs =
-                  phase1Result.filesChanged > 0
-                    ? POST_SYNC_DELAY_WITH_CHANGES_MS
-                    : POST_SYNC_DELAY_NO_CHANGES_MS;
-                await new Promise((resolve) => setTimeout(resolve, delayMs));
+                await new Promise((resolve) =>
+                  setTimeout(resolve, POST_SYNC_DELAY_MS)
+                );
               });
             }
           } catch (error) {
