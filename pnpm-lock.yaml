@@ -9,17 +9,17 @@ dependencies:
     specifier: ^3.2.0
     version: 3.2.0
   '@automerge/automerge-repo':
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
+    specifier: ^2.5.0
+    version: 2.5.0
   '@automerge/automerge-repo-network-websocket':
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
+    specifier: ^2.5.0
+    version: 2.5.0
   '@automerge/automerge-repo-storage-indexeddb':
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
+    specifier: ^2.5.0
+    version: 2.5.0
   '@automerge/automerge-repo-storage-nodefs':
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
+    specifier: ^2.5.0
+    version: 2.5.0
   chalk:
     specifier: ^5.3.0
     version: 5.4.1
@@ -35,9 +35,6 @@ dependencies:
   ignore:
     specifier: ^5.3.0
     version: 5.3.2
-  istextorbinary:
-    specifier: ^9.5.0
-    version: 9.5.0
   mime-types:
     specifier: ^2.1.35
     version: 2.1.35
@@ -105,10 +102,10 @@ packages:
       '@jridgewell/trace-mapping': 0.3.29
     dev: true
 
-  /@automerge/automerge-repo-network-websocket@2.5.0-alpha.2:
-    resolution: {integrity: sha512-EtdsSA9PhuiWWbvT36DGylBeGCL7Aop8nSe4FrBYchBCWpqqZOBLdbxD0crwbCUwTBTJy76pXhSHjObQi0y4zQ==}
+  /@automerge/automerge-repo-network-websocket@2.5.0:
+    resolution: {integrity: sha512-zrwbkW8hk3fWkXdeaH+YDfGG63WaB9WLfWYyinZx2AQv4mr6D6UhIhviIjweMmRxMLen6NlIcdu3toHV33ZuKg==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0-alpha.2
+      '@automerge/automerge-repo': 2.5.0
       cbor-x: 1.6.0
       debug: 4.4.1
       eventemitter3: 5.0.1
@@ -120,25 +117,25 @@ packages:
       - utf-8-validate
     dev: false
 
-  /@automerge/automerge-repo-storage-indexeddb@2.5.0-alpha.2:
-    resolution: {integrity: sha512-8NMq64tAIMqIL1+lrBBlDBmIE0Joo8t9VrBK7mGdZerMph9+RDTIcZkZiI7ozY70Ya614OWjmjjuRnPH39xAsQ==}
+  /@automerge/automerge-repo-storage-indexeddb@2.5.0:
+    resolution: {integrity: sha512-7MJYJ5S6K7dHlbvs5/u/v9iexqOeprU/qQonup28r2IoVqwzjuN5ezaoVk6JRBMDI/ZxWfU4rNrqVrVlB49yXA==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0-alpha.2
+      '@automerge/automerge-repo': 2.5.0
     transitivePeerDependencies:
       - supports-color
     dev: false
 
-  /@automerge/automerge-repo-storage-nodefs@2.5.0-alpha.2:
-    resolution: {integrity: sha512-qCy9lIDwAJYu8pmcFIrrkMgUDX+jiNkOG7FYIHGdI7mCzLHhzdlaqtKX/M6Ta21TjqC4bXaBRHhFZTruaKhnQw==}
+  /@automerge/automerge-repo-storage-nodefs@2.5.0:
+    resolution: {integrity: sha512-tvqSh7WjatZsR3LZafzmkanbaJ/oANM+nRPoMgNtRcNXVdlNEuLmXz+FU+kGAaymyZaCWz1X6llGuXN3vCwC6w==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0-alpha.2
+      '@automerge/automerge-repo': 2.5.0
       rimraf: 5.0.10
     transitivePeerDependencies:
       - supports-color
     dev: false
 
-  /@automerge/automerge-repo@2.5.0-alpha.2:
-    resolution: {integrity: sha512-Sjl1CaD4IpmboNIG9/EL9Run+AKrL8/1h3Om1NZp9syBnJN8OWjeG4ttpQce6k8HdPyl8sllAHYy8/Q4Ukh39w==}
+  /@automerge/automerge-repo@2.5.0:
+    resolution: {integrity: sha512-bdxuMuKmxw0ZjwQXecrIX1VrHXf445bYCftNJJ5vqgGWVvINB5ZKFYAbtgPIyu1Y0TXQKvc6eqESaDeL+g8MmA==}
     dependencies:
       '@automerge/automerge': 3.2.0
       bs58check: 3.0.1
@@ -1532,13 +1529,6 @@ packages:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
     dev: false
 
-  /binaryextensions@6.11.0:
-    resolution: {integrity: sha512-sXnYK/Ij80TO3lcqZVV2YgfKN5QjUWIRk/XSm2J/4bd/lPko3lvk0O4ZppH6m+6hB2/GTu+ptNwVFe1xh+QLQw==}
-    engines: {node: '>=4'}
-    dependencies:
-      editions: 6.22.0
-    dev: false
-
   /bl@5.1.0:
     resolution: {integrity: sha512-tv1ZJHLfTDnXE6tMHv73YgSJaWR2AFuPwMntBe7XL/GBFHnT0CLnsHMogfk5+GzCDC5ZWarSCYaIGATZt9dNsQ==}
     dependencies:
@@ -1828,13 +1818,6 @@ packages:
 
   /eastasianwidth@0.2.0:
     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
-    dev: false
-
-  /editions@6.22.0:
-    resolution: {integrity: sha512-UgGlf8IW75je7HZjNDpJdCv4cGJWIi6yumFdZ0R7A8/CIhQiWUjyGLCxdHpd8bmyD1gnkfUNK0oeOXqUS2cpfQ==}
-    engines: {ecmascript: '>= es5', node: '>=4'}
-    dependencies:
-      version-range: 4.15.0
     dev: false
 
   /ejs@3.1.10:
@@ -2453,15 +2436,6 @@ packages:
       html-escaper: 2.0.2
       istanbul-lib-report: 3.0.1
     dev: true
-
-  /istextorbinary@9.5.0:
-    resolution: {integrity: sha512-5mbUj3SiZXCuRf9fT3ibzbSSEWiy63gFfksmGfdOzujPjW3k+z8WvIBxcJHBoQNlaZaiyB25deviif2+osLmLw==}
-    engines: {node: '>=4'}
-    dependencies:
-      binaryextensions: 6.11.0
-      editions: 6.22.0
-      textextensions: 6.11.0
-    dev: false
 
   /jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
@@ -3574,13 +3548,6 @@ packages:
     resolution: {integrity: sha512-N+8UisAXDGk8PFXP4HAzVR9nbfmVJ3zYLAWiTIoqC5v5isinhr+r5uaO8+7r3BMfuNIufIsA7RdpVgacC2cSpw==}
     dev: true
 
-  /textextensions@6.11.0:
-    resolution: {integrity: sha512-tXJwSr9355kFJI3lbCkPpUH5cP8/M0GGy2xLO34aZCjMXBaK3SoPnZwr/oWmo1FdCnELcs4npdCIOFtq9W3ruQ==}
-    engines: {node: '>=4'}
-    dependencies:
-      editions: 6.22.0
-    dev: false
-
   /tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
     dev: true
@@ -3733,11 +3700,6 @@ packages:
       '@types/istanbul-lib-coverage': 2.0.6
       convert-source-map: 2.0.0
     dev: true
-
-  /version-range@4.15.0:
-    resolution: {integrity: sha512-Ck0EJbAGxHwprkzFO966t4/5QkRuzh+/I1RxhLgUKKwEn+Cd8NwM60mE3AqBZg5gYODoXW0EFsQvbZjRlvdqbg==}
-    engines: {node: '>=4'}
-    dev: false
 
   /walker@1.0.8:
     resolution: {integrity: sha512-ts/8E8l5b7kY0vlWLewOkDXMmPdLcVV4GmOQLyxuSswIJsweeFZtAsMF7k1Nszz+TYBQrlYRmzOnr398y1JemQ==}
