@@ -6,6 +6,7 @@ import {
   SyncSnapshot,
   FileDocument,
   DirectoryDocument,
+  DetectedChange,
 } from "../types";
 import { span } from "../utils/trace";
 import {
@@ -17,22 +18,6 @@ import {
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { out } from "../cli/output";
-
-// Re-export ChangeType for other modules
-export { ChangeType } from "../types";
-
-/**
- * Represents a detected change
- */
-export interface DetectedChange {
-  path: string;
-  changeType: ChangeType;
-  fileType: FileType;
-  localContent: string | Uint8Array | null;
-  remoteContent: string | Uint8Array | null;
-  localHead?: UrlHeads;
-  remoteHead?: UrlHeads;
-}
 
 /**
  * Change detection engine

@@ -1,7 +1,7 @@
 import { SyncSnapshot, MoveCandidate } from "../types";
 import { isTextFile } from "../utils";
 import { stringSimilarity } from "../utils/string-similarity";
-import { DetectedChange, ChangeType } from "./change-detection";
+import { ChangeType, DetectedChange } from "../types";
 
 /**
  * Simplified move detection engine

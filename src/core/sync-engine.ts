@@ -8,6 +8,7 @@ import {
   ChangeType,
   MoveCandidate,
   DirectoryConfig,
+  DetectedChange,
 } from "../types";
 import {
   writeFileContent,
@@ -21,7 +22,7 @@ import {
 import { isContentEqual } from "../utils/content";
 import { waitForSync } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
-import { ChangeDetector, DetectedChange } from "./change-detection";
+import { ChangeDetector } from "./change-detection";
 import { MoveDetector } from "./move-detection";
 import { span } from "../utils/trace";
 import { out } from "../cli/output";

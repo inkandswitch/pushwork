@@ -1,4 +1,4 @@
-import { AutomergeUrl } from "@automerge/automerge-repo";
+import { AutomergeUrl, UrlHeads } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 
 /**
@@ -71,4 +71,17 @@ export interface MoveCandidate {
   toPath: string;
   similarity: number;
   newContent?: string | Uint8Array; // Content at destination (may differ from source if modified during move)
+}
+
+/**
+ * Represents a detected change
+ */
+export interface DetectedChange {
+  path: string;
+  changeType: ChangeType;
+  fileType: FileType;
+  localContent: string | Uint8Array | null;
+  remoteContent: string | Uint8Array | null;
+  localHead?: UrlHeads;
+  remoteHead?: UrlHeads;
 }
