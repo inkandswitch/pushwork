@@ -17,6 +17,7 @@ import {
   config,
   watch,
 } from "./commands";
+import { StorageId } from "@automerge/automerge-repo";
 
 const version = require("../package.json").version;
 const program = new Command()
@@ -68,18 +69,14 @@ program
     "."
   )
   .option(
-    "--sync-server <url>",
-    "Custom sync server URL (must be used with --sync-server-storage-id)"
-  )
-  .option(
-    "--sync-server-storage-id <id>",
-    "Custom sync server storage ID (must be used with --sync-server)"
+    "--sync-server <url> <storage-id...>",
+    "Custom sync server URL and storage ID"
   )
   .action(async (path, opts) => {
-    await init(path, {
-      syncServer: opts.syncServer,
-      syncServerStorageId: opts.syncServerStorageId as any,
-    });
+    const [syncServer, syncServerStorageId] = validateSyncServer(
+      opts.syncServer
+    );
+    await init(path, { syncServer, syncServerStorageId });
   });
 
 // Clone command
@@ -93,20 +90,19 @@ program
   .argument("<path>", "Target directory path")
   .option("-f, --force", "Overwrite existing directory", false)
   .option(
-    "--sync-server <url>",
-    "Custom sync server URL (must be used with --sync-server-storage-id)"
-  )
-  .option(
-    "--sync-server-storage-id <id>",
-    "Custom sync server storage ID (must be used with --sync-server)"
+    "--sync-server <url> <storage-id...>",
+    "Custom sync server URL and storage ID"
   )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
+    const [syncServer, syncServerStorageId] = validateSyncServer(
+      opts.syncServer
+    );
     await clone(url, path, {
       force: opts.force,
       verbose: opts.verbose,
-      syncServer: opts.syncServer,
-      syncServerStorageId: opts.syncServerStorageId as any,
+      syncServer,
+      syncServerStorageId,
     });
   });
 
@@ -374,6 +370,25 @@ compdef _pushwork pushwork
 
   console.log(completionScript);
 });
+
+// Helper to validate and extract sync server options
+function validateSyncServer(
+  syncServerOpt: string[] | undefined
+): [string | undefined, StorageId | undefined] {
+  if (!syncServerOpt) {
+    return [undefined, undefined];
+  }
+
+  if (syncServerOpt.length < 2) {
+    console.error(
+      chalk.red("Error: --sync-server requires both URL and storage ID")
+    );
+    process.exit(1);
+  }
+
+  const [syncServer, syncServerStorageId] = syncServerOpt;
+  return [syncServer, syncServerStorageId as StorageId];
+}
 
 process.on("unhandledRejection", (error) => {
   console.log(chalk.bgRed.white(" ERROR "));
