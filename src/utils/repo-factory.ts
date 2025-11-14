@@ -36,18 +36,5 @@ export async function createRepo(
     repo.subscribeToRemotes([config.sync_server_storage_id as StorageId]);
   }
 
-  // Suppress Automerge internal debug output unless explicitly enabled
-  if (!process.env.PUSHWORK_DEBUG) {
-    const originalLog = console.log;
-    console.log = (...args: any[]) => {
-      const str = args[0]?.toString() || "";
-      // Filter out Automerge internal messages and sync progress
-      if (str.includes("emitting saved")) {
-        return;
-      }
-      originalLog(...args);
-    };
-  }
-
   return repo;
 }
