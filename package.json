@@ -82,6 +82,8 @@
     ],
     "setupFilesAfterEnv": [
       "<rootDir>/test/jest.setup.ts"
-    ]
+    ],
+    "maxWorkers": "75%",
+    "maxConcurrency": 10
   }
 }
