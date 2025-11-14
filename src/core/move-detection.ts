@@ -1,22 +1,24 @@
-import { SyncSnapshot, MoveCandidate, SnapshotFileEntry } from "../types";
-import { calculateContentHash, isTextFile } from "../utils";
+import { SyncSnapshot, MoveCandidate } from "../types";
+import { isTextFile } from "../utils";
 import { stringSimilarity } from "../utils/string-similarity";
-import { DetectedChange, ChangeType } from "./change-detection";
+import { ChangeType, DetectedChange } from "../types";
 
 /**
  * Simplified move detection engine
  */
 export class MoveDetector {
-  // Single threshold: either it's a move or it's not
-  private static readonly MOVE_THRESHOLD = 0.7;
+  private readonly moveThreshold: number;
+
+  constructor(moveThreshold: number = 0.7) {
+    this.moveThreshold = moveThreshold;
+  }
 
   /**
    * Detect file moves by analyzing deleted and created files
    */
   async detectMoves(
     changes: DetectedChange[],
-    snapshot: SyncSnapshot,
-    rootPath: string
+    snapshot: SyncSnapshot
   ): Promise<{ moves: MoveCandidate[]; remainingChanges: DetectedChange[] }> {
     const deletedFiles = changes.filter(
       (c) => !c.localContent && c.changeType === ChangeType.LOCAL_ONLY
@@ -53,7 +55,7 @@ export class MoveDetector {
           deletedFile.path
         );
 
-        if (similarity >= MoveDetector.MOVE_THRESHOLD) {
+        if (similarity >= this.moveThreshold) {
           if (!bestMatch || similarity > bestMatch.similarity) {
             bestMatch = { file: createdFile, similarity };
           }

@@ -64,26 +64,3 @@ export interface SyncError {
   error: Error;
   recoverable: boolean;
 }
-
-/**
- * Sync operation type
- */
-export enum SyncOperation {
-  CREATE_FILE = "create_file",
-  UPDATE_FILE = "update_file",
-  DELETE_FILE = "delete_file",
-  MOVE_FILE = "move_file",
-  CREATE_DIRECTORY = "create_directory",
-  DELETE_DIRECTORY = "delete_directory",
-  MOVE_DIRECTORY = "move_directory",
-}
-
-/**
- * Pending sync operation
- */
-export interface PendingSyncOperation {
-  operation: SyncOperation;
-  path: string;
-  newPath?: string;
-  priority: number;
-}

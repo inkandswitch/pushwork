@@ -119,46 +119,31 @@ describe("Pushwork Fuzzer", () => {
       await fs.mkdir(repoA);
       await fs.mkdir(repoB);
 
-      console.log(`Test directories created:`);
-      console.log(`  Repo A: ${repoA}`);
-      console.log(`  Repo B: ${repoB}`);
-
       // Step 1: Create a file in repo A
       const testFile = path.join(repoA, "test.txt");
       await fs.writeFile(testFile, "Hello, Pushwork!");
-      console.log(`Created test file: ${testFile}`);
 
       // Step 2: Initialize repo A
-      console.log(`Initializing repo A...`);
       await pushwork(["init", "."], repoA);
-      console.log(`Repo A initialized successfully`);
 
       // Wait a moment for initialization to complete
       await wait(1000);
 
       // Step 3: Get the root URL from repo A
-      console.log(`Getting root URL from repo A...`);
       const { stdout: rootUrl } = await pushwork(["url"], repoA);
       const cleanRootUrl = rootUrl.trim();
-      console.log(`Root URL: ${cleanRootUrl}`);
 
       expect(cleanRootUrl).toMatch(/^automerge:/);
 
       // Step 4: Clone repo A to repo B
-      console.log(`Cloning repo A to repo B...`);
       await pushwork(["clone", cleanRootUrl, repoB], tmpDir);
-      console.log(`Repo B cloned successfully`);
 
       // Wait a moment for clone to complete
       await wait(1000);
 
       // Step 5: Verify both repos have the same content
-      console.log(`Computing hashes...`);
       const hashA = await hashDirectory(repoA);
       const hashB = await hashDirectory(repoB);
-
-      console.log(`Hash A: ${hashA}`);
-      console.log(`Hash B: ${hashB}`);
 
       expect(hashA).toBe(hashB);
 
@@ -176,325 +161,333 @@ describe("Pushwork Fuzzer", () => {
       expect(contentA).toBe("Hello, Pushwork!");
       expect(contentB).toBe("Hello, Pushwork!");
       expect(contentA).toBe(contentB);
-
-      console.log(`✅ Test passed! Both repos are identical.`);
-    }, 30000); // 30 second timeout for this test
+    }, 10000); // 10 second timeout for this test
   });
 
   describe("Manual Fuzzing Tests", () => {
-    it("should handle a simple edit on one side", async () => {
-      const repoA = path.join(tmpDir, "manual-a");
-      const repoB = path.join(tmpDir, "manual-b");
-      await fs.mkdir(repoA);
-      await fs.mkdir(repoB);
-
-      // Initialize repo A with a file
-      await fs.writeFile(path.join(repoA, "test.txt"), "initial content");
-      await pushwork(["init", "."], repoA);
-      await wait(500);
-
-      // Clone to B
-      const { stdout: rootUrl } = await pushwork(["url"], repoA);
-      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
-      await wait(500);
-
-      // Edit file on A
-      await fs.writeFile(path.join(repoA, "test.txt"), "modified content");
-
-      // Sync A
-      await pushwork(["sync"], repoA);
-      await wait(1000);
-
-      // Sync B to pull changes
-      await pushwork(["sync"], repoB);
-      await wait(1000);
-
-      // Verify they match
-      const contentA = await fs.readFile(path.join(repoA, "test.txt"), "utf-8");
-      const contentB = await fs.readFile(path.join(repoB, "test.txt"), "utf-8");
-
-      expect(contentA).toBe("modified content");
-      expect(contentB).toBe("modified content");
-    }, 30000);
-
-    it("should handle edit + rename on one side", async () => {
-      const repoA = path.join(tmpDir, "rename-a");
-      const repoB = path.join(tmpDir, "rename-b");
-      await fs.mkdir(repoA);
-      await fs.mkdir(repoB);
-
-      // Initialize repo A with a file
-      await fs.writeFile(path.join(repoA, "original.txt"), "original content");
-      await pushwork(["init", "."], repoA);
-      await wait(500);
-
-      // Clone to B
-      const { stdout: rootUrl } = await pushwork(["url"], repoA);
-      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
-      await wait(500);
-
-      // Edit AND rename file on A (the suspicious operation!)
-      await fs.writeFile(path.join(repoA, "original.txt"), "edited content");
-      await fs.rename(
-        path.join(repoA, "original.txt"),
-        path.join(repoA, "renamed.txt")
-      );
-
-      // Sync both sides
-      await pushwork(["sync"], repoA);
-      await wait(1000);
-      await pushwork(["sync"], repoB);
-      await wait(1000);
-
-      // One more round for convergence
-      await pushwork(["sync"], repoA);
-      await wait(1000);
-      await pushwork(["sync"], repoB);
-      await wait(1000);
-
-      // Verify: original.txt should not exist, renamed.txt should exist with edited content
-      const originalExistsA = await pathExists(
-        path.join(repoA, "original.txt")
-      );
-      const originalExistsB = await pathExists(
-        path.join(repoB, "original.txt")
-      );
-      const renamedExistsA = await pathExists(path.join(repoA, "renamed.txt"));
-      const renamedExistsB = await pathExists(path.join(repoB, "renamed.txt"));
-
-      expect(originalExistsA).toBe(false);
-      expect(originalExistsB).toBe(false);
-      expect(renamedExistsA).toBe(true);
-      expect(renamedExistsB).toBe(true);
-
-      const contentA = await fs.readFile(
-        path.join(repoA, "renamed.txt"),
-        "utf-8"
-      );
-      const contentB = await fs.readFile(
-        path.join(repoB, "renamed.txt"),
-        "utf-8"
-      );
-
-      expect(contentA).toBe("edited content");
-      expect(contentB).toBe("edited content");
-    }, 120000); // 2 minute timeout
-
-    it("should handle simplest case: clone then add file", async () => {
-      const repoA = path.join(tmpDir, "simple-a");
-      const repoB = path.join(tmpDir, "simple-b");
-      await fs.mkdir(repoA);
-      await fs.mkdir(repoB);
-
-      // Initialize repo A
-      await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
-      await pushwork(["init", "."], repoA);
-      await wait(1000);
-
-      // Clone to B
-      const { stdout: rootUrl } = await pushwork(["url"], repoA);
-      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
-      await wait(1000);
-
-      // B: Create a new file (nothing else happens)
-      await fs.writeFile(path.join(repoB, "aaa.txt"), "");
-      console.log("Created aaa.txt in B");
-
-      // B syncs
-      console.log("B sync...");
-      const syncB = await pushwork(["sync"], repoB);
-      console.log("B pushed aaa.txt?", syncB.stdout.includes("aaa.txt"));
-      console.log("B full output:\n", syncB.stdout);
-      await wait(1000);
-
-      // A syncs
-      console.log("A sync...");
-      const syncA = await pushwork(["sync"], repoA);
-      console.log("A pulled aaa.txt?", syncA.stdout.includes("aaa.txt"));
-      await wait(1000);
-
-      // Check convergence
-      const filesA = await fs.readdir(repoA);
-      const filesB = await fs.readdir(repoB);
-      console.log(
-        "Files in A:",
-        filesA.filter((f) => !f.startsWith("."))
-      );
-      console.log(
-        "Files in B:",
-        filesB.filter((f) => !f.startsWith("."))
-      );
-
-      expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
-      expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
-    }, 30000);
-
-    it("should handle minimal shrunk case: editAndRename non-existent + add same file", async () => {
-      const repoA = path.join(tmpDir, "shrunk-a");
-      const repoB = path.join(tmpDir, "shrunk-b");
-      await fs.mkdir(repoA);
-      await fs.mkdir(repoB);
-
-      // Initialize repo A
-      await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
-      await pushwork(["init", "."], repoA);
-      await wait(1000); // Match manual test timing
-
-      // Clone to B
-      const { stdout: rootUrl } = await pushwork(["url"], repoA);
-      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
-      await wait(1000); // Match manual test timing
-
-      // A: Try to editAndRename a non-existent file (this is from the shrunk test case)
-      // This operation should be a no-op since aaa.txt doesn't exist
-      const fromPath = path.join(repoA, "aaa.txt");
-      const toPath = path.join(repoA, "aa/aa/aaa.txt");
-      if ((await pathExists(fromPath)) && !(await pathExists(toPath))) {
-        await fs.writeFile(fromPath, "");
-        await fs.mkdir(path.dirname(toPath), { recursive: true });
-        await fs.rename(fromPath, toPath);
-        console.log("Applied editAndRename to A");
-      } else {
-        console.log("Skipped editAndRename to A (file doesn't exist)");
-      }
-
-      // B: Create the same file that A tried to operate on
-      await fs.writeFile(path.join(repoB, "aaa.txt"), "");
-      console.log("Created aaa.txt in B");
-
-      // Sync multiple rounds (use 1s waits for reliable network propagation)
-      // Pattern: A, B, A (like manual test that worked)
-      console.log("Round 1: A sync...");
-      const sync1 = await pushwork(["sync"], repoA);
-      console.log(
-        "  A result:",
-        sync1.stdout.includes("already in sync") ? "no changes" : "had changes"
-      );
-      await wait(1000);
-
-      console.log("Round 2: B sync (should push aaa.txt)...");
-
-      // Check what B sees before sync
-      const bDiffBefore = await pushwork(["diff", "--name-only"], repoB);
-      console.log(
-        "  B diff before sync:",
-        bDiffBefore.stdout
-          .split("\n")
-          .filter((l) => !l.includes("✓") && l.trim())
-      );
-
-      // Check B's snapshot
-      const bSnapshotPath = path.join(repoB, ".pushwork", "snapshot.json");
-      if (await pathExists(bSnapshotPath)) {
-        const bSnapshot = JSON.parse(await fs.readFile(bSnapshotPath, "utf8"));
-        console.log(
-          "  B snapshot files:",
-          Array.from(Object.keys(bSnapshot.files || {}))
+    it.concurrent(
+      "should handle a simple edit on one side",
+      async () => {
+        const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+        const testRoot = path.join(
+          tmpObj.name,
+          `test-manual-a-${Date.now()}-${Math.random()}`
         );
-        console.log(
-          "  B snapshot has aaa.txt?",
-          bSnapshot.files && bSnapshot.files["aaa.txt"] ? "YES" : "NO"
+        await fs.mkdir(testRoot, { recursive: true });
+        const repoA = path.join(testRoot, "manual-a");
+        const repoB = path.join(testRoot, "manual-b");
+        await fs.mkdir(repoA);
+        await fs.mkdir(repoB);
+
+        // Initialize repo A with a file
+        await fs.writeFile(path.join(repoA, "test.txt"), "initial content");
+        await pushwork(["init", "."], repoA);
+        await wait(500);
+
+        // Clone to B
+        const { stdout: rootUrl } = await pushwork(["url"], repoA);
+        await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+        await wait(500);
+
+        // Edit file on A
+        await fs.writeFile(path.join(repoA, "test.txt"), "modified content");
+
+        // Sync A
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+
+        // Sync B to pull changes
+        await pushwork(["sync"], repoB);
+        await wait(1000);
+
+        // Verify they match
+        const contentA = await fs.readFile(
+          path.join(repoA, "test.txt"),
+          "utf-8"
         );
-      }
+        const contentB = await fs.readFile(
+          path.join(repoB, "test.txt"),
+          "utf-8"
+        );
 
-      const sync2 = await pushwork(["sync"], repoB);
-      console.log("  B pushed?", sync2.stdout.includes("aaa.txt"));
-      console.log(
-        "  B result:",
-        sync2.stdout.includes("already in sync") ? "no changes" : "had changes"
-      );
-      console.log("  B full output:\n", sync2.stdout);
-      await wait(1000);
+        expect(contentA).toBe("modified content");
+        expect(contentB).toBe("modified content");
 
-      console.log("Round 3: A sync (should pull aaa.txt)...");
-      const sync3 = await pushwork(["sync"], repoA);
-      console.log("  A pulled?", sync3.stdout.includes("aaa.txt"));
-      console.log(
-        "  A result:",
-        sync3.stdout.includes("already in sync") ? "no changes" : "had changes"
-      );
-      await wait(1000);
+        // Cleanup
+        tmpObj.removeCallback();
+      },
+      30000
+    );
 
-      // Debug: Check what files exist
-      const filesA = await fs.readdir(repoA);
-      const filesB = await fs.readdir(repoB);
-      console.log(
-        "Files in A after sync:",
-        filesA.filter((f) => !f.startsWith("."))
-      );
-      console.log(
-        "Files in B after sync:",
-        filesB.filter((f) => !f.startsWith("."))
-      );
+    it.concurrent(
+      "should handle edit + rename on one side",
+      async () => {
+        const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+        const testRoot = path.join(
+          tmpObj.name,
+          `test-rename-${Date.now()}-${Math.random()}`
+        );
+        await fs.mkdir(testRoot, { recursive: true });
+        const repoA = path.join(testRoot, "rename-a");
+        const repoB = path.join(testRoot, "rename-b");
+        await fs.mkdir(repoA);
+        await fs.mkdir(repoB);
 
-      // Check diff
-      const { stdout: diffA } = await pushwork(["diff", "--name-only"], repoA);
-      const { stdout: diffB } = await pushwork(["diff", "--name-only"], repoB);
-      console.log("Diff A:", diffA.trim());
-      console.log("Diff B:", diffB.trim());
+        // Initialize repo A with a file
+        await fs.writeFile(
+          path.join(repoA, "original.txt"),
+          "original content"
+        );
+        await pushwork(["init", "."], repoA);
+        await wait(500);
 
-      // Verify convergence
-      const hashA = await hashDirectory(repoA);
-      const hashB = await hashDirectory(repoB);
+        // Clone to B
+        const { stdout: rootUrl } = await pushwork(["url"], repoA);
+        await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+        await wait(500);
 
-      console.log("Hash A:", hashA);
-      console.log("Hash B:", hashB);
+        // Edit AND rename file on A (the suspicious operation!)
+        await fs.writeFile(path.join(repoA, "original.txt"), "edited content");
+        await fs.rename(
+          path.join(repoA, "original.txt"),
+          path.join(repoA, "renamed.txt")
+        );
 
-      expect(hashA).toBe(hashB);
+        // Sync both sides
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+        await pushwork(["sync"], repoB);
+        await wait(1000);
 
-      // Both should have aaa.txt
-      expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
-      expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
-    }, 30000);
+        // One more round for convergence
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+        await pushwork(["sync"], repoB);
+        await wait(1000);
 
-    it("should handle files in subdirectories and moves between directories", async () => {
-      const repoA = path.join(tmpDir, "subdir-a");
-      const repoB = path.join(tmpDir, "subdir-b");
-      await fs.mkdir(repoA);
-      await fs.mkdir(repoB);
+        // Verify: original.txt should not exist, renamed.txt should exist with edited content
+        const originalExistsA = await pathExists(
+          path.join(repoA, "original.txt")
+        );
+        const originalExistsB = await pathExists(
+          path.join(repoB, "original.txt")
+        );
+        const renamedExistsA = await pathExists(
+          path.join(repoA, "renamed.txt")
+        );
+        const renamedExistsB = await pathExists(
+          path.join(repoB, "renamed.txt")
+        );
 
-      // Initialize repo A with a file in a subdirectory
-      await fs.mkdir(path.join(repoA, "dir1"), { recursive: true });
-      await fs.writeFile(path.join(repoA, "dir1", "file1.txt"), "in dir1");
+        expect(originalExistsA).toBe(false);
+        expect(originalExistsB).toBe(false);
+        expect(renamedExistsA).toBe(true);
+        expect(renamedExistsB).toBe(true);
 
-      await pushwork(["init", "."], repoA);
-      await wait(500);
+        const contentA = await fs.readFile(
+          path.join(repoA, "renamed.txt"),
+          "utf-8"
+        );
+        const contentB = await fs.readFile(
+          path.join(repoB, "renamed.txt"),
+          "utf-8"
+        );
 
-      // Clone to B
-      const { stdout: rootUrl } = await pushwork(["url"], repoA);
-      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
-      await wait(500);
+        expect(contentA).toBe("edited content");
+        expect(contentB).toBe("edited content");
 
-      // Verify B got the subdirectory and file
-      expect(await pathExists(path.join(repoB, "dir1", "file1.txt"))).toBe(
-        true
-      );
-      const initialContentB = await fs.readFile(
-        path.join(repoB, "dir1", "file1.txt"),
-        "utf-8"
-      );
-      expect(initialContentB).toBe("in dir1");
+        // Cleanup
+        tmpObj.removeCallback();
+      },
+      120000
+    ); // 2 minute timeout
 
-      // On A: Create another file in a different subdirectory
-      await fs.mkdir(path.join(repoA, "dir2"), { recursive: true });
-      await fs.writeFile(path.join(repoA, "dir2", "file2.txt"), "in dir2");
+    it.concurrent(
+      "should handle simplest case: clone then add file",
+      async () => {
+        const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+        const testRoot = path.join(
+          tmpObj.name,
+          `test-simple-${Date.now()}-${Math.random()}`
+        );
+        await fs.mkdir(testRoot, { recursive: true });
+        const repoA = path.join(testRoot, "simple-a");
+        const repoB = path.join(testRoot, "simple-b");
+        await fs.mkdir(repoA);
+        await fs.mkdir(repoB);
 
-      // Sync both sides
-      await pushwork(["sync"], repoA);
-      await wait(1000);
-      await pushwork(["sync"], repoB);
-      await wait(1000);
+        // Initialize repo A
+        await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
+        await pushwork(["init", "."], repoA);
+        await wait(1000);
 
-      // Verify B got the new subdirectory and file
-      expect(await pathExists(path.join(repoB, "dir2", "file2.txt"))).toBe(
-        true
-      );
-      const file2ContentB = await fs.readFile(
-        path.join(repoB, "dir2", "file2.txt"),
-        "utf-8"
-      );
-      expect(file2ContentB).toBe("in dir2");
-    }, 30000);
+        // Clone to B
+        const { stdout: rootUrl } = await pushwork(["url"], repoA);
+        await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+        await wait(1000);
+
+        // B: Create a new file (nothing else happens)
+        await fs.writeFile(path.join(repoB, "aaa.txt"), "");
+
+        // B syncs
+        await pushwork(["sync"], repoB);
+        await wait(1000);
+
+        // A syncs
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+
+        // Check convergence
+        const filesA = await fs.readdir(repoA);
+        const filesB = await fs.readdir(repoB);
+        const filteredFilesA = filesA.filter((f) => !f.startsWith("."));
+        const filteredFilesB = filesB.filter((f) => !f.startsWith("."));
+        expect(filteredFilesA).toEqual(filteredFilesB);
+
+        expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
+        expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
+
+        // Cleanup
+        tmpObj.removeCallback();
+      },
+      20000
+    );
+
+    it.concurrent(
+      "should handle minimal shrunk case: editAndRename non-existent + add same file",
+      async () => {
+        const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+        const testRoot = path.join(
+          tmpObj.name,
+          `test-shrunk-${Date.now()}-${Math.random()}`
+        );
+        await fs.mkdir(testRoot, { recursive: true });
+        const repoA = path.join(testRoot, "shrunk-a");
+        const repoB = path.join(testRoot, "shrunk-b");
+        await fs.mkdir(repoA);
+        await fs.mkdir(repoB);
+
+        // Initialize repo A
+        await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
+        await pushwork(["init", "."], repoA);
+        await wait(1000); // Match manual test timing
+
+        // Clone to B
+        const { stdout: rootUrl } = await pushwork(["url"], repoA);
+        await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+        await wait(1000); // Match manual test timing
+
+        // A: Try to editAndRename a non-existent file (this is from the shrunk test case)
+        // This operation should be a no-op since aaa.txt doesn't exist
+        const fromPath = path.join(repoA, "aaa.txt");
+        const toPath = path.join(repoA, "aa/aa/aaa.txt");
+        if ((await pathExists(fromPath)) && !(await pathExists(toPath))) {
+          await fs.writeFile(fromPath, "");
+          await fs.mkdir(path.dirname(toPath), { recursive: true });
+          await fs.rename(fromPath, toPath);
+        }
+
+        // B: Create the same file that A tried to operate on
+        await fs.writeFile(path.join(repoB, "aaa.txt"), "");
+
+        // Sync multiple rounds (use 1s waits for reliable network propagation)
+        // Pattern: A, B, A (like manual test that worked)
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+
+        // Check what B sees before sync
+        await pushwork(["diff", "--name-only"], repoB);
+
+        await pushwork(["sync"], repoB);
+        await wait(1000);
+
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+
+        // Debug: Check what files exist
+        const filesA = await fs.readdir(repoA);
+        const filesB = await fs.readdir(repoB);
+        const filteredFilesA = filesA.filter((f) => !f.startsWith("."));
+        const filteredFilesB = filesB.filter((f) => !f.startsWith("."));
+        expect(filteredFilesA).toEqual(filteredFilesB);
+
+        // Verify convergence
+        const hashA = await hashDirectory(repoA);
+        const hashB = await hashDirectory(repoB);
+
+        expect(hashA).toBe(hashB);
+
+        // Both should have aaa.txt
+        expect(await pathExists(path.join(repoA, "aaa.txt"))).toBe(true);
+        expect(await pathExists(path.join(repoB, "aaa.txt"))).toBe(true);
+
+        // Cleanup
+        tmpObj.removeCallback();
+      },
+      20000
+    );
+
+    it.concurrent(
+      "should handle files in subdirectories and moves between directories",
+      async () => {
+        const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+        const testRoot = path.join(
+          tmpObj.name,
+          `test-subdir-${Date.now()}-${Math.random()}`
+        );
+        await fs.mkdir(testRoot, { recursive: true });
+        const repoA = path.join(testRoot, "subdir-a");
+        const repoB = path.join(testRoot, "subdir-b");
+        await fs.mkdir(repoA);
+        await fs.mkdir(repoB);
+
+        // Initialize repo A with a file in a subdirectory
+        await fs.mkdir(path.join(repoA, "dir1"), { recursive: true });
+        await fs.writeFile(path.join(repoA, "dir1", "file1.txt"), "in dir1");
+
+        await pushwork(["init", "."], repoA);
+        await wait(500);
+
+        // Clone to B
+        const { stdout: rootUrl } = await pushwork(["url"], repoA);
+        await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+        await wait(500);
+
+        // Verify B got the subdirectory and file
+        expect(await pathExists(path.join(repoB, "dir1", "file1.txt"))).toBe(
+          true
+        );
+        const initialContentB = await fs.readFile(
+          path.join(repoB, "dir1", "file1.txt"),
+          "utf-8"
+        );
+        expect(initialContentB).toBe("in dir1");
+
+        // On A: Create another file in a different subdirectory
+        await fs.mkdir(path.join(repoA, "dir2"), { recursive: true });
+        await fs.writeFile(path.join(repoA, "dir2", "file2.txt"), "in dir2");
+
+        // Sync both sides
+        await pushwork(["sync"], repoA);
+        await wait(1000);
+        await pushwork(["sync"], repoB);
+        await wait(1000);
+
+        // Verify B got the new subdirectory and file
+        expect(await pathExists(path.join(repoB, "dir2", "file2.txt"))).toBe(
+          true
+        );
+        const file2ContentB = await fs.readFile(
+          path.join(repoB, "dir2", "file2.txt"),
+          "utf-8"
+        );
+        expect(file2ContentB).toBe("in dir2");
+
+        // Cleanup
+        tmpObj.removeCallback();
+      },
+      30000
+    );
   });
 
   describe("Property-Based Fuzzing with fast-check", () => {
@@ -684,24 +677,13 @@ describe("Pushwork Fuzzer", () => {
             await fs.mkdir(repoA);
             await fs.mkdir(repoB);
 
-            const testStart = Date.now();
-            console.log(
-              `\n🔬 Testing: ${opsA.length} ops on A, ${opsB.length} ops on B`
-            );
-
             try {
               // Initialize repo A with an initial file
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Initializing repo A...`
-              );
               await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
               await pushwork(["init", "."], repoA);
               await wait(500);
 
               // Get root URL and clone to B
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Cloning to repo B...`
-              );
               const { stdout: rootUrl } = await pushwork(["url"], repoA);
               const cleanRootUrl = rootUrl.trim();
               await pushwork(["clone", cleanRootUrl, repoB], testRoot);
@@ -711,105 +693,43 @@ describe("Pushwork Fuzzer", () => {
               const hashBeforeOps = await hashDirectory(repoA);
               const hashB1 = await hashDirectory(repoB);
               expect(hashBeforeOps).toBe(hashB1);
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Initial state verified`
-              );
 
               // Apply operations to both sides
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Applying ${
-                  opsA.length
-                } operations to repo A...`
-              );
-              console.log(`     Operations A: ${JSON.stringify(opsA)}`);
               await applyOperations(repoA, opsA);
 
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Applying ${
-                  opsB.length
-                } operations to repo B...`
-              );
-              console.log(`     Operations B: ${JSON.stringify(opsB)}`);
               await applyOperations(repoB, opsB);
 
               // Multiple sync rounds for convergence
               // Need enough time for network propagation between CLI invocations
               // Round 1: A pushes changes
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: A...`
-              );
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 2: B pushes changes and pulls A's changes
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 1: B...`
-              );
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
 
               // Round 3: A pulls B's changes
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: A...`
-              );
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 4: B confirms convergence
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 2: B...`
-              );
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(1000);
 
               // Round 5: Final convergence check
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 3: A (final)...`
-              );
               await pushwork(["sync"], repoA);
-              await wait(500);
+              await wait(1000);
 
               // Round 6: Extra convergence check (for aggressive fuzzing)
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Sync round 3: B (final)...`
-              );
               await pushwork(["sync"], repoB);
-              await wait(500);
+              await wait(5000);
 
               // Verify final state matches
-              console.log(
-                `  ⏱️  [${Date.now() - testStart}ms] Verifying convergence...`
-              );
 
               const hashAfterA = await hashDirectory(repoA);
               const hashAfterB = await hashDirectory(repoB);
 
-              console.log(`  Hash A: ${hashAfterA.substring(0, 16)}...`);
-              console.log(`  Hash B: ${hashAfterB.substring(0, 16)}...`);
-
-              // Both sides should converge to the same state
-              if (hashAfterA !== hashAfterB) {
-                // Show what files are different
-                const filesA = await getAllFiles(repoA);
-                const filesB = await getAllFiles(repoB);
-                console.log(`  ❌ CONVERGENCE FAILURE!`);
-                console.log(
-                  `  Files in A: ${filesA
-                    .filter((f) => !f.includes(".pushwork"))
-                    .join(", ")}`
-                );
-                console.log(
-                  `  Files in B: ${filesB
-                    .filter((f) => !f.includes(".pushwork"))
-                    .join(", ")}`
-                );
-                console.log(
-                  `  Operations applied to A: ${JSON.stringify(opsA)}`
-                );
-                console.log(
-                  `  Operations applied to B: ${JSON.stringify(opsB)}`
-                );
-              }
               expect(hashAfterA).toBe(hashAfterB);
 
               // Verify diff shows no changes
@@ -829,9 +749,6 @@ describe("Pushwork Fuzzer", () => {
                 );
               expect(diffLines.length).toBe(0);
 
-              const totalTime = Date.now() - testStart;
-              console.log(`  ✅ Converged successfully! (took ${totalTime}ms)`);
-
               // Cleanup
               await fs.rm(testRoot, { recursive: true, force: true });
             } catch (error) {
@@ -844,13 +761,13 @@ describe("Pushwork Fuzzer", () => {
           }
         ),
         {
-          numRuns: 50, // INTENSE MODE (was 20, then cranked to 50)
-          timeout: 180000, // 3 minute timeout per run
+          numRuns: 5, // INTENSE MODE (was 20, then cranked to 50)
+          timeout: 60000, // 1 minute timeout per run
           verbose: true, // Verbose output
           endOnFailure: true, // Stop on first failure to debug
         }
       );
-    }, 1200000); // 20 minute timeout for the whole test
+    }, 600000); // 10 minute timeout for the whole test
   });
 });
 

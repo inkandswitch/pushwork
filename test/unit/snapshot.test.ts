@@ -1,12 +1,7 @@
-import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { SnapshotManager } from "../../src/core/snapshot";
-import {
-  SyncSnapshot,
-  SnapshotFileEntry,
-  SnapshotDirectoryEntry,
-} from "../../src/types";
+import { SnapshotFileEntry, SnapshotDirectoryEntry } from "../../src/types";
 import { UrlHeads } from "@automerge/automerge-repo";
 
 describe("SnapshotManager", () => {
@@ -352,28 +347,6 @@ describe("SnapshotManager", () => {
     });
   });
 
-  describe("backup", () => {
-    it("should create backup of existing snapshot", async () => {
-      const snapshot = snapshotManager.createEmpty();
-      await snapshotManager.save(snapshot);
-
-      await snapshotManager.backup();
-
-      // Check that backup file exists
-      const syncToolDir = path.join(tmpDir, ".pushwork");
-      const files = await fs.readdir(syncToolDir);
-      const backupFiles = files.filter((f) =>
-        f.startsWith("snapshot.json.backup.")
-      );
-
-      expect(backupFiles.length).toBe(1);
-    });
-
-    it("should not fail when no snapshot exists", async () => {
-      await snapshotManager.backup(); // Should not throw
-    });
-  });
-
   describe("clone", () => {
     it("should create independent copy of snapshot", () => {
       const originalSnapshot = snapshotManager.createEmpty();
@@ -419,7 +392,7 @@ describe("SnapshotManager", () => {
       const originalTimestamp = snapshot.timestamp;
 
       // Add small delay to ensure timestamp difference
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       snapshotManager.clear(snapshot);
 

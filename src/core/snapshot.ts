@@ -11,6 +11,7 @@ import {
   SnapshotDirectoryEntry,
 } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
+import { out } from "../utils/output";
 
 /**
  * Manages sync snapshots for local state tracking
@@ -57,7 +58,7 @@ export class SnapshotManager {
 
       return this.deserializeSnapshot(serializable);
     } catch (error) {
-      console.warn(`Failed to load snapshot: ${error}`);
+      out.taskLine(`Failed to load snapshot: ${error}`);
       return null;
     }
   }
@@ -187,17 +188,6 @@ export class SnapshotManager {
       directories: snapshot.directories.size,
       timestamp: new Date(snapshot.timestamp),
     };
-  }
-
-  /**
-   * Backup current snapshot
-   */
-  async backup(): Promise<void> {
-    const snapshotPath = this.getSnapshotPath();
-    if (await pathExists(snapshotPath)) {
-      const backupPath = `${snapshotPath}.backup.${Date.now()}`;
-      await fs.copyFile(snapshotPath, backupPath);
-    }
   }
 
   /**

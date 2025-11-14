@@ -1,7 +1,12 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { GlobalConfig, DirectoryConfig } from "../types";
+import {
+  GlobalConfig,
+  DirectoryConfig,
+  DEFAULT_SYNC_SERVER,
+  DEFAULT_SYNC_SERVER_STORAGE_ID,
+} from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
 
 /**
@@ -10,7 +15,8 @@ import { pathExists, ensureDirectoryExists } from "../utils";
 export class ConfigManager {
   private static readonly GLOBAL_CONFIG_DIR = ".pushwork";
   private static readonly CONFIG_FILENAME = "config.json";
-  private static readonly LOCAL_CONFIG_DIR = ".pushwork";
+
+  static readonly CONFIG_DIR = ".pushwork";
 
   constructor(private workingDir?: string) {}
 
@@ -34,7 +40,7 @@ export class ConfigManager {
     }
     return path.join(
       this.workingDir,
-      ConfigManager.LOCAL_CONFIG_DIR,
+      ConfigManager.CONFIG_DIR,
       ConfigManager.CONFIG_FILENAME
     );
   }
@@ -52,7 +58,7 @@ export class ConfigManager {
       const content = await fs.readFile(configPath, "utf8");
       return JSON.parse(content) as GlobalConfig;
     } catch (error) {
-      console.warn(`Failed to load global config: ${error}`);
+      // Failed to load global config
       return null;
     }
   }
@@ -89,7 +95,7 @@ export class ConfigManager {
       const content = await fs.readFile(configPath, "utf8");
       return JSON.parse(content) as DirectoryConfig;
     } catch (error) {
-      console.warn(`Failed to load local config: ${error}`);
+      // Failed to load local config
       return null;
     }
   }
@@ -113,6 +119,44 @@ export class ConfigManager {
     }
   }
 
+  private getDefaultGlobalConfig(): GlobalConfig {
+    return {
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".DS_Store",
+        ".pushwork",
+      ],
+      sync_server: DEFAULT_SYNC_SERVER,
+      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      sync: {
+        move_detection_threshold: 0.7,
+      },
+    };
+  }
+
+  /**
+   * Get default configuration
+   */
+  private getDefaultConfig(): DirectoryConfig {
+    return {
+      sync_enabled: true,
+      sync_server: DEFAULT_SYNC_SERVER,
+      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".pushwork",
+        ".DS_Store",
+      ],
+      sync: {
+        move_detection_threshold: 0.7,
+      },
+    };
+  }
+
   /**
    * Get merged configuration (global + local)
    */
@@ -120,27 +164,8 @@ export class ConfigManager {
     const globalConfig = await this.loadGlobal();
     const localConfig = await this.load();
 
-    // Create default configuration
-    const defaultConfig: DirectoryConfig = {
-      sync_enabled: true,
-      sync_server_storage_id: "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      defaults: {
-        exclude_patterns: [".git", "node_modules", "*.tmp", ".pushwork"],
-        large_file_threshold: "100MB",
-      },
-      diff: {
-        show_binary: false,
-      },
-      sync: {
-        move_detection_threshold: 0.8,
-        prompt_threshold: 0.5,
-        auto_sync: false,
-        parallel_operations: 4,
-      },
-    };
-
     // Merge configurations: default < global < local
-    let merged = { ...defaultConfig };
+    let merged = this.getDefaultConfig();
 
     if (globalConfig) {
       merged = this.mergeConfigs(merged, globalConfig);
@@ -151,6 +176,18 @@ export class ConfigManager {
     }
 
     return merged;
+  }
+
+  /**
+   * Initialize with CLI option overrides
+   * Creates a new config with defaults + CLI overrides and saves it
+   */
+  async initializeWithOverrides(
+    overrides: Partial<DirectoryConfig> = {}
+  ): Promise<DirectoryConfig> {
+    const config = this.mergeConfigs(this.getDefaultConfig(), overrides);
+    await this.save(config);
+    return config;
   }
 
   /**
@@ -179,25 +216,7 @@ export class ConfigManager {
 
     // Handle GlobalConfig structure
     if ("exclude_patterns" in override && override.exclude_patterns) {
-      merged.defaults.exclude_patterns = override.exclude_patterns;
-    }
-
-    if ("large_file_threshold" in override && override.large_file_threshold) {
-      merged.defaults.large_file_threshold = override.large_file_threshold;
-    }
-
-    // Handle DirectoryConfig structure
-    if ("defaults" in override && override.defaults) {
-      merged.defaults = { ...merged.defaults, ...override.defaults };
-    }
-
-    if ("diff" in override && override.diff) {
-      // Merge diff settings, ensuring show_binary has a default
-      merged.diff = {
-        ...merged.diff,
-        ...override.diff,
-        show_binary: override.diff.show_binary ?? merged.diff.show_binary,
-      };
+      merged.exclude_patterns = override.exclude_patterns;
     }
 
     if ("sync" in override && override.sync) {
@@ -211,28 +230,7 @@ export class ConfigManager {
    * Create default global configuration
    */
   async createDefaultGlobal(): Promise<void> {
-    const defaultGlobal: GlobalConfig = {
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".DS_Store",
-        ".pushwork",
-      ],
-      large_file_threshold: "100MB",
-      sync_server: "wss://sync3.automerge.org",
-      sync_server_storage_id: "3760df37-a4c6-4f66-9ecd-732039a9385d",
-      diff: {
-        show_binary: false,
-      },
-      sync: {
-        move_detection_threshold: 0.8,
-        prompt_threshold: 0.5,
-        auto_sync: false,
-        parallel_operations: 4,
-      },
-    };
-
+    const defaultGlobal = this.getDefaultGlobalConfig();
     await this.saveGlobal(defaultGlobal);
   }
 
@@ -252,7 +250,7 @@ export class ConfigManager {
   }
 
   /**
-   * Get configuration value by path (e.g., 'sync.auto_sync')
+   * Get configuration value by path (e.g., 'sync.move_detection_threshold')
    */
   async getValue(keyPath: string): Promise<any> {
     const config = await this.getMerged();
@@ -308,21 +306,6 @@ export class ConfigManager {
         config.sync.move_detection_threshold > 1
       ) {
         errors.push("move_detection_threshold must be between 0 and 1");
-      }
-    }
-
-    if (config.sync?.prompt_threshold !== undefined) {
-      if (
-        config.sync.prompt_threshold < 0 ||
-        config.sync.prompt_threshold > 1
-      ) {
-        errors.push("prompt_threshold must be between 0 and 1");
-      }
-    }
-
-    if (config.sync?.parallel_operations !== undefined) {
-      if (config.sync.parallel_operations < 1) {
-        errors.push("parallel_operations must be at least 1");
       }
     }
 

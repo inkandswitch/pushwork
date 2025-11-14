@@ -9,18 +9,16 @@ import {
 } from "../../src/utils";
 import { SnapshotManager } from "../../src/core/snapshot";
 import { ChangeDetector } from "../../src/core/change-detection";
-import { ChangeType } from "../../src/types";
 
 describe("File Deletion Behavior", () => {
   let testDir: string;
   let snapshotManager: SnapshotManager;
-  let changeDetector: ChangeDetector;
 
   beforeEach(async () => {
     testDir = await fs.mkdtemp(path.join(tmpdir(), "deletion-test-"));
     snapshotManager = new SnapshotManager(testDir);
     // Create a minimal change detector for testing (without Automerge repo)
-    changeDetector = new ChangeDetector(null as any, testDir, []);
+    new ChangeDetector(null as any, testDir, []);
   });
 
   afterEach(async () => {
@@ -230,31 +228,22 @@ describe("File Deletion Behavior", () => {
 
   describe("Debug Information", () => {
     it("should provide detailed info about deletion behavior", async () => {
-      console.log("\n=== Deletion Behavior Debug Info ===");
-
       const filePath = path.join(testDir, "debug.txt");
       const content = "Debug test content";
 
-      console.log(`Test directory: ${testDir}`);
-      console.log(`File path: ${filePath}`);
-
       // Create file
       await writeFileContent(filePath, content);
-      console.log(`✅ File created successfully`);
 
       // Verify file content
       const readBack = await readFileContent(filePath);
-      console.log(`✅ File content verified: "${readBack}"`);
+      expect(readBack).toBe(content);
 
       // Delete file
       await removePath(filePath);
-      console.log(`✅ File deleted successfully`);
 
       // Verify deletion
       const exists = await pathExists(filePath);
-      console.log(`✅ File deletion verified: exists=${exists}`);
-
-      console.log("=== End Debug Info ===\n");
+      expect(exists).toBe(false);
     });
   });
 });

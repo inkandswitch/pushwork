@@ -10,8 +10,6 @@ import {
   ensureDirectoryExists,
   removePath,
   listDirectory,
-  copyFile,
-  movePath,
   calculateContentHash,
   getMimeType,
   getFileExtension,

@@ -4,34 +4,19 @@ import {
   ChangeType,
   FileType,
   SyncSnapshot,
-  SnapshotFileEntry,
-  SnapshotDirectoryEntry,
   FileDocument,
   DirectoryDocument,
+  DetectedChange,
 } from "../types";
 import {
   readFileContent,
-  getFileSystemEntry,
   listDirectory,
-  getRelativePath,
   normalizePath,
+  getRelativePath,
+  findFileInDirectoryHierarchy,
 } from "../utils";
-
-// Re-export ChangeType for other modules
-export { ChangeType } from "../types";
-
-/**
- * Represents a detected change
- */
-export interface DetectedChange {
-  path: string;
-  changeType: ChangeType;
-  fileType: FileType;
-  localContent: string | Uint8Array | null;
-  remoteContent: string | Uint8Array | null;
-  localHead?: UrlHeads;
-  remoteHead?: UrlHeads;
-}
+import { isContentEqual } from "../utils/content";
+import { out } from "../utils/output";
 
 /**
  * Change detection engine
@@ -76,36 +61,82 @@ export class ChangeDetector {
   ): Promise<DetectedChange[]> {
     const changes: DetectedChange[] = [];
 
-    // Check for new and modified files
-    for (const [relativePath, fileInfo] of currentFiles.entries()) {
-      const snapshotEntry = snapshot.files.get(relativePath);
+    // Check for new and modified files in parallel for better performance
+    await Promise.all(
+      Array.from(currentFiles.entries()).map(
+        async ([relativePath, fileInfo]) => {
+          const snapshotEntry = snapshot.files.get(relativePath);
 
-      if (!snapshotEntry) {
-        // New file
-        changes.push({
-          path: relativePath,
-          changeType: ChangeType.LOCAL_ONLY,
-          fileType: fileInfo.type,
-          localContent: fileInfo.content,
-          remoteContent: null,
-        });
-      } else {
-        // Check if content changed
-        const lastKnownContent = await this.getContentAtHead(
-          snapshotEntry.url,
-          snapshotEntry.head
-        );
-        const contentChanged = !this.isContentEqual(
-          fileInfo.content,
-          lastKnownContent
-        );
+          if (!snapshotEntry) {
+            // New file
+            changes.push({
+              path: relativePath,
+              changeType: ChangeType.LOCAL_ONLY,
+              fileType: fileInfo.type,
+              localContent: fileInfo.content,
+              remoteContent: null,
+            });
+          } else {
+            // Check if content changed
+            const lastKnownContent = await this.getContentAtHead(
+              snapshotEntry.url,
+              snapshotEntry.head
+            );
 
-        if (contentChanged) {
-          // Check remote state too
+            const contentChanged = !isContentEqual(
+              fileInfo.content,
+              lastKnownContent
+            );
+
+            if (contentChanged) {
+              // Check remote state too
+              const currentRemoteContent = await this.getCurrentRemoteContent(
+                snapshotEntry.url
+              );
+
+              const remoteChanged = !isContentEqual(
+                lastKnownContent,
+                currentRemoteContent
+              );
+
+              const changeType = remoteChanged
+                ? ChangeType.BOTH_CHANGED
+                : ChangeType.LOCAL_ONLY;
+
+              const remoteHead = await this.getCurrentRemoteHead(
+                snapshotEntry.url
+              );
+
+              changes.push({
+                path: relativePath,
+                changeType,
+                fileType: fileInfo.type,
+                localContent: fileInfo.content,
+                remoteContent: currentRemoteContent,
+                localHead: snapshotEntry.head,
+                remoteHead,
+              });
+            }
+          }
+        }
+      )
+    );
+
+    // Check for deleted files in parallel
+    await Promise.all(
+      Array.from(snapshot.files.entries())
+        .filter(([relativePath]) => !currentFiles.has(relativePath))
+        .map(async ([relativePath, snapshotEntry]) => {
+          // File was deleted locally
           const currentRemoteContent = await this.getCurrentRemoteContent(
             snapshotEntry.url
           );
-          const remoteChanged = !this.isContentEqual(
+          const lastKnownContent = await this.getContentAtHead(
+            snapshotEntry.url,
+            snapshotEntry.head
+          );
+
+          const remoteChanged = !isContentEqual(
             lastKnownContent,
             currentRemoteContent
           );
@@ -117,47 +148,14 @@ export class ChangeDetector {
           changes.push({
             path: relativePath,
             changeType,
-            fileType: fileInfo.type,
-            localContent: fileInfo.content,
+            fileType: FileType.TEXT, // Will be determined from document
+            localContent: null,
             remoteContent: currentRemoteContent,
             localHead: snapshotEntry.head,
             remoteHead: await this.getCurrentRemoteHead(snapshotEntry.url),
           });
-        }
-      }
-    }
-
-    // Check for deleted files
-    for (const [relativePath, snapshotEntry] of snapshot.files.entries()) {
-      if (!currentFiles.has(relativePath)) {
-        // File was deleted locally
-        const currentRemoteContent = await this.getCurrentRemoteContent(
-          snapshotEntry.url
-        );
-        const lastKnownContent = await this.getContentAtHead(
-          snapshotEntry.url,
-          snapshotEntry.head
-        );
-        const remoteChanged = !this.isContentEqual(
-          lastKnownContent,
-          currentRemoteContent
-        );
-
-        const changeType = remoteChanged
-          ? ChangeType.BOTH_CHANGED
-          : ChangeType.LOCAL_ONLY;
-
-        changes.push({
-          path: relativePath,
-          changeType,
-          fileType: FileType.TEXT, // Will be determined from document
-          localContent: null,
-          remoteContent: currentRemoteContent,
-          localHead: snapshotEntry.head,
-          remoteHead: await this.getCurrentRemoteHead(snapshotEntry.url),
-        });
-      }
-    }
+        })
+    );
 
     return changes;
   }
@@ -170,68 +168,72 @@ export class ChangeDetector {
   ): Promise<DetectedChange[]> {
     const changes: DetectedChange[] = [];
 
-    for (const [relativePath, snapshotEntry] of snapshot.files.entries()) {
-      // CRITICAL FIX: Check if file still exists in remote directory listing
-      // Files can be removed from the directory without their document heads changing
-      const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
-        snapshot.rootDirectoryUrl,
-        relativePath
-      );
+    await Promise.all(
+      Array.from(snapshot.files.entries()).map(
+        async ([relativePath, snapshotEntry]) => {
+          // CRITICAL FIX: Check if file still exists in remote directory listing
+          // Files can be removed from the directory without their document heads changing
+          const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
+            snapshot.rootDirectoryUrl,
+            relativePath
+          );
 
-      if (!stillExistsInDirectory) {
-        // File was removed from remote directory listing
-        const localContent = await this.getLocalContent(relativePath);
+          if (!stillExistsInDirectory) {
+            // File was removed from remote directory listing
+            const localContent = await this.getLocalContent(relativePath);
 
-        // Only report as deleted if local file still exists
-        // (if local file is also deleted, detectLocalChanges handles it)
-        if (localContent !== null) {
-          changes.push({
-            path: relativePath,
-            changeType: ChangeType.REMOTE_ONLY,
-            fileType: FileType.TEXT,
-            localContent,
-            remoteContent: null, // File deleted remotely
-            localHead: snapshotEntry.head,
-            remoteHead: snapshotEntry.head,
-          });
+            // Only report as deleted if local file still exists
+            // (if local file is also deleted, detectLocalChanges handles it)
+            if (localContent !== null) {
+              changes.push({
+                path: relativePath,
+                changeType: ChangeType.REMOTE_ONLY,
+                fileType: FileType.TEXT,
+                localContent,
+                remoteContent: null, // File deleted remotely
+                localHead: snapshotEntry.head,
+                remoteHead: snapshotEntry.head,
+              });
+            }
+            return;
+          }
+
+          const currentRemoteHead = await this.getCurrentRemoteHead(
+            snapshotEntry.url
+          );
+
+          if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
+            // Remote document has changed
+            const currentRemoteContent = await this.getCurrentRemoteContent(
+              snapshotEntry.url
+            );
+            const localContent = await this.getLocalContent(relativePath);
+            const lastKnownContent = await this.getContentAtHead(
+              snapshotEntry.url,
+              snapshotEntry.head
+            );
+
+            const localChanged = localContent
+              ? !isContentEqual(localContent, lastKnownContent)
+              : false;
+
+            const changeType = localChanged
+              ? ChangeType.BOTH_CHANGED
+              : ChangeType.REMOTE_ONLY;
+
+            changes.push({
+              path: relativePath,
+              changeType,
+              fileType: await this.getFileTypeFromContent(currentRemoteContent),
+              localContent,
+              remoteContent: currentRemoteContent,
+              localHead: snapshotEntry.head,
+              remoteHead: currentRemoteHead,
+            });
+          }
         }
-        continue;
-      }
-
-      const currentRemoteHead = await this.getCurrentRemoteHead(
-        snapshotEntry.url
-      );
-
-      if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
-        // Remote document has changed
-        const currentRemoteContent = await this.getCurrentRemoteContent(
-          snapshotEntry.url
-        );
-        const localContent = await this.getLocalContent(relativePath);
-        const lastKnownContent = await this.getContentAtHead(
-          snapshotEntry.url,
-          snapshotEntry.head
-        );
-
-        const localChanged = localContent
-          ? !this.isContentEqual(localContent, lastKnownContent)
-          : false;
-
-        const changeType = localChanged
-          ? ChangeType.BOTH_CHANGED
-          : ChangeType.REMOTE_ONLY;
-
-        changes.push({
-          path: relativePath,
-          changeType,
-          fileType: await this.getFileTypeFromContent(currentRemoteContent),
-          localContent,
-          remoteContent: currentRemoteContent,
-          localHead: snapshotEntry.head,
-          remoteHead: currentRemoteHead,
-        });
-      }
-    }
+      )
+    );
 
     return changes;
   }
@@ -259,7 +261,7 @@ export class ChangeDetector {
         changes
       );
     } catch (error) {
-      console.warn(`❌ Failed to discover remote documents: ${error}`);
+      out.taskLine(`Failed to discover remote documents: ${error}`, true);
     }
 
     return changes;
@@ -341,7 +343,7 @@ export class ChangeDetector {
         }
       }
     } catch (error) {
-      console.warn(`❌ Failed to process directory ${currentPath}: ${error}`);
+      out.taskLine(`Failed to process directory: ${error}`, true);
     }
   }
 
@@ -363,8 +365,12 @@ export class ChangeDetector {
         this.excludePatterns
       );
 
-      for (const entry of entries) {
-        if (entry.type !== FileType.DIRECTORY) {
+      const fileEntries = entries.filter(
+        (entry) => entry.type !== FileType.DIRECTORY
+      );
+
+      await Promise.all(
+        fileEntries.map(async (entry) => {
           const relativePath = getRelativePath(this.rootPath, entry.path);
           const content = await readFileContent(entry.path);
 
@@ -372,10 +378,10 @@ export class ChangeDetector {
             content,
             type: entry.type,
           });
-        }
-      }
+        })
+      );
     } catch (error) {
-      console.warn(`Failed to scan filesystem: ${error}`);
+      out.taskLine(`Failed to scan filesystem: ${error}`, true);
     }
 
     return fileMap;
@@ -404,7 +410,13 @@ export class ChangeDetector {
   ): Promise<string | Uint8Array | null> {
     const handle = await this.repo.find<FileDocument>(url);
     const doc = await handle.view(heads).doc();
-    return doc?.content as string | Uint8Array;
+
+    const content = (doc as FileDocument | undefined)?.content;
+    // Convert ImmutableString to regular string
+    if (A.isImmutableString(content)) {
+      return content.toString();
+    }
+    return content as string | Uint8Array;
   }
 
   /**
@@ -420,11 +432,14 @@ export class ChangeDetector {
       if (!doc) return null;
 
       const fileDoc = doc as FileDocument;
-      return fileDoc.content as string | Uint8Array;
+      const content = fileDoc.content;
+      // Convert ImmutableString to regular string
+      if (A.isImmutableString(content)) {
+        return content.toString();
+      }
+      return content as string | Uint8Array;
     } catch (error) {
-      console.warn(
-        `❌ Failed to get current remote content for ${url}: ${error}`
-      );
+      out.taskLine(`Failed to get remote content: ${error}`, true);
       return null;
     }
   }
@@ -433,7 +448,8 @@ export class ChangeDetector {
    * Get current head of Automerge document
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
-    return (await this.repo.find<FileDocument>(url)).heads();
+    const handle = await this.repo.find<FileDocument>(url);
+    return handle.heads();
   }
 
   /**
@@ -448,35 +464,6 @@ export class ChangeDetector {
       return FileType.BINARY;
     } else {
       return FileType.TEXT;
-    }
-  }
-
-  /**
-   * Compare two content pieces for equality
-   */
-  private isContentEqual(
-    content1: string | Uint8Array | null,
-    content2: string | Uint8Array | null
-  ): boolean {
-    if (content1 === content2) return true;
-    if (!content1 || !content2) return false;
-
-    if (typeof content1 !== typeof content2) return false;
-
-    if (typeof content1 === "string") {
-      return content1 === content2;
-    } else {
-      // Compare Uint8Array
-      const buf1 = content1 as Uint8Array;
-      const buf2 = content2 as Uint8Array;
-
-      if (buf1.length !== buf2.length) return false;
-
-      for (let i = 0; i < buf1.length; i++) {
-        if (buf1[i] !== buf2[i]) return false;
-      }
-
-      return true;
     }
   }
 
@@ -504,9 +491,9 @@ export class ChangeDetector {
     );
 
     const localChanged = localContent
-      ? !this.isContentEqual(localContent, lastKnownContent)
+      ? !isContentEqual(localContent, lastKnownContent)
       : true;
-    const remoteChanged = !this.isContentEqual(
+    const remoteChanged = !isContentEqual(
       lastKnownContent,
       currentRemoteContent
     );
@@ -530,63 +517,11 @@ export class ChangeDetector {
     filePath: string
   ): Promise<boolean> {
     if (!rootDirectoryUrl) return false;
-    const entry = await this.findFileInDirectoryHierarchy(
+    const entry = await findFileInDirectoryHierarchy(
+      this.repo,
       rootDirectoryUrl,
       filePath
     );
     return entry !== null;
-  }
-
-  /**
-   * Find a file in the directory hierarchy by path
-   */
-  private async findFileInDirectoryHierarchy(
-    directoryUrl: AutomergeUrl,
-    filePath: string
-  ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-    try {
-      const pathParts = filePath.split("/");
-      let currentDirUrl = directoryUrl;
-
-      // Navigate through directories to find the parent directory
-      for (let i = 0; i < pathParts.length - 1; i++) {
-        const dirName = pathParts[i];
-        const dirHandle = await this.repo.find<DirectoryDocument>(
-          currentDirUrl
-        );
-        const dirDoc = await dirHandle.doc();
-
-        if (!dirDoc) return null;
-
-        const subDirEntry = dirDoc.docs.find(
-          (entry: { name: string; type: string; url: AutomergeUrl }) =>
-            entry.name === dirName && entry.type === "folder"
-        );
-
-        if (!subDirEntry) return null;
-        currentDirUrl = subDirEntry.url;
-      }
-
-      // Now look for the file in the final directory
-      const fileName = pathParts[pathParts.length - 1];
-      const finalDirHandle = await this.repo.find<DirectoryDocument>(
-        currentDirUrl
-      );
-      const finalDirDoc = await finalDirHandle.doc();
-
-      if (!finalDirDoc) return null;
-
-      const fileEntry = finalDirDoc.docs.find(
-        (entry: { name: string; type: string; url: AutomergeUrl }) =>
-          entry.name === fileName && entry.type === "file"
-      );
-
-      return fileEntry || null;
-    } catch (error) {
-      console.warn(
-        `Failed to find file ${filePath} in directory hierarchy: ${error}`
-      );
-      return null;
-    }
   }
 }

@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
-import { ConfigManager } from "../../src/config";
+import { ConfigManager } from "../../src/core";
 import { DirectoryConfig } from "../../src/types";
 
 describe("Sync Flow Integration", () => {
@@ -26,18 +26,9 @@ describe("Sync Flow Integration", () => {
       const testConfig: DirectoryConfig = {
         sync_server: "wss://test.server.com",
         sync_enabled: true,
-        defaults: {
-          exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "1MB",
-        },
-        diff: {
-          show_binary: false,
-        },
+        exclude_patterns: [".git", "*.tmp"],
         sync: {
           move_detection_threshold: 0.8,
-          prompt_threshold: 0.5,
-          auto_sync: false,
-          parallel_operations: 2,
         },
       };
 
@@ -57,18 +48,9 @@ describe("Sync Flow Integration", () => {
       const localConfig: DirectoryConfig = {
         sync_server: "wss://local.server.com",
         sync_enabled: true,
-        defaults: {
-          exclude_patterns: [".git", "*.tmp"],
-          large_file_threshold: "5MB",
-        },
-        diff: {
-          show_binary: true,
-        },
+        exclude_patterns: [".git", "*.tmp"],
         sync: {
           move_detection_threshold: 0.9,
-          prompt_threshold: 0.6,
-          auto_sync: true,
-          parallel_operations: 1,
         },
       };
 
@@ -77,9 +59,7 @@ describe("Sync Flow Integration", () => {
       // Verify merged config
       const mergedConfig = await configManager.getMerged();
       expect(mergedConfig.sync_server).toBe("wss://local.server.com");
-      expect(mergedConfig.defaults?.exclude_patterns).toContain(".git");
-      expect(mergedConfig.defaults?.large_file_threshold).toBe("5MB");
-      expect(mergedConfig.diff?.show_binary).toBe(true);
+      expect(mergedConfig.exclude_patterns).toContain(".git");
       expect(mergedConfig.sync?.move_detection_threshold).toBe(0.9);
     });
   });

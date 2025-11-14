@@ -4,6 +4,7 @@ import * as crypto from "crypto";
 import { glob } from "glob";
 import * as mimeTypes from "mime-types";
 import * as ignore from "ignore";
+import * as A from "@automerge/automerge";
 import { FileSystemEntry, FileType } from "../types";
 import { isEnhancedTextFile } from "./mime-types";
 
@@ -95,12 +96,15 @@ export async function readFileContent(
  */
 export async function writeFileContent(
   filePath: string,
-  content: string | Uint8Array
+  content: string | A.ImmutableString | Uint8Array
 ): Promise<void> {
   await ensureDirectoryExists(path.dirname(filePath));
 
   if (typeof content === "string") {
     await fs.writeFile(filePath, content, "utf8");
+  } else if (A.isImmutableString(content)) {
+    // Convert ImmutableString to regular string for filesystem operations
+    await fs.writeFile(filePath, content.toString(), "utf8");
   } else {
     await fs.writeFile(filePath, content);
   }
@@ -126,7 +130,7 @@ export async function removePath(filePath: string): Promise<void> {
   try {
     const stats = await fs.stat(filePath);
     if (stats.isDirectory()) {
-      await fs.rmdir(filePath, { recursive: true });
+      await fs.rm(filePath, { recursive: true });
     } else {
       await fs.unlink(filePath);
     }
@@ -172,29 +176,25 @@ export async function listDirectory(
       ? path.join(dirPath, "**/*")
       : path.join(dirPath, "*");
 
-    // Convert exclude patterns to glob ignore patterns
-    const ignorePatterns = excludePatterns.map((pattern) => {
-      if (pattern.startsWith(".") && !pattern.includes("*")) {
-        // Directory patterns
-        return `${pattern}/**`;
-      }
-      return pattern;
-    });
-
+    // Use glob to get all paths (with dot files)
+    // Note: We don't use glob's ignore option because it doesn't support gitignore semantics
     const paths = await glob(pattern, {
       dot: true,
-      ignore: ignorePatterns,
     });
 
-    for (const filePath of paths) {
-      // Additional filtering for safety
-      if (!isExcluded(filePath, dirPath, excludePatterns)) {
-        const entry = await getFileSystemEntry(filePath);
-        if (entry) {
-          entries.push(entry);
+    // Parallelize all stat calls for better performance
+    const allEntries = await Promise.all(
+      paths.map(async (filePath) => {
+        // Filter using proper gitignore semantics from the ignore library
+        if (isExcluded(filePath, dirPath, excludePatterns)) {
+          return null;
         }
-      }
-    }
+        return await getFileSystemEntry(filePath);
+      })
+    );
+
+    // Filter out null entries (excluded files or files that couldn't be read)
+    entries.push(...allEntries.filter((e): e is FileSystemEntry => e !== null));
   } catch {
     // Return empty array if directory doesn't exist or can't be read
   }
@@ -232,10 +232,14 @@ export async function movePath(
  * Calculate content hash for change detection
  */
 export async function calculateContentHash(
-  content: string | Uint8Array
+  content: string | A.ImmutableString | Uint8Array
 ): Promise<string> {
   const hash = crypto.createHash("sha256");
-  hash.update(content);
+  if (A.isImmutableString(content)) {
+    hash.update(content.toString());
+  } else {
+    hash.update(content);
+  }
   return hash.digest("hex");
 }
 
@@ -266,4 +270,18 @@ export function normalizePath(filePath: string): string {
  */
 export function getRelativePath(basePath: string, filePath: string): string {
   return normalizePath(path.relative(basePath, filePath));
+}
+
+/**
+ * Format a path as a relative path with proper prefix
+ * Ensures paths like "src" become "./src" for clarity
+ * Leaves absolute paths and paths already starting with . or .. unchanged
+ */
+export function formatRelativePath(filePath: string): string {
+  // Already starts with . or / - leave as-is
+  if (filePath.startsWith(".") || filePath.startsWith("/")) {
+    return filePath;
+  }
+  // Add ./ prefix for clarity
+  return `./${filePath}`;
 }

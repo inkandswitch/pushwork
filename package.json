@@ -13,10 +13,9 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "jest",
+    "test:bail": "jest --bail",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "bench": "tsx bench/runner.ts",
-    "bench:watch": "tsx watch bench/runner.ts",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "clean": "rm -rf dist",
@@ -44,13 +43,13 @@
     "@automerge/automerge-repo-network-websocket": "^2.5.0",
     "@automerge/automerge-repo-storage-indexeddb": "^2.5.0",
     "@automerge/automerge-repo-storage-nodefs": "^2.5.0",
+    "@commander-js/extra-typings": "^14.0.0",
     "chalk": "^5.3.0",
-    "commander": "^11.0.0",
+    "commander": "^14.0.2",
     "diff": "^8.0.2",
     "glob": "^10.3.0",
     "ignore": "^5.3.0",
     "mime-types": "^2.1.35",
-    "myers-diff": "^2.1.0",
     "ora": "^7.0.1"
   },
   "devDependencies": {
@@ -59,12 +58,8 @@
     "@types/mime-types": "^2.1.1",
     "@types/node": "^20.0.0",
     "@types/tmp": "^0.2.4",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
-    "eslint": "^8.50.0",
     "fast-check": "^4.3.0",
     "jest": "^29.7.0",
-    "tinybench": "^2.9.0",
     "tmp": "^0.2.1",
     "ts-jest": "^29.1.0",
     "tsx": "^4.19.2",
@@ -84,6 +79,11 @@
     "collectCoverageFrom": [
       "src/**/*.ts",
       "!src/**/*.d.ts"
-    ]
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/test/jest.setup.ts"
+    ],
+    "maxWorkers": "75%",
+    "maxConcurrency": 10
   }
 }
