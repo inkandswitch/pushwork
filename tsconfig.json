@@ -13,8 +13,6 @@
     "declarationMap": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
     "types": ["node", "jest"],
     "noUnusedLocals": true,
     "noUnusedParameters": true

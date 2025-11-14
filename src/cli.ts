@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { StorageId } from "@automerge/automerge-repo";
 import { Command } from "@commander-js/extra-typings";
 import chalk from "chalk";
 import {
@@ -17,47 +18,12 @@ import {
   config,
   watch,
 } from "./commands";
-import { StorageId } from "@automerge/automerge-repo";
 
 const version = require("../package.json").version;
 const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(version, "-V, --version", "output the version number")
-  .addHelpText(
-    "after",
-    chalk.dim(
-      '\nEnable tab completion by adding this to your ~/.zshrc:\neval "$(pushwork completion)"'
-    )
-  );
-
-// Configure help colors using Commander v13's built-in color support
-program.configureHelp({
-  styleTitle: (str) => chalk.bold(str),
-  styleCommandText: (str) => chalk.white(str),
-  styleCommandDescription: (str) => chalk.dim(str),
-  styleOptionText: (str) => chalk.green(str),
-  styleArgumentText: (str) => chalk.cyan(str),
-  subcommandTerm: (cmd) => {
-    const opts = cmd.options
-      .filter((opt) => opt.flags !== "-h, --help")
-      .map((opt) => opt.short || opt.long)
-      .join(", ");
-
-    const name = chalk.white(cmd.name());
-    const args = cmd.registeredArguments
-      .map((arg) =>
-        arg.required
-          ? chalk.cyan(`<${arg.name()}>`)
-          : chalk.dim(`[${arg.name()}]`)
-      )
-      .join(" ");
-
-    return [name, args, opts && chalk.dim(`[${opts}]`)]
-      .filter(Boolean)
-      .join(" ");
-  },
-});
+  .version(version, "-V, --version", "output the version number");
 
 // Init command
 program
@@ -399,5 +365,40 @@ process.on("unhandledRejection", (error) => {
   }
   process.exit(1);
 });
+
+// Configure help colors using Commander v13's built-in color support
+program
+  .configureHelp({
+    styleTitle: (str) => chalk.bold(str),
+    styleCommandText: (str) => chalk.white(str),
+    styleCommandDescription: (str) => chalk.dim(str),
+    styleOptionText: (str) => chalk.green(str),
+    styleArgumentText: (str) => chalk.cyan(str),
+    subcommandTerm: (cmd) => {
+      const opts = cmd.options
+        .filter((opt) => opt.flags !== "-h, --help")
+        .map((opt) => opt.short || opt.long)
+        .join(", ");
+
+      const name = chalk.white(cmd.name());
+      const args = cmd.registeredArguments
+        .map((arg) =>
+          arg.required
+            ? chalk.cyan(`<${arg.name()}>`)
+            : chalk.dim(`[${arg.name()}]`)
+        )
+        .join(" ");
+
+      return [name, args, opts && chalk.dim(`[${opts}]`)]
+        .filter(Boolean)
+        .join(" ");
+    },
+  })
+  .addHelpText(
+    "after",
+    chalk.dim(
+      '\nEnable tab completion by adding this to your ~/.zshrc:\neval "$(pushwork completion)"'
+    )
+  );
 
 program.parseAsync();
