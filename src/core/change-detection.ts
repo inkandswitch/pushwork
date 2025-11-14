@@ -8,7 +8,6 @@ import {
   DirectoryDocument,
   DetectedChange,
 } from "../types";
-import { span } from "../utils/trace";
 import {
   readFileContent,
   listDirectory,
@@ -36,30 +35,18 @@ export class ChangeDetector {
     const changes: DetectedChange[] = [];
 
     // Get current filesystem state
-    const currentFiles = await span("scan_filesystem", async () => {
-      const files = await this.getCurrentFilesystemState();
-      return files;
-    });
+    const currentFiles = await this.getCurrentFilesystemState();
 
     // Check for local changes (new, modified, deleted files)
-    const localChanges = await span("check_local", async () => {
-      const changes = await this.detectLocalChanges(snapshot, currentFiles);
-      return changes;
-    });
+    const localChanges = await this.detectLocalChanges(snapshot, currentFiles);
     changes.push(...localChanges);
 
     // Check for remote changes (changes in Automerge documents)
-    const remoteChanges = await span("check_remote", async () => {
-      const changes = await this.detectRemoteChanges(snapshot);
-      return changes;
-    });
+    const remoteChanges = await this.detectRemoteChanges(snapshot);
     changes.push(...remoteChanges);
 
     // Check for new remote documents not in snapshot (critical for clone scenarios)
-    const newRemoteDocuments = await span("check_new_remote", async () => {
-      const changes = await this.detectNewRemoteDocuments(snapshot);
-      return changes;
-    });
+    const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot);
     changes.push(...newRemoteDocuments);
 
     return changes;
@@ -372,27 +359,27 @@ export class ChangeDetector {
     >();
 
     try {
-      const entries = await span("list_directory", () =>
-        listDirectory(this.rootPath, true, this.excludePatterns)
+      const entries = await listDirectory(
+        this.rootPath,
+        true,
+        this.excludePatterns
       );
 
-      await span("read_all_files", async () => {
-        const fileEntries = entries.filter(
-          (entry) => entry.type !== FileType.DIRECTORY
-        );
+      const fileEntries = entries.filter(
+        (entry) => entry.type !== FileType.DIRECTORY
+      );
 
-        await Promise.all(
-          fileEntries.map(async (entry) => {
-            const relativePath = getRelativePath(this.rootPath, entry.path);
-            const content = await readFileContent(entry.path);
+      await Promise.all(
+        fileEntries.map(async (entry) => {
+          const relativePath = getRelativePath(this.rootPath, entry.path);
+          const content = await readFileContent(entry.path);
 
-            fileMap.set(relativePath, {
-              content,
-              type: entry.type,
-            });
-          })
-        );
-      });
+          fileMap.set(relativePath, {
+            content,
+            type: entry.type,
+          });
+        })
+      );
     } catch (error) {
       out.taskLine(`Failed to scan filesystem: ${error}`, true);
     }

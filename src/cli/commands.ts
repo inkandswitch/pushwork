@@ -28,7 +28,6 @@ import {
 import { ConfigManager } from "../config";
 import { createRepo } from "../utils/repo-factory";
 import { out } from "./output";
-import { span, setTracingEnabled } from "../utils/trace";
 import chalk from "chalk";
 
 /**
@@ -146,9 +145,6 @@ export async function init(
   targetPath: string,
   options: InitOptions = {}
 ): Promise<void> {
-  // Enable tracing if debug mode
-  setTracingEnabled(options.debug || false);
-
   const resolvedPath = path.resolve(targetPath);
 
   out.task(`Initializing`);
@@ -183,7 +179,7 @@ export async function init(
   // Scan and sync existing files
   out.update("Scanning existing files");
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
-  const result = await span("sync", () => syncEngine.sync());
+  const result = await syncEngine.sync();
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo, "init");
@@ -206,9 +202,6 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
-  // Enable tracing if debug mode
-  setTracingEnabled(options.debug || false);
-
   out.task("Syncing");
 
   const { repo, syncEngine } = await setupCommandContext(targetPath);
@@ -259,7 +252,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await span("sync", () => syncEngine.sync());
+    const result = await syncEngine.sync();
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo, "sync");
@@ -581,7 +574,7 @@ export async function clone(
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-  const result = await span("sync", () => syncEngine.sync());
+  const result = await syncEngine.sync();
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo, "clone");
