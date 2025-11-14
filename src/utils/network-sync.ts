@@ -38,6 +38,7 @@ export async function waitForSync(
 
     // Wait for convergence
     return new Promise<void>((resolve, reject) => {
+      // TODO: can we delete this polling?
       let pollInterval: NodeJS.Timeout;
 
       const cleanup = () => {
