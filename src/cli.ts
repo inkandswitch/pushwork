@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Command } from "commander";
+import { Command } from "@commander-js/extra-typings";
 import chalk from "chalk";
 import {
   init,
@@ -18,22 +18,8 @@ import {
   watch,
 } from "./commands";
 
-const program = new Command();
-
-process.on("unhandledRejection", (error) => {
-  console.log(chalk.bgRed.white(" ERROR "));
-  if (error instanceof Error && error.stack) {
-    console.log(chalk.red(error.stack));
-  } else {
-    console.error(chalk.red(error));
-  }
-  process.exit(1);
-});
-
-// get the version from the package.json
 const version = require("../package.json").version;
-
-program
+const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
   .version(version, "-V, --version", "output the version number");
@@ -51,7 +37,6 @@ program.configureHelp({
       .map((opt) => opt.short || opt.long)
       .join(", ");
 
-    // colors: white for command, cyan for required args, dim for optional args
     const name = chalk.white(cmd.name());
     const args = cmd.registeredArguments
       .map((arg) =>
@@ -61,8 +46,9 @@ program.configureHelp({
       )
       .join(" ");
 
-    const baseTerm = args ? `${name} ${args}` : name;
-    return opts ? `${baseTerm} ${chalk.dim(`[${opts}]`)}` : baseTerm;
+    return [name, args, opts && chalk.dim(`[${opts}]`)]
+      .filter(Boolean)
+      .join(" ");
   },
 });
 
@@ -83,12 +69,10 @@ program
     "--sync-server-storage-id <id>",
     "Custom sync server storage ID (must be used with --sync-server)"
   )
-  .option("--debug", "Show detailed performance timing information")
-  .action(async (path: string, cmdOptions) => {
+  .action(async (path, opts) => {
     await init(path, {
-      syncServer: cmdOptions.syncServer,
-      syncServerStorageId: cmdOptions.syncServerStorageId,
-      debug: cmdOptions.debug || false,
+      syncServer: opts.syncServer,
+      syncServerStorageId: opts.syncServerStorageId as any,
     });
   });
 
@@ -101,7 +85,7 @@ program
     "AutomergeUrl of root directory to clone (format: automerge:XXXXX)"
   )
   .argument("<path>", "Target directory path")
-  .option("-f, --force", "Overwrite existing directory")
+  .option("-f, --force", "Overwrite existing directory", false)
   .option(
     "--sync-server <url>",
     "Custom sync server URL (must be used with --sync-server-storage-id)"
@@ -110,13 +94,13 @@ program
     "--sync-server-storage-id <id>",
     "Custom sync server storage ID (must be used with --sync-server)"
   )
-  .action(async (url: string, path: string, options) => {
+  .option("-v, --verbose", "Verbose output", false)
+  .action(async (url, path, opts) => {
     await clone(url, path, {
-      force: options.force || false,
-      dryRun: false,
-      verbose: false,
-      syncServer: options.syncServer,
-      syncServerStorageId: options.syncServerStorageId,
+      force: opts.force,
+      verbose: opts.verbose,
+      syncServer: opts.syncServer,
+      syncServerStorageId: opts.syncServerStorageId as any,
     });
   });
 
@@ -129,13 +113,8 @@ program
     "Directory path to commit (default: current directory)",
     "."
   )
-  .option("--dry-run", "Show what would be committed without applying changes")
-  .option("--debug", "Show detailed performance timing information")
-  .action(async (path: string, cmdOptions) => {
-    await commit(path, {
-      dryRun: cmdOptions.dryRun || false,
-      debug: cmdOptions.debug || false,
-    });
+  .action(async (path, _opts) => {
+    await commit(path);
   });
 
 // Sync command
@@ -147,14 +126,16 @@ program
     "Directory path to sync (default: current directory)",
     "."
   )
-  .option("--dry-run", "Show what would be done without applying changes")
-  .option("-v, --verbose", "Verbose output")
-  .option("--debug", "Show detailed performance timing information")
-  .action(async (path: string, cmdOptions) => {
+  .option(
+    "--dry-run",
+    "Show what would be done without applying changes",
+    false
+  )
+  .option("-v, --verbose", "Verbose output", false)
+  .action(async (path, opts) => {
     await sync(path, {
-      dryRun: cmdOptions.dryRun || false,
-      verbose: cmdOptions.verbose || false,
-      debug: cmdOptions.debug || false,
+      dryRun: opts.dryRun,
+      verbose: opts.verbose,
     });
   });
 
@@ -167,12 +148,10 @@ program
     "Limit diff to specific path (default: current directory)",
     "."
   )
-  .option("--name-only", "Show only changed file names")
-  .action(async (path: string, options) => {
+  .option("--name-only", "Show only changed file names", false)
+  .action(async (path, opts) => {
     await diff(path, {
-      nameOnly: options.nameOnly || false,
-      dryRun: false,
-      verbose: false,
+      nameOnly: opts.nameOnly,
     });
   });
 
@@ -183,11 +162,12 @@ program
   .argument("[path]", "Directory path (default: current directory)", ".")
   .option(
     "-v, --verbose",
-    "Show detailed status including document info and all tracked files"
+    "Show detailed status including document info and all tracked files",
+    false
   )
-  .action(async (path: string, cmdOptions) => {
+  .action(async (path, opts) => {
     await status(path, {
-      verbose: cmdOptions.verbose || false,
+      verbose: opts.verbose,
     });
   });
 
@@ -200,16 +180,14 @@ program
     "Show history for specific file or directory (default: current directory)",
     "."
   )
-  .option("--oneline", "Compact one-line per sync format")
+  .option("--oneline", "Compact one-line per sync format", false)
   .option("--since <date>", "Show syncs since date")
   .option("--limit <n>", "Limit number of syncs shown", "10")
-  .action(async (path: string, options) => {
+  .action(async (path, opts) => {
     await log(path, {
-      oneline: options.oneline || false,
-      since: options.since,
-      limit: parseInt(options.limit),
-      dryRun: false,
-      verbose: false,
+      oneline: opts.oneline,
+      since: opts.since,
+      limit: parseInt(opts.limit),
     });
   });
 
@@ -223,12 +201,14 @@ program
     "Specific path to restore (default: current directory)",
     "."
   )
-  .option("-f, --force", "Force checkout even if there are uncommitted changes")
-  .action(async (syncId: string, path: string, options) => {
+  .option(
+    "-f, --force",
+    "Force checkout even if there are uncommitted changes",
+    false
+  )
+  .action(async (syncId, path, opts) => {
     await checkout(syncId, path, {
-      force: options.force || false,
-      dryRun: false,
-      verbose: false,
+      force: opts.force,
     });
   });
 
@@ -237,7 +217,7 @@ program
   .command("url")
   .summary("Show the Automerge root URL")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .action(async (path: string) => {
+  .action(async (path) => {
     await url(path);
   });
 
@@ -246,7 +226,7 @@ program
   .command("rm")
   .summary("Remove local pushwork data")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .action(async (path: string) => {
+  .action(async (path) => {
     await rm(path);
   });
 
@@ -255,10 +235,10 @@ program
   .command("ls")
   .summary("List tracked files")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("-l, --long", "Show long format with Automerge URLs")
-  .action(async (path: string, cmdOptions) => {
+  .option("-v, --verbose", "Show with Automerge URLs", false)
+  .action(async (path, opts) => {
     await ls(path, {
-      long: cmdOptions.long || false,
+      verbose: opts.verbose,
     });
   });
 
@@ -267,17 +247,15 @@ program
   .command("config")
   .summary("View or edit configuration")
   .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("--list", "Show full configuration")
+  .option("--list", "Show full configuration", false)
   .option(
     "--get <key>",
     "Get specific config value (dot notation, e.g., sync.move_detection_threshold)"
   )
-  .option("--debug", "Show detailed performance timing information")
-  .action(async (path: string, cmdOptions) => {
+  .action(async (path, opts) => {
     await config(path, {
-      list: cmdOptions.list || false,
-      get: cmdOptions.get,
-      debug: cmdOptions.debug || false,
+      list: opts.list,
+      get: opts.get,
     });
   });
 
@@ -300,14 +278,23 @@ program
     "Directory to watch for changes (relative to working directory)",
     "src"
   )
-  .option("-v, --verbose", "Show build script output")
-  .action(async (path: string, cmdOptions) => {
+  .option("-v, --verbose", "Show build script output", false)
+  .action(async (path, opts) => {
     await watch(path, {
-      script: cmdOptions.script,
-      watchDir: cmdOptions.dir,
-      dryRun: false,
-      verbose: cmdOptions.verbose || false,
+      script: opts.script,
+      watchDir: opts.dir,
+      verbose: opts.verbose,
     });
   });
 
-program.parse();
+process.on("unhandledRejection", (error) => {
+  console.log(chalk.bgRed.white(" ERROR "));
+  if (error instanceof Error && error.stack) {
+    console.log(chalk.red(error.stack));
+  } else {
+    console.error(chalk.red(error));
+  }
+  process.exit(1);
+});
+
+program.parseAsync();

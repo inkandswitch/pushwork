@@ -11,13 +11,12 @@ import {
   LogOptions,
   CheckoutOptions,
   InitOptions,
-  CommitOptions,
-  ListOptions,
   ConfigOptions,
   StatusOptions,
   WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
+  CommandOptions,
 } from "./types";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
@@ -141,7 +140,6 @@ export async function init(
   targetPath: string,
   options: InitOptions = {}
 ): Promise<void> {
-  throw new Error("FOOOOOOOBarasrasrasr");
   const resolvedPath = path.resolve(targetPath);
 
   out.task(`Initializing`);
@@ -654,7 +652,7 @@ export async function rm(targetPath: string = "."): Promise<void> {
 
 export async function commit(
   targetPath: string,
-  _options: CommitOptions = {}
+  _options: CommandOptions = {}
 ): Promise<void> {
   out.task("Committing local changes");
 
@@ -688,7 +686,7 @@ export async function commit(
  */
 export async function ls(
   targetPath: string = ".",
-  options: ListOptions = {}
+  options: CommandOptions = {}
 ): Promise<void> {
   const { repo, syncEngine } = await setupCommandContext(targetPath, false);
   const syncStatus = await syncEngine.getStatus();
@@ -710,7 +708,7 @@ export async function ls(
     return;
   }
 
-  if (options.long) {
+  if (options.verbose) {
     // Long format with URLs
     for (const [filePath, entry] of files) {
       const url = entry?.url || "unknown";

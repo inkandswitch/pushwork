@@ -46,9 +46,7 @@ export interface DirectoryConfig {
  * CLI command options
  */
 export interface CommandOptions {
-  dryRun?: boolean;
   verbose?: boolean;
-  debug?: boolean;
 }
 
 /**
@@ -65,6 +63,7 @@ export interface CloneOptions extends CommandOptions {
  */
 export interface SyncOptions extends CommandOptions {
   force?: boolean;
+  dryRun?: boolean;
 }
 
 /**
@@ -96,18 +95,6 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
-}
-
-/**
- * Commit command specific options
- */
-export interface CommitOptions extends CommandOptions {}
-
-/**
- * List (ls) command specific options
- */
-export interface ListOptions extends CommandOptions {
-  long?: boolean;
 }
 
 /**
