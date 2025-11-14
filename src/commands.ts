@@ -44,7 +44,7 @@ async function initializeRepository(
   overrides: Partial<DirectoryConfig>
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
   // Create .pushwork directory structure
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
@@ -70,7 +70,7 @@ async function setupCommandContext(
   const resolvedPath = path.resolve(workingDir);
 
   // Check if initialized
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (!(await pathExists(syncToolDir))) {
     throw new Error(
       'Directory not initialized for sync. Run "pushwork init" first.'
@@ -147,7 +147,7 @@ export async function init(
   await ensureDirectoryExists(resolvedPath);
 
   // Check if already initialized
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (await pathExists(syncToolDir)) {
     out.error("Directory already initialized for sync");
     out.exit(1);
@@ -493,7 +493,11 @@ export async function log(
   );
 
   // TODO: Implement history tracking
-  const snapshotPath = path.join(workingDir, ".pushwork", "snapshot.json");
+  const snapshotPath = path.join(
+    workingDir,
+    ConfigManager.CONFIG_DIR,
+    "snapshot.json"
+  );
   if (await pathExists(snapshotPath)) {
     const stats = await fs.stat(snapshotPath);
     out.infoBlock("HISTORY", "Sync history (stub)");
@@ -547,7 +551,7 @@ export async function clone(
   }
 
   // Check if already initialized
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
       out.error("Directory already initialized. Use --force to overwrite");
@@ -590,7 +594,7 @@ export async function clone(
  */
 export async function url(targetPath: string = "."): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
@@ -620,7 +624,7 @@ export async function url(targetPath: string = "."): Promise<void> {
  */
 export async function rm(targetPath: string = "."): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
@@ -732,7 +736,7 @@ export async function config(
   options: ConfigOptions = {}
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ".pushwork");
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
@@ -767,7 +771,7 @@ export async function config(
     out.obj({
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
-      Exclusions: config.defaults.exclude_patterns.length,
+      Exclusions: config.exclude_patterns?.length,
     });
     out.log("");
     out.log("Use --list to see full configuration");

@@ -55,7 +55,7 @@ export class SyncEngine {
     this.changeDetector = new ChangeDetector(
       repo,
       rootPath,
-      config.defaults.exclude_patterns
+      config.exclude_patterns
     );
     this.moveDetector = new MoveDetector(config.sync.move_detection_threshold);
   }

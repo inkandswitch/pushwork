@@ -105,9 +105,7 @@ describe("Exclude Patterns", () => {
     const localConfig: DirectoryConfig = {
       sync_server: "wss://test.server.com",
       sync_enabled: true,
-      defaults: {
-        exclude_patterns: [".git", "*.tmp", ".pushwork", "*.env"],
-      },
+      exclude_patterns: [".git", "*.tmp", ".pushwork", "*.env"],
       sync: {
         move_detection_threshold: 0.8,
       },
@@ -118,9 +116,9 @@ describe("Exclude Patterns", () => {
     const mergedConfig = await configManager.getMerged();
 
     // Verify .pushwork is in the exclude patterns
-    expect(mergedConfig.defaults.exclude_patterns).toContain(".pushwork");
-    expect(mergedConfig.defaults.exclude_patterns).toContain("*.env");
-    expect(mergedConfig.defaults.exclude_patterns).toContain(".git");
+    expect(mergedConfig.exclude_patterns).toContain(".pushwork");
+    expect(mergedConfig.exclude_patterns).toContain("*.env");
+    expect(mergedConfig.exclude_patterns).toContain(".git");
 
     // Create test files
     await writeFileContent(path.join(tmpDir, "include.txt"), "include me");
@@ -134,7 +132,7 @@ describe("Exclude Patterns", () => {
     const entries = await listDirectory(
       tmpDir,
       true,
-      mergedConfig.defaults.exclude_patterns
+      mergedConfig.exclude_patterns
     );
     const filePaths = entries.map((entry) => path.relative(tmpDir, entry.path));
 

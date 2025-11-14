@@ -15,7 +15,8 @@ import { pathExists, ensureDirectoryExists } from "../utils";
 export class ConfigManager {
   private static readonly GLOBAL_CONFIG_DIR = ".pushwork";
   private static readonly CONFIG_FILENAME = "config.json";
-  private static readonly LOCAL_CONFIG_DIR = ".pushwork";
+
+  static readonly CONFIG_DIR = ".pushwork";
 
   constructor(private workingDir?: string) {}
 
@@ -39,7 +40,7 @@ export class ConfigManager {
     }
     return path.join(
       this.workingDir,
-      ConfigManager.LOCAL_CONFIG_DIR,
+      ConfigManager.CONFIG_DIR,
       ConfigManager.CONFIG_FILENAME
     );
   }
@@ -118,6 +119,23 @@ export class ConfigManager {
     }
   }
 
+  private getDefaultGlobalConfig(): GlobalConfig {
+    return {
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".DS_Store",
+        ".pushwork",
+      ],
+      sync_server: DEFAULT_SYNC_SERVER,
+      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      sync: {
+        move_detection_threshold: 0.7,
+      },
+    };
+  }
+
   /**
    * Get default configuration
    */
@@ -126,15 +144,13 @@ export class ConfigManager {
       sync_enabled: true,
       sync_server: DEFAULT_SYNC_SERVER,
       sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
-      defaults: {
-        exclude_patterns: [
-          ".git",
-          "node_modules",
-          "*.tmp",
-          ".pushwork",
-          ".DS_Store",
-        ],
-      },
+      exclude_patterns: [
+        ".git",
+        "node_modules",
+        "*.tmp",
+        ".pushwork",
+        ".DS_Store",
+      ],
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -200,12 +216,7 @@ export class ConfigManager {
 
     // Handle GlobalConfig structure
     if ("exclude_patterns" in override && override.exclude_patterns) {
-      merged.defaults.exclude_patterns = override.exclude_patterns;
-    }
-
-    // Handle DirectoryConfig structure
-    if ("defaults" in override && override.defaults) {
-      merged.defaults = { ...merged.defaults, ...override.defaults };
+      merged.exclude_patterns = override.exclude_patterns;
     }
 
     if ("sync" in override && override.sync) {
@@ -219,21 +230,7 @@ export class ConfigManager {
    * Create default global configuration
    */
   async createDefaultGlobal(): Promise<void> {
-    const defaultGlobal: GlobalConfig = {
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".DS_Store",
-        ".pushwork",
-      ],
-      sync_server: DEFAULT_SYNC_SERVER,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
-      sync: {
-        move_detection_threshold: 0.7,
-      },
-    };
-
+    const defaultGlobal = this.getDefaultGlobalConfig();
     await this.saveGlobal(defaultGlobal);
   }
 

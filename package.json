@@ -13,6 +13,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "jest",
+    "test:bail": "jest --bail",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "lint": "eslint src --ext .ts",

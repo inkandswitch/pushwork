@@ -13,33 +13,18 @@ export const DEFAULT_SYNC_SERVER_STORAGE_ID =
 export interface GlobalConfig {
   sync_server?: string;
   sync_server_storage_id?: StorageId;
-  exclude_patterns?: string[];
-  sync?: {
-    move_detection_threshold?: number;
+  exclude_patterns: string[];
+  sync: {
+    move_detection_threshold: number;
   };
-}
-
-/**
- * Sync behavior settings
- */
-export interface SyncSettings {
-  move_detection_threshold: number;
 }
 
 /**
  * Per-directory configuration
  */
-export interface DirectoryConfig {
-  sync_server?: string;
-  sync_server_storage_id?: StorageId;
+export interface DirectoryConfig extends GlobalConfig {
+  root_directory_url?: string;
   sync_enabled: boolean;
-  root_directory_url?: string; // AutomergeUrl of the root directory document
-  defaults: {
-    exclude_patterns: string[];
-  };
-  sync: {
-    move_detection_threshold: number;
-  };
 }
 
 /**

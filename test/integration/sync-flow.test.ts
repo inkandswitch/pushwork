@@ -26,9 +26,7 @@ describe("Sync Flow Integration", () => {
       const testConfig: DirectoryConfig = {
         sync_server: "wss://test.server.com",
         sync_enabled: true,
-        defaults: {
-          exclude_patterns: [".git", "*.tmp"],
-        },
+        exclude_patterns: [".git", "*.tmp"],
         sync: {
           move_detection_threshold: 0.8,
         },
@@ -50,9 +48,7 @@ describe("Sync Flow Integration", () => {
       const localConfig: DirectoryConfig = {
         sync_server: "wss://local.server.com",
         sync_enabled: true,
-        defaults: {
-          exclude_patterns: [".git", "*.tmp"],
-        },
+        exclude_patterns: [".git", "*.tmp"],
         sync: {
           move_detection_threshold: 0.9,
         },
@@ -63,7 +59,7 @@ describe("Sync Flow Integration", () => {
       // Verify merged config
       const mergedConfig = await configManager.getMerged();
       expect(mergedConfig.sync_server).toBe("wss://local.server.com");
-      expect(mergedConfig.defaults?.exclude_patterns).toContain(".git");
+      expect(mergedConfig.exclude_patterns).toContain(".git");
       expect(mergedConfig.sync?.move_detection_threshold).toBe(0.9);
     });
   });
