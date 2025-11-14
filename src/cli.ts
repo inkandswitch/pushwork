@@ -22,7 +22,13 @@ const version = require("../package.json").version;
 const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(version, "-V, --version", "output the version number");
+  .version(version, "-V, --version", "output the version number")
+  .addHelpText(
+    "after",
+    chalk.dim(
+      '\nEnable tab completion by adding this to your ~/.zshrc:\neval "$(pushwork completion)"'
+    )
+  );
 
 // Configure help colors using Commander v13's built-in color support
 program.configureHelp({
@@ -286,6 +292,88 @@ program
       verbose: opts.verbose,
     });
   });
+
+// Completion command (hidden from help)
+program.command("completion", { hidden: true }).action(() => {
+  // Generate completion dynamically from registered commands
+  const commands = program.commands
+    .filter((cmd) => cmd.name() !== "completion") // Exclude self
+    .map((cmd) => {
+      const name = cmd.name();
+      const desc = (cmd.summary() || cmd.description() || "").replace(
+        /'/g,
+        "\\'"
+      );
+      return `'${name}:${desc}'`;
+    })
+    .join(" ");
+
+  // Generate option completions for each command
+  const commandCases = program.commands
+    .filter((cmd) => cmd.name() !== "completion")
+    .map((cmd) => {
+      const options = cmd.options
+        .filter((opt) => opt.flags !== "-h, --help") // Exclude help
+        .map((opt) => {
+          // Parse flags like "-v, --verbose" or "--dry-run"
+          const flags = opt.flags.split(",").map((f) => f.trim());
+          const desc = (opt.description || "")
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, " ");
+
+          // For options with arguments like "--sync-server <url>"
+          // Extract just the flag part
+          const cleanFlags = flags.map((f) => f.split(/\s+/)[0]);
+
+          if (cleanFlags.length > 1) {
+            // Multiple flags (short and long): '(-v --verbose)'{-v,--verbose}'[description]'
+            const short = cleanFlags[0];
+            const long = cleanFlags[1];
+            return `'(${short} ${long})'{${short},${long}}'[${desc}]'`;
+          } else {
+            // Single flag: '--flag[description]'
+            return `'${cleanFlags[0]}[${desc}]'`;
+          }
+        })
+        .join(" \\\n        ");
+
+      return options
+        ? `    ${cmd.name()})
+      _arguments \\
+        ${options}
+      ;;`
+        : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  const completionScript = `
+# pushwork completion for zsh
+_pushwork() {
+  local -a commands
+  commands=(${commands})
+  
+  _arguments -C \\
+    '1: :->command' \\
+    '*::arg:->args'
+  
+  case $state in
+    command)
+      _describe 'command' commands
+      ;;
+    args)
+      case $words[1] in
+${commandCases}
+      esac
+      ;;
+  esac
+}
+
+compdef _pushwork pushwork
+    `.trim();
+
+  console.log(completionScript);
+});
 
 process.on("unhandledRejection", (error) => {
   console.log(chalk.bgRed.white(" ERROR "));
