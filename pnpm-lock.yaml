@@ -18,46 +18,8 @@ dependencies:
     specifier: ^2.5.0
     version: 2.5.0
   '@automerge/automerge-repo-storage-nodefs':
-<<<<<<< HEAD
-<<<<<<< HEAD
     specifier: ^2.5.0
     version: 2.5.0
-||||||| parent of d852ebf (use open telemetry instead)
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
-=======
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
-<<<<<<< HEAD
-  '@opentelemetry/api':
-    specifier: ^1.9.0
-    version: 1.9.0
-  '@opentelemetry/sdk-trace-base':
-    specifier: ^2.2.0
-    version: 2.2.0(@opentelemetry/api@1.9.0)
-  '@opentelemetry/sdk-trace-node':
-    specifier: ^2.2.0
-    version: 2.2.0(@opentelemetry/api@1.9.0)
->>>>>>> d852ebf (use open telemetry instead)
-||||||| parent of 319f2cb (tiny tracer)
-  '@opentelemetry/api':
-    specifier: ^1.9.0
-    version: 1.9.0
-  '@opentelemetry/sdk-trace-base':
-    specifier: ^2.2.0
-    version: 2.2.0(@opentelemetry/api@1.9.0)
-  '@opentelemetry/sdk-trace-node':
-    specifier: ^2.2.0
-    version: 2.2.0(@opentelemetry/api@1.9.0)
-=======
->>>>>>> 319f2cb (tiny tracer)
-||||||| parent of 65c59eb (bump repo version)
-    specifier: ^2.5.0-alpha.2
-    version: 2.5.0-alpha.2
-=======
-    specifier: ^2.5.0
-    version: 2.5.0
->>>>>>> 65c59eb (bump repo version)
   chalk:
     specifier: ^5.3.0
     version: 5.4.1
