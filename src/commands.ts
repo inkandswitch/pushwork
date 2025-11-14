@@ -141,6 +141,7 @@ export async function init(
   targetPath: string,
   options: InitOptions = {}
 ): Promise<void> {
+  throw new Error("FOOOOOOOBarasrasrasr");
   const resolvedPath = path.resolve(targetPath);
 
   out.task(`Initializing`);

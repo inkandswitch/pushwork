@@ -33,7 +33,7 @@ import { out } from "../utils/output";
  * the server, not that we've RECEIVED changes from other peers.
  * TODO: remove need for this to exist.
  */
-const POST_SYNC_DELAY_MS = 500; // After we pushed changes
+const POST_SYNC_DELAY_MS = 200; // After we pushed changes
 
 /**
  * Bidirectional sync engine implementing two-phase sync
