@@ -11,7 +11,7 @@ import {
   SnapshotDirectoryEntry,
 } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
-import { out } from "../cli/output";
+import { out } from "../utils/output";
 
 /**
  * Manages sync snapshots for local state tracking

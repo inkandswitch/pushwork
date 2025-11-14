@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import { tmpdir } from "os";
-import { ConfigManager } from "../../src/config";
+import { ConfigManager } from "../../src/core";
 import { DirectoryConfig } from "../../src/types";
 import {
   ensureDirectoryExists,

@@ -24,7 +24,7 @@ import { waitForSync } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector } from "./change-detection";
 import { MoveDetector } from "./move-detection";
-import { out } from "../cli/output";
+import { out } from "../utils/output";
 
 /**
  * Post-sync delay constants for network propagation

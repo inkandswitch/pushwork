@@ -1,6 +1,6 @@
 import { DocHandle, StorageId } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
-import { out } from "../cli/output";
+import { out } from "./output";
 
 /**
  * Wait for documents to sync to the remote server

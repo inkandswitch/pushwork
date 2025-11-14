@@ -16,7 +16,7 @@ import {
   findFileInDirectoryHierarchy,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
-import { out } from "../cli/output";
+import { out } from "../utils/output";
 
 /**
  * Change detection engine

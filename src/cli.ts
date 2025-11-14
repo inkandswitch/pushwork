@@ -16,7 +16,7 @@ import {
   ls,
   config,
   watch,
-} from "./cli/commands";
+} from "./commands";
 
 /**
  * Wrapper for command actions with consistent error handling

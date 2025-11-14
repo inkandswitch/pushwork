@@ -18,16 +18,12 @@ import {
   WatchOptions,
   DirectoryConfig,
   DirectoryDocument,
-} from "../types";
-import { SyncEngine } from "../core";
-import {
-  pathExists,
-  ensureDirectoryExists,
-  formatRelativePath,
-} from "../utils";
-import { ConfigManager } from "../config";
-import { createRepo } from "../utils/repo-factory";
-import { out } from "./output";
+} from "./types";
+import { SyncEngine } from "./core";
+import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
+import { ConfigManager } from "./core/config";
+import { createRepo } from "./utils/repo-factory";
+import { out } from "./utils/output";
 import chalk from "chalk";
 
 /**

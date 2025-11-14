@@ -1,4 +1,4 @@
-import { out } from "../cli/output";
+import { out } from "./output";
 
 /**
  * Global tracing state

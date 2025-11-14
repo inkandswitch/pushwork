@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
-import { ConfigManager } from "../../src/config";
+import { ConfigManager } from "../../src/core";
 import { DirectoryConfig } from "../../src/types";
 
 describe("Sync Flow Integration", () => {
