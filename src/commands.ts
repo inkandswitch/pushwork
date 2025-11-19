@@ -99,11 +99,23 @@ async function setupCommandContext(
     workingDir: resolvedPath,
   };
 }
-
 /**
  * Safely shutdown a repository with proper error handling
  */
-async function safeRepoShutdown(repo: Repo, context?: string): Promise<void> {
+async function safeRepoShutdown(repo: Repo): Promise<void> {
+  // Handle uncaught WebSocket errors that occur during shutdown
+  const uncaughtErrorHandler = (err: Error) => {
+    if (err.message.includes("WebSocket")) {
+      // Silently suppress WebSocket errors during shutdown
+      return;
+    }
+    // Re-throw non-WebSocket errors
+    throw err;
+  };
+
+  // Add the error handler before shutdown
+  process.on("uncaughtException", uncaughtErrorHandler);
+
   try {
     await repo.shutdown();
   } catch (shutdownError) {
@@ -115,21 +127,12 @@ async function safeRepoShutdown(repo: Repo, context?: string): Promise<void> {
         : String(shutdownError);
 
     // Ignore WebSocket-related errors entirely
-    if (
-      errorMessage.includes("WebSocket") ||
-      errorMessage.includes("connection was established") ||
-      errorMessage.includes("was closed")
-    ) {
+    if (errorMessage.includes("WebSocket")) {
       // Silently ignore WebSocket shutdown errors
       return;
     }
-
-    // Only warn about truly unexpected shutdown errors
-    console.warn(
-      `Warning: Repository shutdown failed${
-        context ? ` (${context})` : ""
-      }: ${shutdownError}`
-    );
+  } finally {
+    process.off("uncaughtException", uncaughtErrorHandler);
   }
 }
 
@@ -155,13 +158,10 @@ export async function init(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
-  const { config, repo, syncEngine } = await initializeRepository(
-    resolvedPath,
-    {
-      sync_server: options.syncServer,
-      sync_server_storage_id: options.syncServerStorageId,
-    }
-  );
+  const { repo, syncEngine } = await initializeRepository(resolvedPath, {
+    sync_server: options.syncServer,
+    sync_server_storage_id: options.syncServerStorageId,
+  });
 
   // Create new root directory document
   out.update("Creating root directory");
@@ -174,18 +174,13 @@ export async function init(
   // Scan and sync existing files
   out.update("Scanning existing files");
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
-  const result = await syncEngine.sync();
 
   out.update("Writing to disk");
-  await safeRepoShutdown(repo, "init");
+  await safeRepoShutdown(repo);
 
   out.done("Initialized");
-
-  out.obj({
-    Sync: config.sync_server,
-    Files: result.filesChanged > 0 ? `${result.filesChanged} added` : undefined,
-  });
   out.successBlock("INITIALIZED", rootHandle.url);
+  out.info("Run 'pushwork sync' to start syncing");
 
   process.exit();
 }
@@ -250,7 +245,7 @@ export async function sync(
     const result = await syncEngine.sync();
 
     out.taskLine("Writing to disk");
-    await safeRepoShutdown(repo, "sync");
+    await safeRepoShutdown(repo);
 
     if (result.success) {
       out.done("Synced");
@@ -318,7 +313,7 @@ export async function diff(
 
   if (preview.changes.length === 0) {
     out.success("No changes detected");
-    await safeRepoShutdown(repo, "diff");
+    await safeRepoShutdown(repo);
     out.exit();
     return;
   }
@@ -396,7 +391,7 @@ export async function diff(
     }
   }
 
-  await safeRepoShutdown(repo, "diff");
+  await safeRepoShutdown(repo);
 }
 
 /**
@@ -477,7 +472,7 @@ export async function status(
     out.info("Run 'pushwork diff' to see changes");
   }
 
-  await safeRepoShutdown(repo, "status");
+  await safeRepoShutdown(repo);
 }
 
 /**
@@ -506,7 +501,7 @@ export async function log(
     out.info("No sync history found");
   }
 
-  await safeRepoShutdown(logRepo, "log");
+  await safeRepoShutdown(logRepo);
 }
 
 /**
@@ -576,7 +571,7 @@ export async function clone(
   const result = await syncEngine.sync();
 
   out.update("Writing to disk");
-  await safeRepoShutdown(repo, "clone");
+  await safeRepoShutdown(repo);
 
   out.done();
 
@@ -663,7 +658,7 @@ export async function commit(
   const { repo, syncEngine } = await setupCommandContext(targetPath, false);
 
   const result = await syncEngine.commitLocal();
-  await safeRepoShutdown(repo, "commit");
+  await safeRepoShutdown(repo);
 
   out.done();
 
@@ -697,7 +692,7 @@ export async function ls(
 
   if (!syncStatus.snapshot) {
     out.error("No snapshot found");
-    await safeRepoShutdown(repo, "ls");
+    await safeRepoShutdown(repo);
     out.exit(1);
     return;
   }
@@ -708,7 +703,7 @@ export async function ls(
 
   if (files.length === 0) {
     out.info("No tracked files");
-    await safeRepoShutdown(repo, "ls");
+    await safeRepoShutdown(repo);
     return;
   }
 
@@ -725,7 +720,7 @@ export async function ls(
     }
   }
 
-  await safeRepoShutdown(repo, "ls");
+  await safeRepoShutdown(repo);
 }
 
 /**
@@ -797,7 +792,7 @@ export async function watch(
   // Check if watch directory exists
   if (!(await pathExists(absoluteWatchDir))) {
     out.error(`Watch directory does not exist: ${watchDir}`);
-    await safeRepoShutdown(repo, "watch");
+    await safeRepoShutdown(repo);
     out.exit(1);
     return;
   }
@@ -907,7 +902,7 @@ export async function watch(
     out.log("");
     out.info("Shutting down...");
     watcher.close();
-    await safeRepoShutdown(repo, "watch");
+    await safeRepoShutdown(repo);
     out.rainbow("Goodbye!");
     process.exit(0);
   };
