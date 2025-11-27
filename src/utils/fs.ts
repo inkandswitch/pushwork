@@ -172,13 +172,18 @@ export async function listDirectory(
   const entries: FileSystemEntry[] = [];
 
   try {
+    // Construct pattern using path.join for proper cross-platform handling
     const pattern = recursive
       ? path.join(dirPath, "**/*")
       : path.join(dirPath, "*");
+    
+    // CRITICAL: glob expects forward slashes, even on Windows
+    // Convert backslashes to forward slashes for glob pattern
+    const normalizedPattern = pattern.replace(/\\/g, "/");
 
     // Use glob to get all paths (with dot files)
     // Note: We don't use glob's ignore option because it doesn't support gitignore semantics
-    const paths = await glob(pattern, {
+    const paths = await glob(normalizedPattern, {
       dot: true,
     });
 
@@ -260,9 +265,21 @@ export function getFileExtension(filePath: string): string {
 
 /**
  * Normalize path separators for cross-platform compatibility
+ * Converts all path separators to forward slashes for consistent storage
  */
 export function normalizePath(filePath: string): string {
   return path.posix.normalize(filePath.replace(/\\/g, "/"));
+}
+
+/**
+ * Join paths and normalize separators for cross-platform compatibility
+ * Use this instead of string concatenation to ensure proper path handling on Windows
+ */
+export function joinAndNormalizePath(...paths: string[]): string {
+  // Use path.join to properly handle path construction (handles Windows drive letters, etc.)
+  const joined = path.join(...paths);
+  // Then normalize to forward slashes for consistent storage/comparison
+  return normalizePath(joined);
 }
 
 /**

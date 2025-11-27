@@ -11,9 +11,9 @@ import {
 import {
   readFileContent,
   listDirectory,
-  normalizePath,
   getRelativePath,
   findFileInDirectoryHierarchy,
+  joinAndNormalizePath,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { out } from "../utils/output";
@@ -382,6 +382,13 @@ export class ChangeDetector {
       );
     } catch (error) {
       out.taskLine(`Failed to scan filesystem: ${error}`, true);
+      // Log more details about the error
+      if (error instanceof Error) {
+        out.taskLine(`Error details: ${error.message}`, true);
+        if (error.stack) {
+          out.taskLine(`Stack: ${error.stack}`, true);
+        }
+      }
     }
 
     return fileMap;
@@ -394,7 +401,7 @@ export class ChangeDetector {
     relativePath: string
   ): Promise<string | Uint8Array | null> {
     try {
-      const fullPath = normalizePath(this.rootPath + "/" + relativePath);
+      const fullPath = joinAndNormalizePath(this.rootPath, relativePath);
       return await readFileContent(fullPath);
     } catch {
       return null;

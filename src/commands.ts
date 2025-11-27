@@ -171,8 +171,7 @@ export async function init(
   };
   const rootHandle = repo.create(rootDoc);
 
-  // Scan and sync existing files
-  out.update("Scanning existing files");
+  // Set root directory URL in snapshot
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
 
   out.update("Writing to disk");

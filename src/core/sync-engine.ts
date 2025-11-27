@@ -14,10 +14,10 @@ import {
   writeFileContent,
   removePath,
   getFileExtension,
-  normalizePath,
   getEnhancedMimeType,
   formatRelativePath,
   findFileInDirectoryHierarchy,
+  joinAndNormalizePath,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { waitForSync } from "../utils/network-sync";
@@ -437,7 +437,7 @@ export class SyncEngine {
         // CRITICAL FIX: Update snapshot with heads AFTER adding to directory
         // The addFileToDirectory call above may have changed the document heads
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
-          path: normalizePath(this.rootPath + "/" + change.path),
+          path: joinAndNormalizePath(this.rootPath, change.path),
           url: handle.url,
           head: handle.heads(),
           extension: getFileExtension(change.path),
@@ -462,7 +462,7 @@ export class SyncEngine {
     change: DetectedChange,
     snapshot: SyncSnapshot
   ): Promise<void> {
-    const localPath = normalizePath(this.rootPath + "/" + change.path);
+    const localPath = joinAndNormalizePath(this.rootPath, change.path);
 
     if (!change.remoteHead) {
       throw new Error(
@@ -589,7 +589,7 @@ export class SyncEngine {
     this.snapshotManager.removeFileEntry(snapshot, move.fromPath);
     this.snapshotManager.updateFileEntry(snapshot, move.toPath, {
       ...fromEntry,
-      path: normalizePath(this.rootPath + "/" + move.toPath),
+      path: joinAndNormalizePath(this.rootPath, move.toPath),
       head: fromEntry.head, // will be updated later when heads advance
     });
   }
@@ -844,7 +844,7 @@ export class SyncEngine {
 
             // Update snapshot with discovered directory using validated heads
             this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
-              path: normalizePath(this.rootPath + "/" + directoryPath),
+              path: joinAndNormalizePath(this.rootPath, directoryPath),
               url: existingDirEntry.url,
               head: childHeads,
               entries: [],
@@ -903,7 +903,7 @@ export class SyncEngine {
 
     // Update snapshot with new directory
     this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
-      path: normalizePath(this.rootPath + "/" + directoryPath),
+      path: joinAndNormalizePath(this.rootPath, directoryPath),
       url: dirHandle.url,
       head: dirHandle.heads(),
       entries: [],
