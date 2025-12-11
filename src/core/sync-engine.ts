@@ -71,6 +71,71 @@ export class SyncEngine {
   }
 
   /**
+   * Determine whether to use ImmutableString based on config and content type
+   */
+  private shouldUseImmutableString(
+    content: string | Uint8Array | null
+  ): boolean {
+    // Handle null content
+    if (content === null) {
+      return false;
+    }
+
+    // If mutable_text is enabled, never use ImmutableString
+    if (this.config.mutable_text) {
+      return false;
+    }
+
+    // Otherwise, use ImmutableString for text content (current behavior)
+    return this.isTextContent(content);
+  }
+
+  /**
+   * Helper function to update document content, handling both mutable and immutable text
+   * Safely handles transitions between different content types (string, ImmutableString, Uint8Array, null)
+   */
+  private updateDocumentContent(
+    doc: FileDocument,
+    newContent: string | Uint8Array
+  ): void {
+    if (typeof newContent === "string") {
+      if (this.shouldUseImmutableString(newContent)) {
+        // Use ImmutableString with efficient text operations
+        // Handle transition from any previous content type to ImmutableString
+        if (!A.isImmutableString(doc.content)) {
+          doc.content = new A.ImmutableString("");
+        }
+        // Update the text content efficiently using Automerge's text operations
+        A.updateText(doc, ["content"], newContent);
+      } else {
+        // Use regular string assignment for mutable text
+        doc.content = newContent;
+      }
+    } else {
+      // Binary content - direct assignment
+      doc.content = newContent;
+    }
+  }
+
+  /**
+   * Helper function to clear document content (for deletions)
+   */
+  private clearDocumentContent(doc: FileDocument): void {
+    if (this.config.mutable_text) {
+      // Use regular empty string for mutable text
+      doc.content = "";
+    } else {
+      // Use ImmutableString for immutable text
+      if (!A.isImmutableString(doc.content)) {
+        doc.content = new A.ImmutableString("");
+      } else {
+        // Clear existing ImmutableString content efficiently
+        A.updateText(doc, ["content"], "");
+      }
+    }
+  }
+
+  /**
    * Set the root directory URL in the snapshot
    */
   async setRootDirectoryUrl(url: AutomergeUrl): Promise<void> {
@@ -554,11 +619,7 @@ export class SyncEngine {
 
           // If new content is provided, update it (handles move + modification case)
           if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
+            this.updateDocumentContent(doc, move.newContent);
           }
         });
       } else {
@@ -567,11 +628,7 @@ export class SyncEngine {
 
           // If new content is provided, update it (handles move + modification case)
           if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
+            this.updateDocumentContent(doc, move.newContent);
           }
         });
       }
@@ -612,11 +669,11 @@ export class SyncEngine {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
       mimeType: getEnhancedMimeType(change.path),
-      content: isText
+      content: this.shouldUseImmutableString(change.localContent)
         ? new A.ImmutableString("")
         : typeof change.localContent === "string"
-        ? new A.ImmutableString(change.localContent)
-        : change.localContent, // Empty ImmutableString for text, wrap strings for safety, actual content for binary
+        ? change.localContent // Use regular string when mutable_text is true
+        : change.localContent, // Keep Uint8Array as-is for binary
       metadata: {
         permissions: 0o644,
       },
@@ -624,10 +681,10 @@ export class SyncEngine {
 
     const handle = this.repo.create(fileDoc);
 
-    // For text files, use ImmutableString for better performance
+    // For text files, use ImmutableString or regular string based on config
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
-        doc.content = new A.ImmutableString(change.localContent as string);
+        this.updateDocumentContent(doc, change.localContent as string);
       });
     }
 
@@ -678,11 +735,7 @@ export class SyncEngine {
     }
 
     handle.changeAt(heads, (doc: FileDocument) => {
-      if (typeof content === "string") {
-        doc.content = new A.ImmutableString(content);
-      } else {
-        doc.content = content;
-      }
+      this.updateDocumentContent(doc, content);
     });
 
     // Update snapshot with new heads after content change
@@ -716,11 +769,11 @@ export class SyncEngine {
     }
     if (heads) {
       handle.changeAt(heads, (doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
+        this.clearDocumentContent(doc);
       });
     } else {
       handle.change((doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
+        this.clearDocumentContent(doc);
       });
     }
   }

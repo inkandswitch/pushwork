@@ -14,6 +14,7 @@ export interface GlobalConfig {
   sync_server?: string;
   sync_server_storage_id?: StorageId;
   exclude_patterns: string[];
+  mutable_text?: boolean;
   sync: {
     move_detection_threshold: number;
   };
@@ -49,6 +50,7 @@ export interface CloneOptions extends CommandOptions {
 export interface SyncOptions extends CommandOptions {
   force?: boolean;
   dryRun?: boolean;
+  mutableText?: boolean;
 }
 
 /**
@@ -80,6 +82,7 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
+  mutableText?: boolean;
 }
 
 /**

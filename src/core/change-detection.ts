@@ -437,6 +437,10 @@ export class ChangeDetector {
       if (A.isImmutableString(content)) {
         return content.toString();
       }
+      // Handle regular strings (when mutable_text is enabled)
+      if (typeof content === "string") {
+        return content;
+      }
       return content as string | Uint8Array;
     } catch (error) {
       out.taskLine(`Failed to get remote content: ${error}`, true);

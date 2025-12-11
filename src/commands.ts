@@ -65,7 +65,8 @@ async function initializeRepository(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  syncEnabled?: boolean
+  syncEnabled?: boolean,
+  mutableText?: boolean
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
 
@@ -84,6 +85,11 @@ async function setupCommandContext(
   // Override sync_enabled if explicitly specified (e.g., for local-only operations)
   if (syncEnabled !== undefined) {
     config = { ...config, sync_enabled: syncEnabled };
+  }
+
+  // Override mutable_text if explicitly specified via CLI
+  if (mutableText !== undefined) {
+    config = { ...config, mutable_text: mutableText };
   }
 
   // Create repo with config
@@ -161,6 +167,7 @@ export async function init(
   const { repo, syncEngine } = await initializeRepository(resolvedPath, {
     sync_server: options.syncServer,
     sync_server_storage_id: options.syncServerStorageId,
+    mutable_text: options.mutableText,
   });
 
   // Create new root directory document
@@ -194,7 +201,11 @@ export async function sync(
 ): Promise<void> {
   out.task("Syncing");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath);
+  const { repo, syncEngine } = await setupCommandContext(
+    targetPath,
+    undefined,
+    options.mutableText
+  );
 
   if (options.dryRun) {
     out.update("Analyzing changes");

@@ -38,11 +38,20 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
+  .option(
+    "--mutable-text",
+    "Use mutable strings instead of ImmutableString for text files",
+    false
+  )
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
       opts.syncServer
     );
-    await init(path, { syncServer, syncServerStorageId });
+    await init(path, {
+      syncServer,
+      syncServerStorageId,
+      mutableText: opts.mutableText,
+    });
   });
 
 // Clone command
@@ -99,11 +108,17 @@ program
     "Show what would be done without applying changes",
     false
   )
+  .option(
+    "--mutable-text",
+    "Use mutable strings instead of ImmutableString for text files",
+    false
+  )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
       dryRun: opts.dryRun,
       verbose: opts.verbose,
+      mutableText: opts.mutableText,
     });
   });
 

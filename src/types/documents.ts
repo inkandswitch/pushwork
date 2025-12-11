@@ -27,7 +27,7 @@ export interface FileDocument {
   name: string;
   extension: string;
   mimeType: string;
-  content: A.ImmutableString | Uint8Array;
+  content: A.ImmutableString | Uint8Array | string;
   metadata: {
     permissions: number;
   };

@@ -130,6 +130,7 @@ export class ConfigManager {
       ],
       sync_server: DEFAULT_SYNC_SERVER,
       sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      mutable_text: false,
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -151,6 +152,7 @@ export class ConfigManager {
         ".pushwork",
         ".DS_Store",
       ],
+      mutable_text: false,
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -212,6 +214,10 @@ export class ConfigManager {
 
     if ("sync_enabled" in override && override.sync_enabled !== undefined) {
       merged.sync_enabled = override.sync_enabled;
+    }
+
+    if ("mutable_text" in override && override.mutable_text !== undefined) {
+      merged.mutable_text = override.mutable_text;
     }
 
     // Handle GlobalConfig structure

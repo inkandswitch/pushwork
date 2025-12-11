@@ -47,6 +47,7 @@ pushwork url
 
 - `--sync-server <url>` - Custom sync server URL
 - `--sync-server-storage-id <id>` - Custom storage ID
+- `--mutable-text` - Use mutable strings instead of ImmutableString for text files
 - `--debug` - Export performance flame graphs
 
 **`clone <url> <path>`** - Clone an existing synced directory
@@ -58,6 +59,7 @@ pushwork url
 **`sync [path]`** - Run bidirectional synchronization
 
 - `--dry-run` - Preview changes without applying
+- `--mutable-text` - Use mutable strings instead of ImmutableString for text files
 - `--verbose` - Show detailed progress
 - `--debug` - Export performance flame graphs
 
@@ -108,6 +110,7 @@ Configuration is stored in `.pushwork/config.json`:
   "sync_server": "wss://sync3.automerge.org",
   "sync_server_storage_id": "3760df37-a4c6-4f66-9ecd-732039a9385d",
   "sync_enabled": true,
+  "mutable_text": false,
   "defaults": {
     "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
     "large_file_threshold": "100MB"
@@ -123,6 +126,10 @@ Configuration is stored in `.pushwork/config.json`:
   }
 }
 ```
+
+### Configuration Options
+
+- **`mutable_text`** (boolean, default: `false`): When `true`, uses regular JavaScript strings instead of Automerge ImmutableString for text files. This can improve performance for large text files but may reduce merge capabilities.
 
 ## How It Works
 
@@ -154,7 +161,7 @@ State tracking:
   name: string;
   extension: string;
   mimeType: string;
-  content: ImmutableString | Uint8Array;
+  content: ImmutableString | Uint8Array | string; // string when mutable_text is enabled
   metadata: {
     permissions: number;
   };
