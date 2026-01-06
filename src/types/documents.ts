@@ -1,5 +1,4 @@
 import { AutomergeUrl, UrlHeads } from "@automerge/automerge-repo";
-import * as A from "@automerge/automerge";
 
 /**
  * Entry in a directory document
@@ -27,7 +26,7 @@ export interface FileDocument {
   name: string;
   extension: string;
   mimeType: string;
-  content: A.ImmutableString | Uint8Array;
+  content: string | Uint8Array;
   metadata: {
     permissions: number;
   };

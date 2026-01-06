@@ -411,12 +411,7 @@ export class ChangeDetector {
     const handle = await this.repo.find<FileDocument>(url);
     const doc = await handle.view(heads).doc();
 
-    const content = (doc as FileDocument | undefined)?.content;
-    // Convert ImmutableString to regular string
-    if (A.isImmutableString(content)) {
-      return content.toString();
-    }
-    return content as string | Uint8Array;
+    return (doc as FileDocument | undefined)?.content ?? null;
   }
 
   /**
@@ -432,12 +427,7 @@ export class ChangeDetector {
       if (!doc) return null;
 
       const fileDoc = doc as FileDocument;
-      const content = fileDoc.content;
-      // Convert ImmutableString to regular string
-      if (A.isImmutableString(content)) {
-        return content.toString();
-      }
-      return content as string | Uint8Array;
+      return fileDoc.content;
     } catch (error) {
       out.taskLine(`Failed to get remote content: ${error}`, true);
       return null;

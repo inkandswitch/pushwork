@@ -154,7 +154,7 @@ State tracking:
   name: string;
   extension: string;
   mimeType: string;
-  content: ImmutableString | Uint8Array;
+  content: string | Uint8Array;
   metadata: {
     permissions: number;
   };
