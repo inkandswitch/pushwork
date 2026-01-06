@@ -554,11 +554,7 @@ export class SyncEngine {
 
           // If new content is provided, update it (handles move + modification case)
           if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
+            doc.content = move.newContent;
           }
         });
       } else {
@@ -567,11 +563,7 @@ export class SyncEngine {
 
           // If new content is provided, update it (handles move + modification case)
           if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
+            doc.content = move.newContent;
           }
         });
       }
@@ -612,11 +604,7 @@ export class SyncEngine {
       name: change.path.split("/").pop() || "",
       extension: getFileExtension(change.path),
       mimeType: getEnhancedMimeType(change.path),
-      content: isText
-        ? new A.ImmutableString("")
-        : typeof change.localContent === "string"
-        ? new A.ImmutableString(change.localContent)
-        : change.localContent, // Empty ImmutableString for text, wrap strings for safety, actual content for binary
+      content: change.localContent,
       metadata: {
         permissions: 0o644,
       },
@@ -624,10 +612,10 @@ export class SyncEngine {
 
     const handle = this.repo.create(fileDoc);
 
-    // For text files, use ImmutableString for better performance
+    // For text files, set the actual content
     if (isText && typeof change.localContent === "string") {
       handle.change((doc: FileDocument) => {
-        doc.content = new A.ImmutableString(change.localContent as string);
+        doc.content = change.localContent as string;
       });
     }
 
@@ -678,11 +666,7 @@ export class SyncEngine {
     }
 
     handle.changeAt(heads, (doc: FileDocument) => {
-      if (typeof content === "string") {
-        doc.content = new A.ImmutableString(content);
-      } else {
-        doc.content = content;
-      }
+      doc.content = content;
     });
 
     // Update snapshot with new heads after content change
@@ -716,11 +700,11 @@ export class SyncEngine {
     }
     if (heads) {
       handle.changeAt(heads, (doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
+        doc.content = "";
       });
     } else {
       handle.change((doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
+        doc.content = "";
       });
     }
   }

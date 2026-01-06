@@ -4,7 +4,6 @@ import * as crypto from "crypto";
 import { glob } from "glob";
 import * as mimeTypes from "mime-types";
 import * as ignore from "ignore";
-import * as A from "@automerge/automerge";
 import { FileSystemEntry, FileType } from "../types";
 import { isEnhancedTextFile } from "./mime-types";
 
@@ -96,15 +95,12 @@ export async function readFileContent(
  */
 export async function writeFileContent(
   filePath: string,
-  content: string | A.ImmutableString | Uint8Array
+  content: string | Uint8Array
 ): Promise<void> {
   await ensureDirectoryExists(path.dirname(filePath));
 
   if (typeof content === "string") {
     await fs.writeFile(filePath, content, "utf8");
-  } else if (A.isImmutableString(content)) {
-    // Convert ImmutableString to regular string for filesystem operations
-    await fs.writeFile(filePath, content.toString(), "utf8");
   } else {
     await fs.writeFile(filePath, content);
   }
@@ -232,14 +228,10 @@ export async function movePath(
  * Calculate content hash for change detection
  */
 export async function calculateContentHash(
-  content: string | A.ImmutableString | Uint8Array
+  content: string | Uint8Array
 ): Promise<string> {
   const hash = crypto.createHash("sha256");
-  if (A.isImmutableString(content)) {
-    hash.update(content.toString());
-  } else {
-    hash.update(content);
-  }
+  hash.update(content);
   return hash.digest("hex");
 }
 
