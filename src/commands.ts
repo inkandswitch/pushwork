@@ -23,6 +23,7 @@ import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
 import { createRepo } from "./utils/repo-factory";
 import { out } from "./utils/output";
+import { waitForSync } from "./utils/network-sync";
 import chalk from "chalk";
 
 /**
@@ -158,7 +159,7 @@ export async function init(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
-  const { repo, syncEngine } = await initializeRepository(resolvedPath, {
+  const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
     sync_server: options.syncServer,
     sync_server_storage_id: options.syncServerStorageId,
   });
@@ -173,6 +174,19 @@ export async function init(
 
   // Set root directory URL in snapshot
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
+
+  // Wait for root document to sync to server if sync is enabled
+  // This ensures the document is uploaded before we exit
+  // waitForSync() verifies the server has the document by comparing local and remote heads
+  if (config.sync_enabled && config.sync_server_storage_id) {
+    try {
+      out.update("Syncing to server");
+      await waitForSync([rootHandle], config.sync_server_storage_id);
+    } catch (error) {
+      out.taskLine(`Network sync failed: ${error}`, true);
+      // Continue anyway - the document is created locally and will sync later
+    }
+  }
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);

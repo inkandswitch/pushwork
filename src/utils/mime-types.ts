@@ -109,8 +109,9 @@ const FORCE_TEXT_EXTENSIONS = new Set([
  * Get enhanced MIME type for file with custom dev file support
  */
 export function getEnhancedMimeType(filePath: string): string {
-  const filename = filePath.split("/").pop() || "";
-  const extension = getFileExtension(filePath);
+  const normalized = normalizePathSeparators(filePath);
+  const filename = normalized.split("/").pop() || "";
+  const extension = getFileExtension(normalized);
 
   // Check custom definitions first (by extension)
   if (extension && CUSTOM_MIME_TYPES[extension]) {
@@ -123,7 +124,7 @@ export function getEnhancedMimeType(filePath: string): string {
   }
 
   // Fall back to standard mime-types library
-  const standardMime = mimeTypes.lookup(filePath);
+  const standardMime = mimeTypes.lookup(normalized);
   if (standardMime) {
     return standardMime;
   }
@@ -145,7 +146,14 @@ export function shouldForceAsText(filePath: string): boolean {
  */
 function getFileExtension(filePath: string): string {
   const match = filePath.match(/\.[^.]*$/);
-  return match ? match[0] : "";
+  return match ? match[0].toLowerCase() : "";
+}
+
+/**
+ * Normalize path separators to forward slashes for cross-platform consistency
+ */
+function normalizePathSeparators(p: string): string {
+  return p.replace(/\\/g, "/");
 }
 
 /**
