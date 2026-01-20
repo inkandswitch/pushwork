@@ -188,12 +188,18 @@ export async function init(
     }
   }
 
+  // Run initial sync to capture existing files
+  out.update("Running initial sync");
+  const result = await syncEngine.sync();
+
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
 
   out.done("Initialized");
   out.successBlock("INITIALIZED", rootHandle.url);
-  out.info("Run 'pushwork sync' to start syncing");
+  if (result.filesChanged > 0) {
+    out.info(`Synced ${result.filesChanged} ${plural("file", result.filesChanged)}`);
+  }
 
   process.exit();
 }
