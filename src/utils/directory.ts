@@ -1,8 +1,31 @@
-import { AutomergeUrl, Repo } from "@automerge/automerge-repo";
+import {
+  AutomergeUrl,
+  Repo,
+  parseAutomergeUrl,
+  stringifyAutomergeUrl,
+} from "@automerge/automerge-repo";
 import { DirectoryDocument } from "../types";
 
 /**
- * Find a file in the directory hierarchy by path
+ * Get a plain URL (without heads) from any URL.
+ * Versioned URLs with heads return view handles, which show a frozen point in time.
+ * For internal navigation, we always want to see the CURRENT state of documents.
+ */
+export function getPlainUrl(url: AutomergeUrl): AutomergeUrl {
+  const { documentId } = parseAutomergeUrl(url);
+  return stringifyAutomergeUrl({ documentId });
+}
+
+/**
+ * Find a file in the directory hierarchy by path.
+ *
+ * IMPORTANT: This function strips heads from all URLs before navigation.
+ * This ensures we always see the CURRENT state of directories, not a frozen
+ * point-in-time view. This is critical because:
+ * 1. Directory documents store versioned URLs for subdirectories
+ * 2. These URLs may have been captured when the subdirectory was empty
+ * 3. Using versioned URLs would make files appear to not exist
+ * 4. This would trigger false "remote deletion" detection
  */
 export async function findFileInDirectoryHierarchy(
   repo: Repo,
@@ -11,7 +34,8 @@ export async function findFileInDirectoryHierarchy(
 ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
   try {
     const pathParts = filePath.split("/");
-    let currentDirUrl = directoryUrl;
+    // CRITICAL: Strip heads to get current document state, not frozen view
+    let currentDirUrl = getPlainUrl(directoryUrl);
 
     // Navigate through directories to find the parent directory
     for (let i = 0; i < pathParts.length - 1; i++) {
@@ -27,7 +51,8 @@ export async function findFileInDirectoryHierarchy(
       );
 
       if (!subDirEntry) return null;
-      currentDirUrl = subDirEntry.url;
+      // CRITICAL: Strip heads from subdirectory URL to see current state
+      currentDirUrl = getPlainUrl(subDirEntry.url);
     }
 
     // Now look for the file in the final directory

@@ -145,6 +145,10 @@ export class SyncEngine {
       result.errors.push(...commitResult.errors);
       result.warnings.push(...commitResult.warnings);
 
+      // CRITICAL: Update directory URLs in parent documents AFTER all children are populated
+      // This ensures versioned URLs have current heads, not stale heads from creation time
+      await this.updateDirectoryUrlsLeafFirst(snapshot);
+
       // Touch root directory if any changes were made
       const hasChanges =
         result.filesChanged > 0 || result.directoriesChanged > 0;
@@ -212,6 +216,11 @@ export class SyncEngine {
       result.directoriesChanged += phase1Result.directoriesChanged;
       result.errors.push(...phase1Result.errors);
       result.warnings.push(...phase1Result.warnings);
+
+      // CRITICAL: Update directory URLs in parent documents AFTER all children are populated
+      // This ensures versioned URLs have current heads, not stale heads from creation time
+      // Must happen BEFORE network sync so clients get correct versioned URLs
+      await this.updateDirectoryUrlsLeafFirst(snapshot);
 
       // Always wait for network sync when enabled (not just when local changes exist)
       // This is critical for clone scenarios where we need to pull remote changes
@@ -1238,5 +1247,261 @@ export class SyncEngine {
     }
 
     return handles;
+  }
+
+  /**
+   * Update all URLs (files and directories) in directory documents with current heads.
+   *
+   * This MUST be called AFTER all changes are applied but BEFORE network sync.
+   * The problem it solves:
+   * 1. When we create/update a file or directory and store its URL, the URL captures
+   *    the heads at that moment
+   * 2. Later operations may advance the document's heads
+   * 3. But the URL stored in the parent directory has stale heads
+   * 4. Clients reading the directory would get old views of entries
+   *
+   * The fix: walk leaf-first and update all entry URLs with current heads,
+   * AFTER all changes have been applied. This ensures clients get consistent,
+   * up-to-date versioned URLs.
+   */
+  private async updateDirectoryUrlsLeafFirst(
+    snapshot: SyncSnapshot
+  ): Promise<void> {
+    // First, update file URLs in their parent directories
+    await this.updateFileUrlsInDirectories(snapshot);
+
+    // Then, update directory URLs in their parent directories (leaf-first)
+    await this.updateSubdirectoryUrls(snapshot);
+  }
+
+  /**
+   * Update file URLs in directory documents with current heads.
+   */
+  private async updateFileUrlsInDirectories(
+    snapshot: SyncSnapshot
+  ): Promise<void> {
+    // Group files by their parent directory
+    const filesByDir = new Map<string, string[]>();
+
+    for (const filePath of snapshot.files.keys()) {
+      const pathParts = filePath.split("/");
+      pathParts.pop(); // Remove filename
+      const dirPath = pathParts.join("/");
+
+      if (!filesByDir.has(dirPath)) {
+        filesByDir.set(dirPath, []);
+      }
+      filesByDir.get(dirPath)!.push(filePath);
+    }
+
+    // Process each directory that has files
+    for (const [dirPath, filePaths] of filesByDir.entries()) {
+      try {
+        // Get the directory URL
+        let dirUrl: AutomergeUrl;
+        if (!dirPath || dirPath === "") {
+          if (!snapshot.rootDirectoryUrl) continue;
+          dirUrl = snapshot.rootDirectoryUrl;
+        } else {
+          const dirEntry = snapshot.directories.get(dirPath);
+          if (!dirEntry) continue;
+          dirUrl = dirEntry.url;
+        }
+
+        // Get directory handle
+        const dirHandle = await this.repo.find<DirectoryDocument>(
+          this.getPlainUrl(dirUrl)
+        );
+
+        // Get current heads for changeAt
+        const snapshotEntry = snapshot.directories.get(dirPath);
+        const heads = snapshotEntry?.head;
+
+        // Build a map of file names to their current versioned URLs
+        const fileUrlUpdates = new Map<string, AutomergeUrl>();
+
+        for (const filePath of filePaths) {
+          const fileEntry = snapshot.files.get(filePath);
+          if (!fileEntry) continue;
+
+          // Get current handle for this file
+          const fileHandle = await this.repo.find<FileDocument>(
+            this.getPlainUrl(fileEntry.url)
+          );
+
+          // Get versioned URL with current heads
+          const currentVersionedUrl = this.getVersionedUrl(fileHandle);
+
+          // Update snapshot entry
+          snapshot.files.set(filePath, {
+            ...fileEntry,
+            url: currentVersionedUrl,
+            head: fileHandle.heads(),
+          });
+
+          // Store for directory update
+          const fileName = filePath.split("/").pop() || "";
+          fileUrlUpdates.set(fileName, currentVersionedUrl);
+        }
+
+        // Update all file entries in the directory document
+        let didChange = false;
+        if (heads) {
+          dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
+            for (const [fileName, newUrl] of fileUrlUpdates) {
+              const existingIndex = doc.docs.findIndex(
+                (entry) => entry.name === fileName && entry.type === "file"
+              );
+              if (existingIndex !== -1 && doc.docs[existingIndex].url !== newUrl) {
+                doc.docs[existingIndex].url = newUrl;
+                didChange = true;
+              }
+            }
+          });
+        } else {
+          dirHandle.change((doc: DirectoryDocument) => {
+            for (const [fileName, newUrl] of fileUrlUpdates) {
+              const existingIndex = doc.docs.findIndex(
+                (entry) => entry.name === fileName && entry.type === "file"
+              );
+              if (existingIndex !== -1 && doc.docs[existingIndex].url !== newUrl) {
+                doc.docs[existingIndex].url = newUrl;
+                didChange = true;
+              }
+            }
+          });
+        }
+
+        // Track directory and update heads
+        if (didChange) {
+          this.handlesByPath.set(dirPath, dirHandle);
+          if (snapshotEntry) {
+            snapshotEntry.head = dirHandle.heads();
+          }
+        }
+      } catch (error) {
+        out.taskLine(
+          `Warning: Failed to update file URLs in directory ${dirPath}`,
+          true
+        );
+      }
+    }
+  }
+
+  /**
+   * Update subdirectory URLs in parent directories with current heads.
+   * Processes leaf-first (deepest directories first).
+   */
+  private async updateSubdirectoryUrls(snapshot: SyncSnapshot): Promise<void> {
+    // Get all directory paths and sort leaf-first (deepest first)
+    const directoryPaths = Array.from(snapshot.directories.keys()).sort(
+      (a, b) => {
+        const depthA = a ? a.split("/").length : 0;
+        const depthB = b ? b.split("/").length : 0;
+
+        // Deepest first
+        if (depthA !== depthB) {
+          return depthB - depthA;
+        }
+
+        // Alphabetically by path
+        return a.localeCompare(b);
+      }
+    );
+
+    // Update each directory's URL in its parent
+    for (const dirPath of directoryPaths) {
+      // Skip root directory (has no parent)
+      if (!dirPath || dirPath === "") {
+        continue;
+      }
+
+      const dirEntry = snapshot.directories.get(dirPath);
+      if (!dirEntry) continue;
+
+      try {
+        // Get current handle for this directory (use plain URL to get mutable handle)
+        const dirHandle = await this.repo.find<DirectoryDocument>(
+          this.getPlainUrl(dirEntry.url)
+        );
+
+        // Get versioned URL with CURRENT heads (after all children populated)
+        const currentVersionedUrl = this.getVersionedUrl(dirHandle);
+
+        // Update snapshot entry with current heads and versioned URL
+        snapshot.directories.set(dirPath, {
+          ...dirEntry,
+          url: currentVersionedUrl,
+          head: dirHandle.heads(),
+        });
+
+        // Get parent path
+        const pathParts = dirPath.split("/");
+        const dirName = pathParts.pop() || "";
+        const parentPath = pathParts.join("/");
+
+        // Get parent directory handle
+        let parentDirUrl: AutomergeUrl;
+        if (!parentPath || parentPath === "") {
+          // Parent is root
+          if (!snapshot.rootDirectoryUrl) continue;
+          parentDirUrl = snapshot.rootDirectoryUrl;
+        } else {
+          const parentEntry = snapshot.directories.get(parentPath);
+          if (!parentEntry) continue;
+          parentDirUrl = parentEntry.url;
+        }
+
+        // Update the directory entry in the parent with the new versioned URL
+        const parentHandle = await this.repo.find<DirectoryDocument>(
+          this.getPlainUrl(parentDirUrl)
+        );
+
+        // Get parent's current heads for changeAt
+        const parentSnapshotEntry =
+          parentPath === ""
+            ? snapshot.directories.get("")
+            : snapshot.directories.get(parentPath);
+        const parentHeads = parentSnapshotEntry?.head;
+
+        let didChange = false;
+        if (parentHeads) {
+          parentHandle.changeAt(parentHeads, (doc: DirectoryDocument) => {
+            const existingIndex = doc.docs.findIndex(
+              (entry) => entry.name === dirName && entry.type === "folder"
+            );
+            if (existingIndex !== -1) {
+              // Update the URL with current versioned URL
+              doc.docs[existingIndex].url = currentVersionedUrl;
+              didChange = true;
+            }
+          });
+        } else {
+          parentHandle.change((doc: DirectoryDocument) => {
+            const existingIndex = doc.docs.findIndex(
+              (entry) => entry.name === dirName && entry.type === "folder"
+            );
+            if (existingIndex !== -1) {
+              // Update the URL with current versioned URL
+              doc.docs[existingIndex].url = currentVersionedUrl;
+              didChange = true;
+            }
+          });
+        }
+
+        // Track parent for sync and update its heads in snapshot
+        if (didChange) {
+          this.handlesByPath.set(parentPath, parentHandle);
+          if (parentSnapshotEntry) {
+            parentSnapshotEntry.head = parentHandle.heads();
+          }
+        }
+      } catch (error) {
+        out.taskLine(
+          `Warning: Failed to update directory URL for ${dirPath}`,
+          true
+        );
+      }
+    }
   }
 }

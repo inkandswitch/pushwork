@@ -84,6 +84,15 @@
       "<rootDir>/test/jest.setup.ts"
     ],
     "maxWorkers": "75%",
-    "maxConcurrency": 10
+    "maxConcurrency": 10,
+    "transformIgnorePatterns": [
+      "node_modules/(?!(@automerge)/)"
+    ],
+    "transform": {
+      "^.+\\.[jt]sx?$": ["ts-jest", {
+        "useESM": true
+      }]
+    },
+    "extensionsToTreatAsEsm": [".ts"]
   }
 }
