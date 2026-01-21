@@ -20,20 +20,16 @@ import {
   joinAndNormalizePath,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
-import { waitForSync } from "../utils/network-sync";
+import { waitForSync, waitForBidirectionalSync } from "../utils/network-sync";
 import { SnapshotManager } from "./snapshot";
 import { ChangeDetector } from "./change-detection";
 import { MoveDetector } from "./move-detection";
 import { out } from "../utils/output";
 
 /**
- * Post-sync delay constants for network propagation
- * These delays allow the WebSocket protocol to propagate peer changes after
- * our changes reach the server. waitForSync only ensures OUR changes reached
- * the server, not that we've RECEIVED changes from other peers.
- * TODO: remove need for this to exist.
+ * Sync configuration constants
  */
-const POST_SYNC_DELAY_MS = 200; // After we pushed changes
+const BIDIRECTIONAL_SYNC_TIMEOUT_MS = 5000; // Timeout for bidirectional sync stability check
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -208,21 +204,22 @@ export class SyncEngine {
               this.handlesToWaitOn,
               this.config.sync_server_storage_id
             );
-
-            // CRITICAL: Wait a bit after our changes reach the server to allow
-            // time for WebSocket to deliver OTHER peers' changes to us.
-            // waitForSync only ensures OUR changes reached the server, not that
-            // we've RECEIVED changes from other peers. This delay allows the
-            // WebSocket protocol to propagate peer changes before we re-detect.
-            // Without this, concurrent operations on different peers can miss
-            // each other due to timing races.
-            //
-            // Optimization: Only wait if we pushed changes (shorter delay if no changes)
-
-            await new Promise((resolve) =>
-              setTimeout(resolve, POST_SYNC_DELAY_MS)
-            );
           }
+
+          // Wait for bidirectional sync to stabilize.
+          // This polls document heads until they stop changing, which indicates
+          // that both our outgoing changes and any incoming peer changes have
+          // been received.
+          await waitForBidirectionalSync(
+            this.repo,
+            snapshot.rootDirectoryUrl,
+            this.config.sync_server_storage_id,
+            {
+              timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
+              pollIntervalMs: 100,
+              stableChecksRequired: 3,
+            }
+          );
         } catch (error) {
           out.taskLine(`Network sync failed: ${error}`, true);
           result.warnings.push(`Network sync failed: ${error}`);

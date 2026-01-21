@@ -1,6 +1,136 @@
-import { DocHandle, StorageId } from "@automerge/automerge-repo";
+import { DocHandle, StorageId, Repo, AutomergeUrl } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import { out } from "./output";
+import { DirectoryDocument } from "../types";
+
+/**
+ * Wait for bidirectional sync to stabilize.
+ * This function waits until document heads stop changing, indicating that
+ * both outgoing and incoming sync has completed.
+ * 
+ * @param repo - The Automerge repository
+ * @param rootDirectoryUrl - The root directory URL to start traversal from
+ * @param syncServerStorageId - The sync server storage ID
+ * @param options - Configuration options
+ */
+export async function waitForBidirectionalSync(
+  repo: Repo,
+  rootDirectoryUrl: AutomergeUrl | undefined,
+  syncServerStorageId: StorageId | undefined,
+  options: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    stableChecksRequired?: number;
+  } = {}
+): Promise<void> {
+  const {
+    timeoutMs = 10000,
+    pollIntervalMs = 100,
+    stableChecksRequired = 3,
+  } = options;
+
+  if (!syncServerStorageId || !rootDirectoryUrl) {
+    return;
+  }
+
+  const startTime = Date.now();
+  let lastSeenHeads = new Map<string, string>();
+  let stableCount = 0;
+
+  while (Date.now() - startTime < timeoutMs) {
+    // Get current heads for all documents in the directory hierarchy
+    const currentHeads = await getAllDocumentHeads(repo, rootDirectoryUrl);
+
+    // Check if heads are stable (no changes since last check)
+    const isStable = headsMapEqual(lastSeenHeads, currentHeads);
+
+    if (isStable) {
+      stableCount++;
+      if (stableCount >= stableChecksRequired) {
+        return; // Converged!
+      }
+    } else {
+      stableCount = 0;
+      lastSeenHeads = currentHeads;
+    }
+
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  // Timeout - but don't throw, just log a warning
+  // The sync may still work, we just couldn't confirm stability
+  out.taskLine(`Sync stability check timed out after ${timeoutMs}ms`, true);
+}
+
+/**
+ * Get all document heads in the directory hierarchy.
+ * Returns a map of document URL -> serialized heads.
+ */
+async function getAllDocumentHeads(
+  repo: Repo,
+  rootDirectoryUrl: AutomergeUrl
+): Promise<Map<string, string>> {
+  const heads = new Map<string, string>();
+  await collectHeadsRecursive(repo, rootDirectoryUrl, heads);
+  return heads;
+}
+
+/**
+ * Recursively collect document heads from the directory hierarchy.
+ */
+async function collectHeadsRecursive(
+  repo: Repo,
+  directoryUrl: AutomergeUrl,
+  heads: Map<string, string>
+): Promise<void> {
+  try {
+    const handle = await repo.find<DirectoryDocument>(directoryUrl);
+    const doc = await handle.doc();
+    
+    // Record this directory's heads
+    heads.set(directoryUrl, JSON.stringify(handle.heads()));
+
+    if (!doc || !doc.docs) {
+      return;
+    }
+
+    // Process all entries in the directory
+    for (const entry of doc.docs) {
+      if (entry.type === "folder") {
+        // Recurse into subdirectory
+        await collectHeadsRecursive(repo, entry.url, heads);
+      } else if (entry.type === "file") {
+        // Get file document heads
+        try {
+          const fileHandle = await repo.find(entry.url);
+          heads.set(entry.url, JSON.stringify(fileHandle.heads()));
+        } catch {
+          // File document may not exist yet
+        }
+      }
+    }
+  } catch {
+    // Directory may not exist yet
+  }
+}
+
+/**
+ * Compare two heads maps for equality.
+ */
+function headsMapEqual(
+  a: Map<string, string>,
+  b: Map<string, string>
+): boolean {
+  if (a.size !== b.size) {
+    return false;
+  }
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Wait for documents to sync to the remote server
