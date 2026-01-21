@@ -34,7 +34,6 @@ export async function findFileInDirectoryHierarchy(
 ): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
   try {
     const pathParts = filePath.split("/");
-    // CRITICAL: Strip heads to get current document state, not frozen view
     let currentDirUrl = getPlainUrl(directoryUrl);
 
     // Navigate through directories to find the parent directory
@@ -51,7 +50,6 @@ export async function findFileInDirectoryHierarchy(
       );
 
       if (!subDirEntry) return null;
-      // CRITICAL: Strip heads from subdirectory URL to see current state
       currentDirUrl = getPlainUrl(subDirEntry.url);
     }
 

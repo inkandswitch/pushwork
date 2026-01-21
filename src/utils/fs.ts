@@ -177,8 +177,7 @@ export async function listDirectory(
       ? path.join(dirPath, "**/*")
       : path.join(dirPath, "*");
     
-    // CRITICAL: glob expects forward slashes, even on Windows
-    // Convert backslashes to forward slashes for glob pattern
+    // glob expects forward slashes, even on Windows
     const normalizedPattern = pattern.replace(/\\/g, "/");
 
     // Use glob to get all paths (with dot files)

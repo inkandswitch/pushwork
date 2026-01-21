@@ -2,6 +2,7 @@ import { DocHandle, StorageId, Repo, AutomergeUrl } from "@automerge/automerge-r
 import * as A from "@automerge/automerge";
 import { out } from "./output";
 import { DirectoryDocument } from "../types";
+import { getPlainUrl } from "./directory";
 
 /**
  * Wait for bidirectional sync to stabilize.
@@ -65,18 +66,21 @@ export async function waitForBidirectionalSync(
 /**
  * Get all document heads in the directory hierarchy.
  * Returns a map of document URL -> serialized heads.
+ * Uses plain URLs (without heads) to ensure we see current document state.
  */
 async function getAllDocumentHeads(
   repo: Repo,
   rootDirectoryUrl: AutomergeUrl
 ): Promise<Map<string, string>> {
   const heads = new Map<string, string>();
+  // Pass URL as-is; collectHeadsRecursive will strip heads
   await collectHeadsRecursive(repo, rootDirectoryUrl, heads);
   return heads;
 }
 
 /**
  * Recursively collect document heads from the directory hierarchy.
+ * Uses getPlainUrl to strip heads and always see the CURRENT state of documents.
  */
 async function collectHeadsRecursive(
   repo: Repo,
@@ -84,11 +88,12 @@ async function collectHeadsRecursive(
   heads: Map<string, string>
 ): Promise<void> {
   try {
-    const handle = await repo.find<DirectoryDocument>(directoryUrl);
+    const plainUrl = getPlainUrl(directoryUrl);
+    const handle = await repo.find<DirectoryDocument>(plainUrl);
     const doc = await handle.doc();
     
-    // Record this directory's heads
-    heads.set(directoryUrl, JSON.stringify(handle.heads()));
+    // Record this directory's heads (use plain URL as key for consistency)
+    heads.set(plainUrl, JSON.stringify(handle.heads()));
 
     if (!doc || !doc.docs) {
       return;
@@ -97,13 +102,14 @@ async function collectHeadsRecursive(
     // Process all entries in the directory
     for (const entry of doc.docs) {
       if (entry.type === "folder") {
-        // Recurse into subdirectory
+        // Recurse into subdirectory (entry.url may have stale heads)
         await collectHeadsRecursive(repo, entry.url, heads);
       } else if (entry.type === "file") {
-        // Get file document heads
+        // Get file document heads (strip heads from entry.url)
         try {
-          const fileHandle = await repo.find(entry.url);
-          heads.set(entry.url, JSON.stringify(fileHandle.heads()));
+          const fileUrl = getPlainUrl(entry.url);
+          const fileHandle = await repo.find(fileUrl);
+          heads.set(fileUrl, JSON.stringify(fileHandle.heads()));
         } catch {
           // File document may not exist yet
         }

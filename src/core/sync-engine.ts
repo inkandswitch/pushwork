@@ -2,8 +2,8 @@ import {
   AutomergeUrl,
   Repo,
   DocHandle,
-  stringifyAutomergeUrl,
   parseAutomergeUrl,
+  stringifyAutomergeUrl,
 } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
@@ -24,6 +24,7 @@ import {
   formatRelativePath,
   findFileInDirectoryHierarchy,
   joinAndNormalizePath,
+  getPlainUrl,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { waitForSync, waitForBidirectionalSync } from "../utils/network-sync";
@@ -85,15 +86,6 @@ export class SyncEngine {
   }
 
   /**
-   * Get a plain URL (without heads) from any URL.
-   * Use this when you need to repo.find() and modify a document.
-   */
-  private getPlainUrl(url: AutomergeUrl): AutomergeUrl {
-    const { documentId } = parseAutomergeUrl(url);
-    return stringifyAutomergeUrl({ documentId });
-  }
-
-  /**
    * Set the root directory URL in the snapshot
    */
   async setRootDirectoryUrl(url: AutomergeUrl): Promise<void> {
@@ -145,8 +137,7 @@ export class SyncEngine {
       result.errors.push(...commitResult.errors);
       result.warnings.push(...commitResult.warnings);
 
-      // CRITICAL: Update directory URLs in parent documents AFTER all children are populated
-      // This ensures versioned URLs have current heads, not stale heads from creation time
+      // Update directory URLs with current heads after all children are populated
       await this.updateDirectoryUrlsLeafFirst(snapshot);
 
       // Touch root directory if any changes were made
@@ -196,6 +187,24 @@ export class SyncEngine {
         (await this.snapshotManager.load()) ||
         this.snapshotManager.createEmpty();
 
+      // Wait for initial sync to receive any pending remote changes
+      if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+        try {
+          await waitForBidirectionalSync(
+            this.repo,
+            snapshot.rootDirectoryUrl,
+            this.config.sync_server_storage_id,
+            {
+              timeoutMs: 3000, // Short timeout for initial sync
+              pollIntervalMs: 100,
+              stableChecksRequired: 3,
+            }
+          );
+        } catch (error) {
+          out.taskLine(`Initial sync: ${error}`, true);
+        }
+      }
+
       // Detect all changes
       const changes = await this.changeDetector.detectChanges(snapshot);
 
@@ -217,13 +226,10 @@ export class SyncEngine {
       result.errors.push(...phase1Result.errors);
       result.warnings.push(...phase1Result.warnings);
 
-      // CRITICAL: Update directory URLs in parent documents AFTER all children are populated
-      // This ensures versioned URLs have current heads, not stale heads from creation time
-      // Must happen BEFORE network sync so clients get correct versioned URLs
+      // Update directory URLs with current heads after all children are populated
       await this.updateDirectoryUrlsLeafFirst(snapshot);
 
-      // Always wait for network sync when enabled (not just when local changes exist)
-      // This is critical for clone scenarios where we need to pull remote changes
+      // Wait for network sync (important for clone scenarios)
       if (this.config.sync_enabled) {
         try {
           // If we have a root directory URL, add it to tracked handles
@@ -264,9 +270,7 @@ export class SyncEngine {
         }
       }
 
-      // Re-detect remote changes after network sync to ensure fresh state
-      // This fixes race conditions where we detect changes before server propagation
-      // NOTE: We DON'T update snapshot heads yet - that would prevent detecting remote changes!
+      // Re-detect changes after network sync for fresh state
       const freshChanges = await this.changeDetector.detectChanges(snapshot);
       const freshRemoteChanges = freshChanges.filter(
         (c) =>
@@ -284,10 +288,7 @@ export class SyncEngine {
       result.errors.push(...phase2Result.errors);
       result.warnings.push(...phase2Result.warnings);
 
-      // CRITICAL FIX: Update snapshot heads AFTER pulling remote changes
-      // This ensures that change detection can find remote changes, and we only
-      // update the snapshot after the filesystem is in sync with the documents
-      // Update file document heads
+      // Update snapshot heads after pulling remote changes
       for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
         try {
           const handle = await this.repo.find(snapshotEntry.url);
@@ -450,8 +451,7 @@ export class SyncEngine {
   ): Promise<void> {
     const snapshotEntry = snapshot.files.get(change.path);
 
-    // CRITICAL: Check for null explicitly, not falsy values
-    // Empty strings "" and empty Uint8Array are valid file content!
+    // Check for null (empty string/Uint8Array are valid content)
     if (change.localContent === null) {
       // File was deleted locally
       if (snapshotEntry) {
@@ -471,7 +471,6 @@ export class SyncEngine {
         const versionedUrl = this.getVersionedUrl(handle);
         await this.addFileToDirectory(snapshot, change.path, versionedUrl);
 
-        // CRITICAL FIX: Update snapshot with heads AFTER adding to directory
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
           path: joinAndNormalizePath(this.rootPath, change.path),
           url: versionedUrl,
@@ -506,8 +505,7 @@ export class SyncEngine {
       );
     }
 
-    // CRITICAL: Check for null explicitly, not falsy values
-    // Empty strings "" and empty Uint8Array are valid file content!
+    // Check for null (empty string/Uint8Array are valid content)
     if (change.remoteContent === null) {
       // File was deleted remotely
       await removePath(localPath);
@@ -582,9 +580,9 @@ export class SyncEngine {
 
     // 3) Update the FileDocument name and content to match new location/state
     try {
-      // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+      // Use plain URL for mutable handle
       const handle = await this.repo.find<FileDocument>(
-        this.getPlainUrl(fromEntry.url)
+        getPlainUrl(fromEntry.url)
       );
       const heads = fromEntry.head;
 
@@ -649,8 +647,6 @@ export class SyncEngine {
   private async createRemoteFile(
     change: DetectedChange
   ): Promise<DocHandle<FileDocument> | null> {
-    // CRITICAL: Check for null explicitly, not falsy values
-    // Empty strings "" and empty Uint8Array are valid file content!
     if (change.localContent === null) return null;
 
     const isText = this.isTextContent(change.localContent);
@@ -696,16 +692,15 @@ export class SyncEngine {
     snapshot: SyncSnapshot,
     filePath: string
   ): Promise<void> {
-    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
-    const handle = await this.repo.find<FileDocument>(this.getPlainUrl(url));
+    // Use plain URL for mutable handle
+    const handle = await this.repo.find<FileDocument>(getPlainUrl(url));
 
     // Check if content actually changed before tracking for sync
     const doc = await handle.doc();
     const currentContent = doc?.content;
     const contentChanged = !isContentEqual(content, currentContent);
 
-    // CRITICAL FIX: Always update snapshot heads, even when content is identical
-    // This prevents stale head issues that cause false change detection
+    // Update snapshot heads even when content is identical
     const snapshotEntry = snapshot.files.get(filePath);
     if (snapshotEntry) {
       // Update snapshot with current document heads
@@ -758,7 +753,8 @@ export class SyncEngine {
     // In Automerge, we don't actually delete documents
     // They become orphaned and will be garbage collected
     // For now, we just mark them as deleted by clearing content
-    const handle = await this.repo.find<FileDocument>(url);
+    // Use plain URL for mutable handle
+    const handle = await this.repo.find<FileDocument>(getPlainUrl(url));
     // const doc = await handle.doc(); // no longer needed
     let heads;
     if (snapshot && filePath) {
@@ -795,9 +791,9 @@ export class SyncEngine {
       directoryPath
     );
 
-    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+    // Use plain URL for mutable handle
     const dirHandle = await this.repo.find<DirectoryDocument>(
-      this.getPlainUrl(parentDirUrl)
+      getPlainUrl(parentDirUrl)
     );
 
     let didChange = false;
@@ -836,8 +832,6 @@ export class SyncEngine {
     this.handlesByPath.set(directoryPath, dirHandle);
     
     if (didChange && snapshotEntry) {
-      // CRITICAL FIX: Update snapshot with new directory heads immediately
-      // This prevents stale head issues that cause convergence problems
       snapshotEntry.head = dirHandle.heads();
     }
   }
@@ -930,9 +924,9 @@ export class SyncEngine {
     const versionedDirUrl = this.getVersionedUrl(dirHandle);
 
     // Add this directory to its parent
-    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+    // Use plain URL for mutable handle
     const parentHandle = await this.repo.find<DirectoryDocument>(
-      this.getPlainUrl(parentDirUrl)
+      getPlainUrl(parentDirUrl)
     );
 
     let didChange = false;
@@ -957,8 +951,6 @@ export class SyncEngine {
     if (didChange) {
       this.handlesByPath.set(parentPath, parentHandle);
 
-      // CRITICAL FIX: Update parent directory heads in snapshot immediately
-      // This prevents stale head issues when parent directory is modified
       const parentSnapshotEntry = snapshot.directories.get(parentPath);
       if (parentSnapshotEntry) {
         parentSnapshotEntry.head = parentHandle.heads();
@@ -1004,9 +996,9 @@ export class SyncEngine {
     }
 
     try {
-      // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+      // Use plain URL for mutable handle
       const dirHandle = await this.repo.find<DirectoryDocument>(
-        this.getPlainUrl(parentDirUrl)
+        getPlainUrl(parentDirUrl)
       );
 
       // Track this handle for network sync waiting
@@ -1047,13 +1039,10 @@ export class SyncEngine {
         });
       }
 
-      // CRITICAL FIX: Update snapshot with new directory heads immediately
-      // This prevents stale head issues that cause convergence problems
       if (didChange && snapshotEntry) {
         snapshotEntry.head = dirHandle.heads();
       }
     } catch (error) {
-      // Failed to remove from directory - re-throw for caller to handle
       throw error;
     }
   }
@@ -1208,8 +1197,6 @@ export class SyncEngine {
       // Track root directory for network sync
       this.handlesByPath.set("", rootHandle);
 
-      // CRITICAL FIX: Update root directory heads in snapshot immediately
-      // This prevents stale head issues when root directory is modified
       if (snapshotEntry) {
         snapshotEntry.head = rootHandle.heads();
       }
@@ -1310,7 +1297,7 @@ export class SyncEngine {
 
         // Get directory handle
         const dirHandle = await this.repo.find<DirectoryDocument>(
-          this.getPlainUrl(dirUrl)
+          getPlainUrl(dirUrl)
         );
 
         // Get current heads for changeAt
@@ -1326,7 +1313,7 @@ export class SyncEngine {
 
           // Get current handle for this file
           const fileHandle = await this.repo.find<FileDocument>(
-            this.getPlainUrl(fileEntry.url)
+            getPlainUrl(fileEntry.url)
           );
 
           // Get versioned URL with current heads
@@ -1422,7 +1409,7 @@ export class SyncEngine {
       try {
         // Get current handle for this directory (use plain URL to get mutable handle)
         const dirHandle = await this.repo.find<DirectoryDocument>(
-          this.getPlainUrl(dirEntry.url)
+          getPlainUrl(dirEntry.url)
         );
 
         // Get versioned URL with CURRENT heads (after all children populated)
@@ -1454,7 +1441,7 @@ export class SyncEngine {
 
         // Update the directory entry in the parent with the new versioned URL
         const parentHandle = await this.repo.find<DirectoryDocument>(
-          this.getPlainUrl(parentDirUrl)
+          getPlainUrl(parentDirUrl)
         );
 
         // Get parent's current heads for changeAt

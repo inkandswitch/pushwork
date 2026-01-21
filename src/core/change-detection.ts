@@ -1,10 +1,4 @@
-import {
-  AutomergeUrl,
-  Repo,
-  UrlHeads,
-  parseAutomergeUrl,
-  stringifyAutomergeUrl,
-} from "@automerge/automerge-repo";
+import { AutomergeUrl, Repo, UrlHeads } from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   ChangeType,
@@ -20,6 +14,7 @@ import {
   getRelativePath,
   findFileInDirectoryHierarchy,
   joinAndNormalizePath,
+  getPlainUrl,
 } from "../utils";
 import { isContentEqual } from "../utils/content";
 import { out } from "../utils/output";
@@ -177,8 +172,7 @@ export class ChangeDetector {
     await Promise.all(
       Array.from(snapshot.files.entries()).map(
         async ([relativePath, snapshotEntry]) => {
-          // CRITICAL FIX: Check if file still exists in remote directory listing
-          // Files can be removed from the directory without their document heads changing
+          // Check if file still exists in remote directory listing
           const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
             snapshot.rootDirectoryUrl,
             relativePath
@@ -283,8 +277,8 @@ export class ChangeDetector {
     changes: DetectedChange[]
   ): Promise<void> {
     try {
-      // Use plain URL to find document (versioned URLs return view handles)
-      const plainUrl = this.getPlainUrl(directoryUrl);
+      // Strip heads for current document state
+      const plainUrl = getPlainUrl(directoryUrl);
       const dirHandle = await this.repo.find<DirectoryDocument>(plainUrl);
 
       // Wait for document to be available (important during clone when fetching from network)
@@ -425,8 +419,8 @@ export class ChangeDetector {
     url: AutomergeUrl,
     heads: UrlHeads
   ): Promise<string | Uint8Array | null> {
-    // Use plain URL to find document (versioned URLs return view handles)
-    const plainUrl = this.getPlainUrl(url);
+    // Strip heads for current document state
+    const plainUrl = getPlainUrl(url);
     const handle = await this.repo.find<FileDocument>(plainUrl);
     const doc = await handle.view(heads).doc();
 
@@ -445,8 +439,8 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      // Use plain URL to find document (versioned URLs return view handles)
-      const plainUrl = this.getPlainUrl(url);
+      // Strip heads for current document state
+      const plainUrl = getPlainUrl(url);
       const handle = await this.repo.find<FileDocument>(plainUrl);
 
       // Wait for document to be available (important during clone)
@@ -494,20 +488,11 @@ export class ChangeDetector {
   }
 
   /**
-   * Get a plain URL (without heads) from any URL.
-   * Versioned URLs with heads return view handles that don't work well for discovery.
-   */
-  private getPlainUrl(url: AutomergeUrl): AutomergeUrl {
-    const { documentId } = parseAutomergeUrl(url);
-    return stringifyAutomergeUrl({ documentId });
-  }
-
-  /**
    * Get current head of Automerge document
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
-    // Use plain URL to find document (versioned URLs return view handles)
-    const plainUrl = this.getPlainUrl(url);
+    // Strip heads for current document state
+    const plainUrl = getPlainUrl(url);
     const handle = await this.repo.find<FileDocument>(plainUrl);
     return handle.heads();
   }
