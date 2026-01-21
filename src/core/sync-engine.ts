@@ -1,4 +1,10 @@
-import { AutomergeUrl, Repo, DocHandle } from "@automerge/automerge-repo";
+import {
+  AutomergeUrl,
+  Repo,
+  DocHandle,
+  stringifyAutomergeUrl,
+  parseAutomergeUrl,
+} from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   SyncSnapshot,
@@ -38,7 +44,9 @@ export class SyncEngine {
   private snapshotManager: SnapshotManager;
   private changeDetector: ChangeDetector;
   private moveDetector: MoveDetector;
-  private handlesToWaitOn: DocHandle<unknown>[] = [];
+  // Map from path to handle for leaf-first sync ordering
+  // Path depth determines sync order (deepest first)
+  private handlesByPath: Map<string, DocHandle<unknown>> = new Map();
   private config: DirectoryConfig;
 
   constructor(
@@ -64,6 +72,25 @@ export class SyncEngine {
   private isTextContent(content: string | Uint8Array): boolean {
     // Simply check the actual type of the content
     return typeof content === "string";
+  }
+
+  /**
+   * Get a versioned URL from a handle (includes current heads).
+   * This ensures clients can fetch the exact version of the document.
+   */
+  private getVersionedUrl(handle: DocHandle<unknown>): AutomergeUrl {
+    const { documentId } = parseAutomergeUrl(handle.url);
+    const heads = handle.heads();
+    return stringifyAutomergeUrl({ documentId, heads });
+  }
+
+  /**
+   * Get a plain URL (without heads) from any URL.
+   * Use this when you need to repo.find() and modify a document.
+   */
+  private getPlainUrl(url: AutomergeUrl): AutomergeUrl {
+    const { documentId } = parseAutomergeUrl(url);
+    return stringifyAutomergeUrl({ documentId });
   }
 
   /**
@@ -156,8 +183,8 @@ export class SyncEngine {
       timings: {},
     };
 
-    // Reset handles to wait on
-    this.handlesToWaitOn = [];
+    // Reset tracked handles for sync
+    this.handlesByPath = new Map();
 
     try {
       // Load current snapshot
@@ -190,18 +217,20 @@ export class SyncEngine {
       // This is critical for clone scenarios where we need to pull remote changes
       if (this.config.sync_enabled) {
         try {
-          // If we have a root directory URL, wait for it to sync
+          // If we have a root directory URL, add it to tracked handles
           if (snapshot.rootDirectoryUrl) {
             const rootDirUrl = snapshot.rootDirectoryUrl;
             const rootHandle = await this.repo.find<DirectoryDocument>(
               rootDirUrl
             );
-            this.handlesToWaitOn.push(rootHandle);
+            this.handlesByPath.set("", rootHandle);
           }
 
-          if (this.handlesToWaitOn.length > 0) {
+          if (this.handlesByPath.size > 0) {
+            // Sort handles leaf-first (deepest paths first, then shallower)
+            const sortedHandles = this.sortHandlesLeafFirst();
             await waitForSync(
-              this.handlesToWaitOn,
+              sortedHandles,
               this.config.sync_server_storage_id
             );
           }
@@ -429,13 +458,14 @@ export class SyncEngine {
       // New file
       const handle = await this.createRemoteFile(change);
       if (handle) {
-        await this.addFileToDirectory(snapshot, change.path, handle.url);
+        // Use versioned URL (includes heads) so clients fetch correct version
+        const versionedUrl = this.getVersionedUrl(handle);
+        await this.addFileToDirectory(snapshot, change.path, versionedUrl);
 
         // CRITICAL FIX: Update snapshot with heads AFTER adding to directory
-        // The addFileToDirectory call above may have changed the document heads
         this.snapshotManager.updateFileEntry(snapshot, change.path, {
           path: joinAndNormalizePath(this.rootPath, change.path),
-          url: handle.url,
+          url: versionedUrl,
           head: handle.heads(),
           extension: getFileExtension(change.path),
           mimeType: getEnhancedMimeType(change.path),
@@ -496,9 +526,12 @@ export class SyncEngine {
           );
 
           if (fileEntry) {
+            // Get versioned URL from handle (includes heads)
+            const fileHandle = await this.repo.find<FileDocument>(fileEntry.url);
+            const versionedUrl = this.getVersionedUrl(fileHandle);
             this.snapshotManager.updateFileEntry(snapshot, change.path, {
               path: localPath,
-              url: fileEntry.url,
+              url: versionedUrl,
               head: change.remoteHead,
               extension: getFileExtension(change.path),
               mimeType: getEnhancedMimeType(change.path),
@@ -535,13 +568,15 @@ export class SyncEngine {
       await this.removeFileFromDirectory(snapshot, move.fromPath);
     }
 
-    // 2) Ensure destination directory document exists and add file entry there
+    // 2) Ensure destination directory document exists
     await this.ensureDirectoryDocument(snapshot, toDirPath);
-    await this.addFileToDirectory(snapshot, move.toPath, fromEntry.url);
 
     // 3) Update the FileDocument name and content to match new location/state
     try {
-      const handle = await this.repo.find<FileDocument>(fromEntry.url);
+      // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+      const handle = await this.repo.find<FileDocument>(
+        this.getPlainUrl(fromEntry.url)
+      );
       const heads = fromEntry.head;
 
       // Update both name and content (if content changed during move)
@@ -572,8 +607,24 @@ export class SyncEngine {
           }
         });
       }
+
+      // Get versioned URL after changes (includes current heads)
+      const versionedUrl = this.getVersionedUrl(handle);
+
+      // 4) Add file entry to destination directory with versioned URL
+      await this.addFileToDirectory(snapshot, move.toPath, versionedUrl);
+
       // Track file handle for network sync
-      this.handlesToWaitOn.push(handle);
+      this.handlesByPath.set(move.toPath, handle);
+
+      // 5) Update snapshot entries
+      this.snapshotManager.removeFileEntry(snapshot, move.fromPath);
+      this.snapshotManager.updateFileEntry(snapshot, move.toPath, {
+        ...fromEntry,
+        path: joinAndNormalizePath(this.rootPath, move.toPath),
+        url: versionedUrl,
+        head: handle.heads(),
+      });
     } catch (e) {
       // Failed to update file name - file may have been deleted
       out.taskLine(
@@ -581,14 +632,6 @@ export class SyncEngine {
         true
       );
     }
-
-    // 4) Update snapshot entries
-    this.snapshotManager.removeFileEntry(snapshot, move.fromPath);
-    this.snapshotManager.updateFileEntry(snapshot, move.toPath, {
-      ...fromEntry,
-      path: joinAndNormalizePath(this.rootPath, move.toPath),
-      head: fromEntry.head, // will be updated later when heads advance
-    });
   }
 
   /**
@@ -630,7 +673,7 @@ export class SyncEngine {
 
     // Always track newly created files for network sync
     // (they always represent a change that needs to sync)
-    this.handlesToWaitOn.push(handle);
+    this.handlesByPath.set(change.path, handle);
 
     return handle;
   }
@@ -644,7 +687,8 @@ export class SyncEngine {
     snapshot: SyncSnapshot,
     filePath: string
   ): Promise<void> {
-    const handle = await this.repo.find<FileDocument>(url);
+    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+    const handle = await this.repo.find<FileDocument>(this.getPlainUrl(url));
 
     // Check if content actually changed before tracking for sync
     const doc = await handle.doc();
@@ -691,7 +735,7 @@ export class SyncEngine {
     }
 
     // Only track files that actually changed content
-    this.handlesToWaitOn.push(handle);
+    this.handlesByPath.set(filePath, handle);
   }
 
   /**
@@ -742,7 +786,10 @@ export class SyncEngine {
       directoryPath
     );
 
-    const dirHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
+    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+    const dirHandle = await this.repo.find<DirectoryDocument>(
+      this.getPlainUrl(parentDirUrl)
+    );
 
     let didChange = false;
     const snapshotEntry = snapshot.directories.get(directoryPath);
@@ -776,14 +823,13 @@ export class SyncEngine {
         }
       });
     }
-    if (didChange) {
-      this.handlesToWaitOn.push(dirHandle);
-
+    // Always track the directory (even if unchanged) for proper leaf-first sync ordering
+    this.handlesByPath.set(directoryPath, dirHandle);
+    
+    if (didChange && snapshotEntry) {
       // CRITICAL FIX: Update snapshot with new directory heads immediately
       // This prevents stale head issues that cause convergence problems
-      if (snapshotEntry) {
-        snapshotEntry.head = dirHandle.heads();
-      }
+      snapshotEntry.head = dirHandle.heads();
     }
   }
 
@@ -837,17 +883,23 @@ export class SyncEngine {
             const childDirHandle = await this.repo.find<DirectoryDocument>(
               existingDirEntry.url
             );
-            const childHeads = childDirHandle.heads();
 
-            // Update snapshot with discovered directory using validated heads
+            // Track discovered directory for sync
+            this.handlesByPath.set(directoryPath, childDirHandle);
+
+            // Get versioned URL for storage (includes current heads)
+            const versionedUrl = this.getVersionedUrl(childDirHandle);
+
+            // Update snapshot with discovered directory using versioned URL
             this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
               path: joinAndNormalizePath(this.rootPath, directoryPath),
-              url: existingDirEntry.url,
-              head: childHeads,
+              url: versionedUrl,
+              head: childDirHandle.heads(),
               entries: [],
             });
 
-            return existingDirEntry.url;
+            // Return versioned URL (callers use getPlainUrl() when they need to modify)
+            return versionedUrl;
           } catch (resolveErr) {
             // Failed to resolve directory - fall through to create a fresh directory document
           }
@@ -865,8 +917,14 @@ export class SyncEngine {
 
     const dirHandle = this.repo.create(dirDoc);
 
+    // Get versioned URL for the new directory (includes heads)
+    const versionedDirUrl = this.getVersionedUrl(dirHandle);
+
     // Add this directory to its parent
-    const parentHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
+    // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+    const parentHandle = await this.repo.find<DirectoryDocument>(
+      this.getPlainUrl(parentDirUrl)
+    );
 
     let didChange = false;
     parentHandle.change((doc: DirectoryDocument) => {
@@ -879,16 +937,16 @@ export class SyncEngine {
         doc.docs.push({
           name: currentDirName,
           type: "folder",
-          url: dirHandle.url,
+          url: versionedDirUrl,
         });
         didChange = true;
       }
     });
 
     // Track directory handles for sync
-    this.handlesToWaitOn.push(dirHandle);
+    this.handlesByPath.set(directoryPath, dirHandle);
     if (didChange) {
-      this.handlesToWaitOn.push(parentHandle);
+      this.handlesByPath.set(parentPath, parentHandle);
 
       // CRITICAL FIX: Update parent directory heads in snapshot immediately
       // This prevents stale head issues when parent directory is modified
@@ -898,15 +956,16 @@ export class SyncEngine {
       }
     }
 
-    // Update snapshot with new directory
+    // Update snapshot with new directory (use versioned URL for storage)
     this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
       path: joinAndNormalizePath(this.rootPath, directoryPath),
-      url: dirHandle.url,
+      url: versionedDirUrl,
       head: dirHandle.heads(),
       entries: [],
     });
 
-    return dirHandle.url;
+    // Return versioned URL (callers use getPlainUrl() when they need to modify)
+    return versionedDirUrl;
   }
 
   /**
@@ -936,10 +995,13 @@ export class SyncEngine {
     }
 
     try {
-      const dirHandle = await this.repo.find<DirectoryDocument>(parentDirUrl);
+      // Use plain URL to get a mutable handle (versioned URLs return read-only views)
+      const dirHandle = await this.repo.find<DirectoryDocument>(
+        this.getPlainUrl(parentDirUrl)
+      );
 
       // Track this handle for network sync waiting
-      this.handlesToWaitOn.push(dirHandle);
+      this.handlesByPath.set(directoryPath, dirHandle);
       const snapshotEntry = snapshot.directories.get(directoryPath);
       const heads = snapshotEntry?.head;
       let didChange = false;
@@ -1135,7 +1197,7 @@ export class SyncEngine {
       }
 
       // Track root directory for network sync
-      this.handlesToWaitOn.push(rootHandle);
+      this.handlesByPath.set("", rootHandle);
 
       // CRITICAL FIX: Update root directory heads in snapshot immediately
       // This prevents stale head issues when root directory is modified
@@ -1145,5 +1207,36 @@ export class SyncEngine {
     } catch (error) {
       // Failed to update root directory timestamp
     }
+  }
+
+  /**
+   * Sort tracked handles leaf-first (deepest paths first).
+   * Returns handles in sorted order, logging URLs with heads for debugging.
+   */
+  private sortHandlesLeafFirst(): DocHandle<unknown>[] {
+    // Sort paths by depth (descending - deepest first), then alphabetically
+    const sortedPaths = Array.from(this.handlesByPath.keys()).sort((a, b) => {
+      const depthA = a ? a.split("/").length : 0;
+      const depthB = b ? b.split("/").length : 0;
+
+      // Deepest first
+      if (depthA !== depthB) {
+        return depthB - depthA;
+      }
+
+      // Alphabetically by path
+      return a.localeCompare(b);
+    });
+
+    // Log the sync order with versioned URLs for debugging (keep on complete)
+    const handles: DocHandle<unknown>[] = [];
+    for (const path of sortedPaths) {
+      const handle = this.handlesByPath.get(path)!;
+      const versionedUrl = this.getVersionedUrl(handle);
+      out.taskLine(`Sync: ${path || "(root)"} -> ${versionedUrl}`, true);
+      handles.push(handle);
+    }
+
+    return handles;
   }
 }

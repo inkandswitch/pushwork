@@ -1,4 +1,10 @@
-import { AutomergeUrl, Repo, UrlHeads } from "@automerge/automerge-repo";
+import {
+  AutomergeUrl,
+  Repo,
+  UrlHeads,
+  parseAutomergeUrl,
+  stringifyAutomergeUrl,
+} from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import {
   ChangeType,
@@ -277,7 +283,9 @@ export class ChangeDetector {
     changes: DetectedChange[]
   ): Promise<void> {
     try {
-      const dirHandle = await this.repo.find<DirectoryDocument>(directoryUrl);
+      // Use plain URL to find document (versioned URLs return view handles)
+      const plainUrl = this.getPlainUrl(directoryUrl);
+      const dirHandle = await this.repo.find<DirectoryDocument>(plainUrl);
 
       // Wait for document to be available (important during clone when fetching from network)
       const dirDoc = await this.waitForDocument<DirectoryDocument>(dirHandle);
@@ -417,7 +425,9 @@ export class ChangeDetector {
     url: AutomergeUrl,
     heads: UrlHeads
   ): Promise<string | Uint8Array | null> {
-    const handle = await this.repo.find<FileDocument>(url);
+    // Use plain URL to find document (versioned URLs return view handles)
+    const plainUrl = this.getPlainUrl(url);
+    const handle = await this.repo.find<FileDocument>(plainUrl);
     const doc = await handle.view(heads).doc();
 
     const content = (doc as FileDocument | undefined)?.content;
@@ -435,7 +445,9 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      const handle = await this.repo.find<FileDocument>(url);
+      // Use plain URL to find document (versioned URLs return view handles)
+      const plainUrl = this.getPlainUrl(url);
+      const handle = await this.repo.find<FileDocument>(plainUrl);
 
       // Wait for document to be available (important during clone)
       const doc = await this.waitForDocument<FileDocument>(handle);
@@ -482,10 +494,21 @@ export class ChangeDetector {
   }
 
   /**
+   * Get a plain URL (without heads) from any URL.
+   * Versioned URLs with heads return view handles that don't work well for discovery.
+   */
+  private getPlainUrl(url: AutomergeUrl): AutomergeUrl {
+    const { documentId } = parseAutomergeUrl(url);
+    return stringifyAutomergeUrl({ documentId });
+  }
+
+  /**
    * Get current head of Automerge document
    */
   private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
-    const handle = await this.repo.find<FileDocument>(url);
+    // Use plain URL to find document (versioned URLs return view handles)
+    const plainUrl = this.getPlainUrl(url);
+    const handle = await this.repo.find<FileDocument>(plainUrl);
     return handle.heads();
   }
 
