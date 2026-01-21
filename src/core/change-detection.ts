@@ -278,7 +278,9 @@ export class ChangeDetector {
   ): Promise<void> {
     try {
       const dirHandle = await this.repo.find<DirectoryDocument>(directoryUrl);
-      const dirDoc = await dirHandle.doc();
+
+      // Wait for document to be available (important during clone when fetching from network)
+      const dirDoc = await this.waitForDocument<DirectoryDocument>(dirHandle);
 
       if (!dirDoc) {
         return;
@@ -434,11 +436,13 @@ export class ChangeDetector {
   ): Promise<string | Uint8Array | null> {
     try {
       const handle = await this.repo.find<FileDocument>(url);
-      const doc = await handle.doc();
+
+      // Wait for document to be available (important during clone)
+      const doc = await this.waitForDocument<FileDocument>(handle);
 
       if (!doc) return null;
 
-      const fileDoc = doc as FileDocument;
+      const fileDoc = doc;
       const content = fileDoc.content;
       // Convert ImmutableString to regular string
       if (A.isImmutableString(content)) {
@@ -449,6 +453,32 @@ export class ChangeDetector {
       out.taskLine(`Failed to get remote content: ${error}`, true);
       return null;
     }
+  }
+
+  /**
+   * Wait for a document to be available, with retry logic.
+   * This is important during clone when documents are being fetched from the network.
+   */
+  private async waitForDocument<T>(
+    handle: { doc: () => Promise<T | undefined> },
+    options: { maxRetries?: number; retryDelayMs?: number } = {}
+  ): Promise<T | undefined> {
+    const { maxRetries = 5, retryDelayMs = 100 } = options;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const doc = await handle.doc();
+      if (doc !== undefined) {
+        return doc;
+      }
+
+      // Wait before retrying
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
+
+    // Return undefined if document never became available
+    return undefined;
   }
 
   /**
