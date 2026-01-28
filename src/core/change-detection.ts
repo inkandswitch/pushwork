@@ -69,7 +69,20 @@ export class ChangeDetector {
           const snapshotEntry = snapshot.files.get(relativePath);
 
           if (!snapshotEntry) {
-            // New file
+            // File not in snapshot - check if it exists remotely before classifying as LOCAL_ONLY
+            // This is critical for clone scenarios where snapshot is empty but remote has files
+            const existsRemotely = await this.fileExistsInRemoteDirectory(
+              snapshot.rootDirectoryUrl,
+              relativePath
+            );
+
+            if (existsRemotely) {
+              // File exists remotely - let detectNewRemoteDocuments() handle it as BOTH_CHANGED
+              // to avoid creating duplicate documents
+              return;
+            }
+
+            // Truly new local file (not on remote)
             changes.push({
               path: relativePath,
               changeType: ChangeType.LOCAL_ONLY,
