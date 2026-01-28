@@ -8,11 +8,19 @@ export const DEFAULT_SYNC_SERVER_STORAGE_ID =
   "3760df37-a4c6-4f66-9ecd-732039a9385d" as StorageId;
 
 /**
+ * Subduction defaults (matches tiny-patchwork)
+ */
+export const DEFAULT_SUBDUCTION_SYNC_SERVER =
+  "wss://hel.subduction.keyhive.org";
+
+/**
  * Global configuration options
  */
 export interface GlobalConfig {
   sync_server?: string;
   sync_server_storage_id?: StorageId;
+  /** Use Subduction for sync (same backend as tiny-patchwork). Default false. */
+  use_subduction?: boolean;
   exclude_patterns: string[];
   sync: {
     move_detection_threshold: number;
@@ -41,6 +49,7 @@ export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
   syncServer?: string; // Custom sync server URL
   syncServerStorageId?: StorageId; // Custom sync server storage ID
+  useSubduction?: boolean; // Use Subduction (same backend as tiny-patchwork)
 }
 
 /**
@@ -80,6 +89,8 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
+  /** Use Subduction for sync (same backend as tiny-patchwork) */
+  useSubduction?: boolean;
 }
 
 /**

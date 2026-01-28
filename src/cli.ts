@@ -38,11 +38,20 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
+  .option(
+    "--use-subduction",
+    "Use Subduction for sync (same backend as tiny-patchwork)",
+    false
+  )
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
       opts.syncServer
     );
-    await init(path, { syncServer, syncServerStorageId });
+    await init(path, {
+      syncServer,
+      syncServerStorageId,
+      useSubduction: opts.useSubduction,
+    });
   });
 
 // Clone command
@@ -59,6 +68,11 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
+  .option(
+    "--use-subduction",
+    "Use Subduction for sync (same backend as tiny-patchwork)",
+    false
+  )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
@@ -69,6 +83,7 @@ program
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
+      useSubduction: opts.useSubduction,
     });
   });
 

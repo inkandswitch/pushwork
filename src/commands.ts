@@ -42,7 +42,7 @@ interface CommandContext {
  */
 async function initializeRepository(
   resolvedPath: string,
-  overrides: Partial<DirectoryConfig>
+  overrides: Partial<DirectoryConfig>,
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
   // Create .pushwork directory structure
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
@@ -66,7 +66,7 @@ async function initializeRepository(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  syncEnabled?: boolean
+  syncEnabled?: boolean,
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
 
@@ -74,7 +74,7 @@ async function setupCommandContext(
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (!(await pathExists(syncToolDir))) {
     throw new Error(
-      'Directory not initialized for sync. Run "pushwork init" first.'
+      'Directory not initialized for sync. Run "pushwork init" first.',
     );
   }
 
@@ -142,7 +142,7 @@ async function safeRepoShutdown(repo: Repo): Promise<void> {
  */
 export async function init(
   targetPath: string,
-  options: InitOptions = {}
+  options: InitOptions = {},
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
@@ -159,15 +159,25 @@ export async function init(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
-  const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
+  const overrides: Partial<DirectoryConfig> = {
     sync_server: options.syncServer,
     sync_server_storage_id: options.syncServerStorageId,
-  });
+    use_subduction: options.useSubduction,
+  };
+  if (options.useSubduction && !options.syncServer) {
+    const { DEFAULT_SUBDUCTION_SYNC_SERVER } = await import("./types/config");
+    overrides.sync_server = DEFAULT_SUBDUCTION_SYNC_SERVER;
+  }
+  const { repo, syncEngine, config } = await initializeRepository(
+    resolvedPath,
+    overrides,
+  );
 
   // Create new root directory document
   out.update("Creating root directory");
   const rootDoc: DirectoryDocument = {
     "@patchwork": { type: "folder" },
+    title: path.basename(resolvedPath),
     docs: [],
   };
   const rootHandle = repo.create(rootDoc);
@@ -198,7 +208,9 @@ export async function init(
   out.done("Initialized");
   out.successBlock("INITIALIZED", rootHandle.url);
   if (result.filesChanged > 0) {
-    out.info(`Synced ${result.filesChanged} ${plural("file", result.filesChanged)}`);
+    out.info(
+      `Synced ${result.filesChanged} ${plural("file", result.filesChanged)}`,
+    );
   }
 
   process.exit();
@@ -209,7 +221,7 @@ export async function init(
  */
 export async function sync(
   targetPath = ".",
-  options: SyncOptions
+  options: SyncOptions,
 ): Promise<void> {
   out.task("Syncing");
 
@@ -239,8 +251,8 @@ export async function sync(
         change.changeType === "local_only"
           ? "[local]  "
           : change.changeType === "remote_only"
-          ? "[remote] "
-          : "[conflict]";
+            ? "[remote] "
+            : "[conflict]";
       out.log(`  ${prefix} ${change.path}`);
     }
     if (preview.changes.length > 10) {
@@ -272,7 +284,7 @@ export async function sync(
       } else {
         out.successBlock(
           "SYNCED",
-          `${result.filesChanged} ${plural("file", result.filesChanged)}`
+          `${result.filesChanged} ${plural("file", result.filesChanged)}`,
         );
       }
 
@@ -290,7 +302,7 @@ export async function sync(
       out.done("partial", false);
       out.warnBlock(
         "PARTIAL",
-        `${result.filesChanged} updated, ${result.errors.length} errors`
+        `${result.filesChanged} updated, ${result.errors.length} errors`,
       );
       out.obj({
         Files: result.filesChanged,
@@ -314,7 +326,7 @@ export async function sync(
  */
 export async function diff(
   targetPath = ".",
-  options: DiffOptions
+  options: DiffOptions,
 ): Promise<void> {
   out.task("Analyzing changes");
 
@@ -344,8 +356,8 @@ export async function diff(
       change.changeType === "local_only"
         ? "[local]  "
         : change.changeType === "remote_only"
-        ? "[remote] "
-        : "[conflict]";
+          ? "[remote] "
+          : "[conflict]";
 
     try {
       // Get old content (from snapshot/remote)
@@ -369,7 +381,7 @@ export async function diff(
         oldText,
         newText,
         "previous",
-        "current"
+        "current",
       );
 
       // Skip the header lines and process the diff
@@ -418,11 +430,11 @@ export async function diff(
  */
 export async function status(
   targetPath: string = ".",
-  options: StatusOptions = {}
+  options: StatusOptions = {},
 ): Promise<void> {
   const { repo, syncEngine, config } = await setupCommandContext(
     targetPath,
-    false
+    false,
   );
   const syncStatus = await syncEngine.getStatus();
 
@@ -441,7 +453,7 @@ export async function status(
   if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
     try {
       const rootHandle = await repo.find<DirectoryDocument>(
-        syncStatus.snapshot.rootDirectoryUrl
+        syncStatus.snapshot.rootDirectoryUrl,
       );
       const rootDoc = await rootHandle.doc();
 
@@ -468,7 +480,7 @@ export async function status(
   // Show verbose details if requested
   if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
     const rootHandle = await repo.find<DirectoryDocument>(
-      syncStatus.snapshot.rootDirectoryUrl
+      syncStatus.snapshot.rootDirectoryUrl,
     );
     const rootDoc = await rootHandle.doc();
 
@@ -499,18 +511,18 @@ export async function status(
  */
 export async function log(
   targetPath = ".",
-  _options: LogOptions
+  _options: LogOptions,
 ): Promise<void> {
   const { repo: logRepo, workingDir } = await setupCommandContext(
     targetPath,
-    false
+    false,
   );
 
   // TODO: Implement history tracking
   const snapshotPath = path.join(
     workingDir,
     ConfigManager.CONFIG_DIR,
-    "snapshot.json"
+    "snapshot.json",
   );
   if (await pathExists(snapshotPath)) {
     const stats = await fs.stat(snapshotPath);
@@ -529,7 +541,7 @@ export async function log(
 export async function checkout(
   syncId: string,
   targetPath = ".",
-  _options: CheckoutOptions
+  _options: CheckoutOptions,
 ): Promise<void> {
   const { workingDir } = await setupCommandContext(targetPath);
 
@@ -547,7 +559,7 @@ export async function checkout(
 export async function clone(
   rootUrl: string,
   targetPath: string,
-  options: CloneOptions
+  options: CloneOptions,
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
@@ -576,12 +588,18 @@ export async function clone(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
+  const overrides: Partial<DirectoryConfig> = {
+    sync_server: options.syncServer,
+    sync_server_storage_id: options.syncServerStorageId,
+    use_subduction: options.useSubduction,
+  };
+  if (options.useSubduction && !options.syncServer) {
+    const { DEFAULT_SUBDUCTION_SYNC_SERVER } = await import("./types/config");
+    overrides.sync_server = DEFAULT_SUBDUCTION_SYNC_SERVER;
+  }
   const { config, repo, syncEngine } = await initializeRepository(
     resolvedPath,
-    {
-      sync_server: options.syncServer,
-      sync_server_storage_id: options.syncServerStorageId,
-    }
+    overrides,
   );
 
   // Connect to existing root directory and download files
@@ -670,7 +688,7 @@ export async function rm(targetPath: string = "."): Promise<void> {
 
 export async function commit(
   targetPath: string,
-  _options: CommandOptions = {}
+  _options: CommandOptions = {},
 ): Promise<void> {
   out.task("Committing local changes");
 
@@ -704,7 +722,7 @@ export async function commit(
  */
 export async function ls(
   targetPath: string = ".",
-  options: CommandOptions = {}
+  options: CommandOptions = {},
 ): Promise<void> {
   const { repo, syncEngine } = await setupCommandContext(targetPath, false);
   const syncStatus = await syncEngine.getStatus();
@@ -717,7 +735,7 @@ export async function ls(
   }
 
   const files = Array.from(syncStatus.snapshot.files.entries()).sort(
-    ([pathA], [pathB]) => pathA.localeCompare(pathB)
+    ([pathA], [pathB]) => pathA.localeCompare(pathB),
   );
 
   if (files.length === 0) {
@@ -747,7 +765,7 @@ export async function ls(
  */
 export async function config(
   targetPath: string = ".",
-  options: ConfigOptions = {}
+  options: ConfigOptions = {},
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
@@ -773,7 +791,7 @@ export async function config(
     }
     if (value !== undefined) {
       out.log(
-        typeof value === "object" ? JSON.stringify(value, null, 2) : value
+        typeof value === "object" ? JSON.stringify(value, null, 2) : value,
       );
     } else {
       out.error(`Config key not found: ${options.get}`);
@@ -785,6 +803,7 @@ export async function config(
     out.obj({
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
+      "Use Subduction": config.use_subduction ? "yes" : "no",
       Exclusions: config.exclude_patterns?.length,
     });
     out.log("");
@@ -797,14 +816,13 @@ export async function config(
  */
 export async function watch(
   targetPath: string = ".",
-  options: WatchOptions = {}
+  options: WatchOptions = {},
 ): Promise<void> {
   const script = options.script || "pnpm build";
   const watchDir = options.watchDir || "src"; // Default to watching 'src' directory
   const verbose = options.verbose || false;
-  const { repo, syncEngine, workingDir } = await setupCommandContext(
-    targetPath
-  );
+  const { repo, syncEngine, workingDir } =
+    await setupCommandContext(targetPath);
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
 
@@ -818,7 +836,7 @@ export async function watch(
 
   out.spicyBlock(
     "WATCHING",
-    `${chalk.underline(formatRelativePath(watchDir))} for changes...`
+    `${chalk.underline(formatRelativePath(watchDir))} for changes...`,
   );
   out.info(`Build script: ${script}`);
   out.info(`Working directory: ${workingDir}`);
@@ -867,18 +885,18 @@ export async function watch(
           out.done(
             `Synced ${result.filesChanged} ${plural(
               "file",
-              result.filesChanged
-            )}`
+              result.filesChanged,
+            )}`,
           );
         }
       } else {
         out.warn(
-          `⚠ Partial sync: ${result.filesChanged} updated, ${result.errors.length} errors`
+          `⚠ Partial sync: ${result.filesChanged} updated, ${result.errors.length} errors`,
         );
         result.errors
           .slice(0, 3)
           .forEach((error) =>
-            out.error(`  ${error.path}: ${error.error.message}`)
+            out.error(`  ${error.path}: ${error.error.message}`),
           );
         if (result.errors.length > 3) {
           out.warn(`  ... and ${result.errors.length - 3} more errors`);
@@ -913,7 +931,7 @@ export async function watch(
       if (filename) {
         runBuildAndSync();
       }
-    }
+    },
   );
 
   // Handle graceful shutdown
@@ -942,7 +960,7 @@ export async function watch(
 async function runScript(
   script: string,
   cwd: string,
-  verbose: boolean
+  verbose: boolean,
 ): Promise<{ success: boolean; output?: string }> {
   return new Promise((resolve) => {
     const [command, ...args] = script.split(" ");

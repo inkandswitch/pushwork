@@ -20,6 +20,12 @@ dependencies:
   '@automerge/automerge-repo-storage-nodefs':
     specifier: ^2.5.0
     version: 2.5.0
+  '@automerge/automerge-repo-subduction-bridge':
+    specifier: link:../automerge-repo/packages/automerge-repo-subduction-bridge
+    version: link:../automerge-repo/packages/automerge-repo-subduction-bridge
+  '@automerge/automerge_subduction':
+    specifier: link:../subduction/automerge_subduction_wasm
+    version: link:../subduction/automerge_subduction_wasm
   '@commander-js/extra-typings':
     specifier: ^14.0.0
     version: 14.0.0(commander@14.0.2)

@@ -915,6 +915,7 @@ export class SyncEngine {
     // CREATE: Directory doesn't exist, create new one
     const dirDoc: DirectoryDocument = {
       "@patchwork": { type: "folder" },
+      title: currentDirName,
       docs: [],
     };
 

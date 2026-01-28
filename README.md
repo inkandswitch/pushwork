@@ -45,15 +45,14 @@ pushwork url
 
 **`init [path]`** - Initialize sync in a directory
 
-- `--sync-server <url>` - Custom sync server URL
-- `--sync-server-storage-id <id>` - Custom storage ID
-- `--debug` - Export performance flame graphs
+- `--sync-server <url> <storage-id...>` - Custom sync server URL and storage ID
+- `--use-subduction` - Use Subduction for sync (same backend as tiny-patchwork; defaults to `ws://localhost:8080`)
 
 **`clone <url> <path>`** - Clone an existing synced directory
 
 - `--force` - Overwrite existing directory
-- `--sync-server <url>` - Custom sync server URL
-- `--sync-server-storage-id <id>` - Custom storage ID
+- `--sync-server <url> <storage-id...>` - Custom sync server URL and storage ID
+- `--use-subduction` - Use Subduction for sync (same backend as tiny-patchwork)
 
 **`sync [path]`** - Run bidirectional synchronization
 
@@ -123,6 +122,17 @@ Configuration is stored in `.pushwork/config.json`:
   }
 }
 ```
+
+## Subduction (tiny-patchwork)
+
+When syncing with [tiny-patchwork](https://github.com/inkandswitch/patchwork-next) or any client using Subduction, enable Subduction so both use the same backend:
+
+```bash
+pushwork init --use-subduction
+# or set use_subduction: true in .pushwork/config.json
+```
+
+With `use_subduction: true`, pushwork connects to `ws://localhost:8080` by default (override with `sync_server`). Subduction packages are required: clone [automerge-repo](https://github.com/automerge/automerge-repo) and [subduction](https://github.com/automerge/subduction) as siblings of pushwork, or adjust the `link:` paths in `package.json` for your layout.
 
 ## How It Works
 

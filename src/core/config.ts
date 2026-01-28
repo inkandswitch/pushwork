@@ -144,6 +144,7 @@ export class ConfigManager {
       sync_enabled: true,
       sync_server: DEFAULT_SYNC_SERVER,
       sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      use_subduction: false,
       exclude_patterns: [
         ".git",
         "node_modules",
@@ -208,6 +209,10 @@ export class ConfigManager {
       override.sync_server_storage_id !== undefined
     ) {
       merged.sync_server_storage_id = override.sync_server_storage_id;
+    }
+
+    if ("use_subduction" in override && override.use_subduction !== undefined) {
+      merged.use_subduction = override.use_subduction;
     }
 
     if ("sync_enabled" in override && override.sync_enabled !== undefined) {
