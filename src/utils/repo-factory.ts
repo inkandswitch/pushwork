@@ -1,9 +1,13 @@
-import { Repo, StorageId } from "@automerge/automerge-repo";
+import { Repo } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
-import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import * as crypto from "crypto";
 import * as path from "path";
+import { createRequire } from "module";
 import { DirectoryConfig } from "../types";
+
+// Resolve subduction from automerge-repo's perspective to ensure same module instance
+const automergeRepoPath = require.resolve("@automerge/automerge-repo");
+const requireFromAutomergeRepo = createRequire(automergeRepoPath);
 
 /**
  * Ed25519 signer for Node.js using the crypto module.
@@ -31,8 +35,8 @@ class NodeSigner {
 }
 
 /**
- * Create an Automerge repository with configuration-based setup.
- * When use_subduction is true, uses Subduction (same backend as tiny-patchwork).
+ * Create an Automerge repository with Subduction backend.
+ * The local automerge-repo branch requires Subduction.
  */
 export async function createRepo(
   workingDir: string,
@@ -43,57 +47,30 @@ export async function createRepo(
     path.join(syncToolDir, "automerge"),
   );
 
-  if (config.use_subduction && config.sync_enabled) {
-    const { SubductionStorageBridge } =
-      await import("@automerge/automerge-repo-subduction-bridge");
-    const { Subduction, SubductionWebSocket } =
-      await import("@automerge/automerge_subduction");
+  const { SubductionStorageBridge } =
+    await import("@automerge/automerge-repo-subduction-bridge");
+  // Import from automerge-repo's perspective to ensure same module instance
+  const { Subduction, SubductionWebSocket } =
+    requireFromAutomergeRepo("@automerge/automerge_subduction");
 
-    const signer = new NodeSigner();
-    const storage = new SubductionStorageBridge(storageAdapter);
-    const subduction = await Subduction.hydrate(signer, storage);
+  const signer = new NodeSigner();
+  const storage = new SubductionStorageBridge(storageAdapter);
+  const subduction = await Subduction.hydrate(signer, storage);
 
-    //const syncServer = config.sync_server || DEFAULT_SUBDUCTION_SYNC_SERVER;
+  if (config.sync_enabled) {
     try {
       const conn = await SubductionWebSocket.tryDiscover(
         new URL("wss://pdx.subduction.keyhive.org"),
-        signer,
-        "pdx.subduction.keyhive.org", // Service name (server's default is its socket address)
-        5000,
+        signer
       );
       await subduction.attach(conn);
     } catch (e) {
       console.warn("No Subduction server, running local-only:", e);
     }
-
-    // Repo accepts subduction when using automerge-repo with subduction support
-    return new Repo({
-      network: [],
-      subduction,
-    } as ConstructorParameters<typeof Repo>[0]);
   }
 
-  const repoConfig: any = { storage: storageAdapter };
-
-  // Add network adapter only if sync is enabled and server is configured
-  if (config.sync_enabled && config.sync_server) {
-    const networkAdapter = new BrowserWebSocketClientAdapter(
-      config.sync_server,
-    );
-    repoConfig.network = [networkAdapter];
-    repoConfig.enableRemoteHeadsGossiping = true;
-  }
-
-  const repo = new Repo(repoConfig);
-
-  // Subscribe to the sync server storage for network sync
-  if (
-    config.sync_enabled &&
-    config.sync_server &&
-    config.sync_server_storage_id
-  ) {
-    repo.subscribeToRemotes([config.sync_server_storage_id as StorageId]);
-  }
-
-  return repo;
+  return new Repo({
+    network: [],
+    subduction,
+  } as ConstructorParameters<typeof Repo>[0]);
 }

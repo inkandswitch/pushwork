@@ -188,7 +188,8 @@ export async function init(
   // Wait for root document to sync to server if sync is enabled
   // This ensures the document is uploaded before we exit
   // waitForSync() verifies the server has the document by comparing local and remote heads
-  if (config.sync_enabled && config.sync_server_storage_id) {
+  // Skip for Subduction - it handles sync differently
+  if (config.sync_enabled && config.sync_server_storage_id && !config.use_subduction) {
     try {
       out.update("Syncing to server");
       await waitForSync([rootHandle], config.sync_server_storage_id);
@@ -924,11 +925,12 @@ export async function watch(
   };
 
   // Set up file watcher - watches everything in the specified directory
+  // except .pushwork/ to avoid infinite loops when snapshot is updated
   const watcher = fsSync.watch(
     absoluteWatchDir,
     { recursive: true },
     (_eventType, filename) => {
-      if (filename) {
+      if (filename && !filename.startsWith(".pushwork")) {
         runBuildAndSync();
       }
     },

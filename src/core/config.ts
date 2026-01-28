@@ -144,7 +144,7 @@ export class ConfigManager {
       sync_enabled: true,
       sync_server: DEFAULT_SYNC_SERVER,
       sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
-      use_subduction: false,
+      use_subduction: true, // FIXME was false, flipping for development --BZ
       exclude_patterns: [
         ".git",
         "node_modules",

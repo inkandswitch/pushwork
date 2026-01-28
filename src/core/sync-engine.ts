@@ -188,7 +188,8 @@ export class SyncEngine {
         this.snapshotManager.createEmpty();
 
       // Wait for initial sync to receive any pending remote changes
-      if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+      // Skip for Subduction - it handles sync differently
+      if (this.config.sync_enabled && snapshot.rootDirectoryUrl && !this.config.use_subduction) {
         try {
           await waitForBidirectionalSync(
             this.repo,
@@ -230,7 +231,8 @@ export class SyncEngine {
       await this.updateDirectoryUrlsLeafFirst(snapshot);
 
       // Wait for network sync (important for clone scenarios)
-      if (this.config.sync_enabled) {
+      // Skip WebSocket-style waiting for Subduction - it handles sync differently
+      if (this.config.sync_enabled && !this.config.use_subduction) {
         try {
           // If we have a root directory URL, add it to tracked handles
           if (snapshot.rootDirectoryUrl) {

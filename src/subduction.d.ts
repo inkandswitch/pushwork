@@ -21,9 +21,7 @@ declare module "@automerge/automerge_subduction" {
   export const SubductionWebSocket: {
     tryDiscover(
       url: URL,
-      signer: unknown,
-      host: string,
-      timeoutMs: number
+      signer: unknown
     ): Promise<unknown>;
   };
   export const WebCryptoSigner: {
