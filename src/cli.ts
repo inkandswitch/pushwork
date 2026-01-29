@@ -41,7 +41,7 @@ program
   .option(
     "--use-subduction",
     "Use Subduction for sync (same backend as tiny-patchwork)",
-    false
+    true
   )
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
@@ -71,7 +71,7 @@ program
   .option(
     "--use-subduction",
     "Use Subduction for sync (same backend as tiny-patchwork)",
-    false
+    true
   )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
