@@ -289,6 +289,10 @@ export class ChangeDetector {
       }
 
       // Process each entry in the directory
+      if (!dirDoc.docs || !Array.isArray(dirDoc.docs)) {
+        return;
+      }
+
       for (const entry of dirDoc.docs) {
         const entryPath = currentPath
           ? `${currentPath}/${entry.name}`
@@ -439,22 +443,21 @@ export class ChangeDetector {
     url: AutomergeUrl
   ): Promise<string | Uint8Array | null> {
     try {
-      // Strip heads for current document state
       const plainUrl = getPlainUrl(url);
+      // find() internally calls #requestDocOverSubduction which awaits
+      // syncAll + awaitSettled, so content should be available when it returns
       const handle = await this.repo.find<FileDocument>(plainUrl);
+      await handle.whenReady();
 
-      // Wait for document to be available (important during clone)
-      const doc = await this.waitForDocument<FileDocument>(handle);
-
-      if (!doc) return null;
-
-      const fileDoc = doc;
-      const content = fileDoc.content;
-      // Convert ImmutableString to regular string
-      if (A.isImmutableString(content)) {
-        return content.toString();
+      const doc = await handle.doc();
+      if (doc?.content !== undefined) {
+        const content = doc.content;
+        if (A.isImmutableString(content)) {
+          return content.toString();
+        }
+        return content as string | Uint8Array;
       }
-      return content as string | Uint8Array;
+      return null;
     } catch (error) {
       out.taskLine(`Failed to get remote content: ${error}`, true);
       return null;

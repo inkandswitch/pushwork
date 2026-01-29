@@ -188,21 +188,34 @@ export class SyncEngine {
         this.snapshotManager.createEmpty();
 
       // Wait for initial sync to receive any pending remote changes
-      // Skip for Subduction - it handles sync differently
-      if (this.config.sync_enabled && snapshot.rootDirectoryUrl && !this.config.use_subduction) {
-        try {
-          await waitForBidirectionalSync(
-            this.repo,
-            snapshot.rootDirectoryUrl,
-            this.config.sync_server_storage_id,
-            {
-              timeoutMs: 3000, // Short timeout for initial sync
-              pollIntervalMs: 100,
-              stableChecksRequired: 3,
-            }
-          );
-        } catch (error) {
-          out.taskLine(`Initial sync: ${error}`, true);
+      if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+        if (this.config.use_subduction) {
+          try {
+            // find() internally calls #requestDocOverSubduction which awaits
+            // syncAll + awaitSettled, so handle should be ready when it returns
+            const rootHandle = await this.repo.find<DirectoryDocument>(
+              snapshot.rootDirectoryUrl
+            );
+            await rootHandle.whenReady();
+            this.handlesByPath.set("", rootHandle);
+          } catch (error) {
+            result.warnings.push(`Subduction sync failed: ${error}`);
+          }
+        } else {
+          try {
+            await waitForBidirectionalSync(
+              this.repo,
+              snapshot.rootDirectoryUrl,
+              this.config.sync_server_storage_id,
+              {
+                timeoutMs: 3000, // Short timeout for initial sync
+                pollIntervalMs: 100,
+                stableChecksRequired: 3,
+              }
+            );
+          } catch (error) {
+            out.taskLine(`Initial sync: ${error}`, true);
+          }
         }
       }
 

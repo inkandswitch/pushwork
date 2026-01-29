@@ -188,7 +188,6 @@ export async function init(
   // Wait for root document to sync to server if sync is enabled
   // This ensures the document is uploaded before we exit
   // waitForSync() verifies the server has the document by comparing local and remote heads
-  // Skip for Subduction - it handles sync differently
   if (config.sync_enabled && config.sync_server_storage_id && !config.use_subduction) {
     try {
       out.update("Syncing to server");
@@ -606,6 +605,7 @@ export async function clone(
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
+
   const result = await syncEngine.sync();
 
   out.update("Writing to disk");
