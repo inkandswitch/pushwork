@@ -1,4 +1,9 @@
-import { DocHandle, StorageId, Repo, AutomergeUrl } from "@automerge/automerge-repo";
+import {
+  DocHandle,
+  StorageId,
+  Repo,
+  AutomergeUrl,
+} from "@automerge/automerge-repo";
 import * as A from "@automerge/automerge";
 import { out } from "./output";
 import { DirectoryDocument } from "../types";
@@ -8,7 +13,7 @@ import { getPlainUrl } from "./directory";
  * Wait for bidirectional sync to stabilize.
  * This function waits until document heads stop changing, indicating that
  * both outgoing and incoming sync has completed.
- * 
+ *
  * @param repo - The Automerge repository
  * @param rootDirectoryUrl - The root directory URL to start traversal from
  * @param syncServerStorageId - The sync server storage ID
@@ -22,7 +27,7 @@ export async function waitForBidirectionalSync(
     timeoutMs?: number;
     pollIntervalMs?: number;
     stableChecksRequired?: number;
-  } = {}
+  } = {},
 ): Promise<void> {
   const {
     timeoutMs = 10000,
@@ -70,7 +75,7 @@ export async function waitForBidirectionalSync(
  */
 async function getAllDocumentHeads(
   repo: Repo,
-  rootDirectoryUrl: AutomergeUrl
+  rootDirectoryUrl: AutomergeUrl,
 ): Promise<Map<string, string>> {
   const heads = new Map<string, string>();
   // Pass URL as-is; collectHeadsRecursive will strip heads
@@ -85,13 +90,13 @@ async function getAllDocumentHeads(
 async function collectHeadsRecursive(
   repo: Repo,
   directoryUrl: AutomergeUrl,
-  heads: Map<string, string>
+  heads: Map<string, string>,
 ): Promise<void> {
   try {
     const plainUrl = getPlainUrl(directoryUrl);
     const handle = await repo.find<DirectoryDocument>(plainUrl);
     const doc = await handle.doc();
-    
+
     // Record this directory's heads (use plain URL as key for consistency)
     heads.set(plainUrl, JSON.stringify(handle.heads()));
 
@@ -125,7 +130,7 @@ async function collectHeadsRecursive(
  */
 function headsMapEqual(
   a: Map<string, string>,
-  b: Map<string, string>
+  b: Map<string, string>,
 ): boolean {
   if (a.size !== b.size) {
     return false;
@@ -144,7 +149,7 @@ function headsMapEqual(
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
-  timeoutMs: number = 300000
+  timeoutMs: number = 1000000,
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -192,8 +197,8 @@ export async function waitForSync(
         cleanup();
         reject(
           new Error(
-            `Sync timeout after ${timeoutMs}ms for document ${handle.url}`
-          )
+            `Sync timeout after ${timeoutMs}ms for document ${handle.url}`,
+          ),
         );
       }, timeoutMs);
 
