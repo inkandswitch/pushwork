@@ -27,7 +27,8 @@ import {
 	findFileInDirectoryHierarchy,
 	joinAndNormalizePath,
 	getPlainUrl,
-	spliceText,
+	updateTextContent,
+	readDocContent,
 } from "../utils"
 import {isContentEqual} from "../utils/content"
 import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
@@ -616,12 +617,7 @@ export class SyncEngine {
 				// If new content is provided, update it (handles move + modification case)
 				if (move.newContent !== undefined) {
 					if (typeof move.newContent === "string") {
-						spliceText(
-							doc,
-							["content"],
-							doc.content as string,
-							move.newContent
-						)
+						updateTextContent(doc, ["content"], move.newContent)
 					} else {
 						doc.content = move.newContent
 					}
@@ -682,7 +678,7 @@ export class SyncEngine {
 		// For text files, splice in the content so it's stored as collaborative text
 		if (isText && typeof change.localContent === "string") {
 			handle.change((doc: FileDocument) => {
-				spliceText(doc, ["content"], "", change.localContent as string)
+				updateTextContent(doc, ["content"], change.localContent as string)
 			})
 		}
 
@@ -707,11 +703,12 @@ export class SyncEngine {
 
 		// Check if content actually changed before tracking for sync
 		const doc = await handle.doc()
-		const currentContent = doc?.content
+		const rawContent = doc?.content
 
-		// If the existing content is an immutable RawString, we can't splice into it.
-		// Throw away the old document and create a brand new one with mutable text.
-		if (currentContent instanceof A.RawString) {
+		// If the existing content is an immutable string, we can't splice into it.
+		// Throw away the old document and create a brand new one with mutable text,
+		// then replace the entry in the parent directory.
+		if (rawContent != null && A.isImmutableString(rawContent)) {
 			out.taskLine(
 				`Replacing immutable string document for ${filePath}`,
 				true
@@ -745,6 +742,7 @@ export class SyncEngine {
 			return
 		}
 
+		const currentContent = readDocContent(rawContent)
 		const contentChanged = !isContentEqual(content, currentContent)
 
 		// Update snapshot heads even when content is identical
@@ -771,7 +769,7 @@ export class SyncEngine {
 
 		handle.changeAt(heads, (doc: FileDocument) => {
 			if (typeof content === "string") {
-				spliceText(doc, ["content"], doc.content as string, content)
+				updateTextContent(doc, ["content"], content)
 			} else {
 				doc.content = content
 			}
@@ -808,10 +806,10 @@ export class SyncEngine {
 			heads = snapshot.files.get(filePath)?.head
 		}
 		changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
-			if (typeof doc.content === "string") {
-				spliceText(doc, ["content"], doc.content, "")
-			} else {
+			if (doc.content instanceof Uint8Array) {
 				doc.content = new Uint8Array(0)
+			} else {
+				updateTextContent(doc, ["content"], "")
 			}
 		})
 	}

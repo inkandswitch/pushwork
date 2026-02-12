@@ -15,6 +15,7 @@ import {
 	findFileInDirectoryHierarchy,
 	joinAndNormalizePath,
 	getPlainUrl,
+	readDocContent,
 } from "../utils"
 import {isContentEqual} from "../utils/content"
 import {out} from "../utils/output"
@@ -425,7 +426,7 @@ export class ChangeDetector {
 		const doc = await handle.view(heads).doc()
 
 		const content = (doc as FileDocument | undefined)?.content
-		return (content as string | Uint8Array) ?? null
+		return readDocContent(content)
 	}
 
 	/**
@@ -446,7 +447,7 @@ export class ChangeDetector {
 
 			const fileDoc = doc
 			const content = fileDoc.content
-			return (content as string | Uint8Array) ?? null
+			return readDocContent(content)
 		} catch (error) {
 			out.taskLine(`Failed to get remote content: ${error}`, true)
 			return null
