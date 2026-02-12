@@ -2,6 +2,7 @@ import {
   AutomergeUrl,
   Repo,
   DocHandle,
+  UrlHeads,
   parseAutomergeUrl,
   stringifyAutomergeUrl,
 } from "@automerge/automerge-repo";
@@ -32,6 +33,22 @@ import { SnapshotManager } from "./snapshot";
 import { ChangeDetector } from "./change-detection";
 import { MoveDetector } from "./move-detection";
 import { out } from "../utils/output";
+
+/**
+ * Apply a change to a document handle, using changeAt when heads are available
+ * to branch from a known version, otherwise falling back to change.
+ */
+function changeWithOptionalHeads<T>(
+  handle: DocHandle<T>,
+  heads: UrlHeads | undefined,
+  callback: A.ChangeFn<T>
+): void {
+  if (heads && heads.length > 0) {
+    handle.changeAt(heads, callback);
+  } else {
+    handle.change(callback);
+  }
+}
 
 /**
  * Sync configuration constants
@@ -587,33 +604,18 @@ export class SyncEngine {
       const heads = fromEntry.head;
 
       // Update both name and content (if content changed during move)
-      if (heads && heads.length > 0) {
-        handle.changeAt(heads, (doc: FileDocument) => {
-          doc.name = toFileName;
+      changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
+        doc.name = toFileName;
 
-          // If new content is provided, update it (handles move + modification case)
-          if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
+        // If new content is provided, update it (handles move + modification case)
+        if (move.newContent !== undefined) {
+          if (typeof move.newContent === "string") {
+            doc.content = new A.ImmutableString(move.newContent);
+          } else {
+            doc.content = move.newContent;
           }
-        });
-      } else {
-        handle.change((doc: FileDocument) => {
-          doc.name = toFileName;
-
-          // If new content is provided, update it (handles move + modification case)
-          if (move.newContent !== undefined) {
-            if (typeof move.newContent === "string") {
-              doc.content = new A.ImmutableString(move.newContent);
-            } else {
-              doc.content = move.newContent;
-            }
-          }
-        });
-      }
+        }
+      });
 
       // Get versioned URL after changes (includes current heads)
       const versionedUrl = this.getVersionedUrl(handle);
@@ -760,15 +762,9 @@ export class SyncEngine {
     if (snapshot && filePath) {
       heads = snapshot.files.get(filePath)?.head;
     }
-    if (heads) {
-      handle.changeAt(heads, (doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
-      });
-    } else {
-      handle.change((doc: FileDocument) => {
-        doc.content = new A.ImmutableString("");
-      });
-    }
+    changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
+      doc.content = new A.ImmutableString("");
+    });
   }
 
   /**
@@ -799,35 +795,19 @@ export class SyncEngine {
     let didChange = false;
     const snapshotEntry = snapshot.directories.get(directoryPath);
     const heads = snapshotEntry?.head;
-    if (heads) {
-      dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
-        const existingIndex = doc.docs.findIndex(
-          (entry) => entry.name === fileName && entry.type === "file"
-        );
-        if (existingIndex === -1) {
-          doc.docs.push({
-            name: fileName,
-            type: "file",
-            url: fileUrl,
-          });
-          didChange = true;
-        }
-      });
-    } else {
-      dirHandle.change((doc: DirectoryDocument) => {
-        const existingIndex = doc.docs.findIndex(
-          (entry) => entry.name === fileName && entry.type === "file"
-        );
-        if (existingIndex === -1) {
-          doc.docs.push({
-            name: fileName,
-            type: "file",
-            url: fileUrl,
-          });
-          didChange = true;
-        }
-      });
-    }
+    changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+      const existingIndex = doc.docs.findIndex(
+        (entry) => entry.name === fileName && entry.type === "file"
+      );
+      if (existingIndex === -1) {
+        doc.docs.push({
+          name: fileName,
+          type: "file",
+          url: fileUrl,
+        });
+        didChange = true;
+      }
+    });
     // Always track the directory (even if unchanged) for proper leaf-first sync ordering
     this.handlesByPath.set(directoryPath, dirHandle);
     
@@ -1007,37 +987,20 @@ export class SyncEngine {
       const heads = snapshotEntry?.head;
       let didChange = false;
 
-      if (heads) {
-        dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
-          const indexToRemove = doc.docs.findIndex(
-            (entry) => entry.name === fileName && entry.type === "file"
+      changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+        const indexToRemove = doc.docs.findIndex(
+          (entry) => entry.name === fileName && entry.type === "file"
+        );
+        if (indexToRemove !== -1) {
+          doc.docs.splice(indexToRemove, 1);
+          didChange = true;
+          out.taskLine(
+            `Removed ${fileName} from ${
+              formatRelativePath(directoryPath) || "root"
+            }`
           );
-          if (indexToRemove !== -1) {
-            doc.docs.splice(indexToRemove, 1);
-            didChange = true;
-            out.taskLine(
-              `Removed ${fileName} from ${
-                formatRelativePath(directoryPath) || "root"
-              }`
-            );
-          }
-        });
-      } else {
-        dirHandle.change((doc: DirectoryDocument) => {
-          const indexToRemove = doc.docs.findIndex(
-            (entry) => entry.name === fileName && entry.type === "file"
-          );
-          if (indexToRemove !== -1) {
-            doc.docs.splice(indexToRemove, 1);
-            didChange = true;
-            out.taskLine(
-              `Removed ${fileName} from ${
-                formatRelativePath(directoryPath) || "root"
-              }`
-            );
-          }
-        });
-      }
+        }
+      });
 
       if (didChange && snapshotEntry) {
         snapshotEntry.head = dirHandle.heads();
@@ -1184,15 +1147,9 @@ export class SyncEngine {
 
       const timestamp = Date.now();
 
-      if (heads) {
-        rootHandle.changeAt(heads, (doc: DirectoryDocument) => {
-          doc.lastSyncAt = timestamp;
-        });
-      } else {
-        rootHandle.change((doc: DirectoryDocument) => {
-          doc.lastSyncAt = timestamp;
-        });
-      }
+      changeWithOptionalHeads(rootHandle, heads, (doc: DirectoryDocument) => {
+        doc.lastSyncAt = timestamp;
+      });
 
       // Track root directory for network sync
       this.handlesByPath.set("", rootHandle);
@@ -1281,8 +1238,17 @@ export class SyncEngine {
       filesByDir.get(dirPath)!.push(filePath);
     }
 
-    // Process each directory that has files
-    for (const [dirPath, filePaths] of filesByDir.entries()) {
+    // Process directories leaf-first (deepest first) so children are
+    // up-to-date before their parents are processed
+    const sortedDirPaths = Array.from(filesByDir.keys()).sort((a, b) => {
+      const depthA = a ? a.split("/").length : 0;
+      const depthB = b ? b.split("/").length : 0;
+      if (depthA !== depthB) return depthB - depthA;
+      return a.localeCompare(b);
+    });
+
+    for (const dirPath of sortedDirPaths) {
+      const filePaths = filesByDir.get(dirPath)!;
       try {
         // Get the directory URL
         let dirUrl: AutomergeUrl;
@@ -1333,31 +1299,17 @@ export class SyncEngine {
 
         // Update all file entries in the directory document
         let didChange = false;
-        if (heads) {
-          dirHandle.changeAt(heads, (doc: DirectoryDocument) => {
-            for (const [fileName, newUrl] of fileUrlUpdates) {
-              const existingIndex = doc.docs.findIndex(
-                (entry) => entry.name === fileName && entry.type === "file"
-              );
-              if (existingIndex !== -1 && doc.docs[existingIndex].url !== newUrl) {
-                doc.docs[existingIndex].url = newUrl;
-                didChange = true;
-              }
+        changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+          for (const [fileName, newUrl] of fileUrlUpdates) {
+            const existingIndex = doc.docs.findIndex(
+              (entry) => entry.name === fileName && entry.type === "file"
+            );
+            if (existingIndex !== -1 && doc.docs[existingIndex].url !== newUrl) {
+              doc.docs[existingIndex].url = newUrl;
+              didChange = true;
             }
-          });
-        } else {
-          dirHandle.change((doc: DirectoryDocument) => {
-            for (const [fileName, newUrl] of fileUrlUpdates) {
-              const existingIndex = doc.docs.findIndex(
-                (entry) => entry.name === fileName && entry.type === "file"
-              );
-              if (existingIndex !== -1 && doc.docs[existingIndex].url !== newUrl) {
-                doc.docs[existingIndex].url = newUrl;
-                didChange = true;
-              }
-            }
-          });
-        }
+          }
+        });
 
         // Track directory and update heads
         if (didChange) {
@@ -1452,29 +1404,15 @@ export class SyncEngine {
         const parentHeads = parentSnapshotEntry?.head;
 
         let didChange = false;
-        if (parentHeads) {
-          parentHandle.changeAt(parentHeads, (doc: DirectoryDocument) => {
-            const existingIndex = doc.docs.findIndex(
-              (entry) => entry.name === dirName && entry.type === "folder"
-            );
-            if (existingIndex !== -1) {
-              // Update the URL with current versioned URL
-              doc.docs[existingIndex].url = currentVersionedUrl;
-              didChange = true;
-            }
-          });
-        } else {
-          parentHandle.change((doc: DirectoryDocument) => {
-            const existingIndex = doc.docs.findIndex(
-              (entry) => entry.name === dirName && entry.type === "folder"
-            );
-            if (existingIndex !== -1) {
-              // Update the URL with current versioned URL
-              doc.docs[existingIndex].url = currentVersionedUrl;
-              didChange = true;
-            }
-          });
-        }
+        changeWithOptionalHeads(parentHandle, parentHeads, (doc: DirectoryDocument) => {
+          const existingIndex = doc.docs.findIndex(
+            (entry) => entry.name === dirName && entry.type === "folder"
+          );
+          if (existingIndex !== -1) {
+            doc.docs[existingIndex].url = currentVersionedUrl;
+            didChange = true;
+          }
+        });
 
         // Track parent for sync and update its heads in snapshot
         if (didChange) {
