@@ -144,7 +144,7 @@ function headsMapEqual(
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
-  timeoutMs: number = 60000
+  timeoutMs: number = 300000
 ): Promise<void> {
   const startTime = Date.now();
 
