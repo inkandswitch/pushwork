@@ -259,12 +259,17 @@ export class SyncEngine {
           }
 
           if (this.handlesByPath.size > 0) {
-            // Sort handles leaf-first (deepest paths first, then shallower)
-            const sortedHandles = this.sortHandlesLeafFirst();
-            await waitForSync(
-              sortedHandles,
-              this.config.sync_server_storage_id
-            );
+            // Sync level-by-level: deepest paths first, then shallower.
+            // Within each level, documents sync in parallel. But we wait
+            // for each level to complete before starting the next, ensuring
+            // children are on the server before their parent directories.
+            const levels = this.groupHandlesByDepthLevel();
+            for (const handlesAtLevel of levels) {
+              await waitForSync(
+                handlesAtLevel,
+                this.config.sync_server_storage_id
+              );
+            }
           }
 
           // Wait for bidirectional sync to stabilize.
@@ -1163,34 +1168,45 @@ export class SyncEngine {
   }
 
   /**
-   * Sort tracked handles leaf-first (deepest paths first).
-   * Returns handles in sorted order, logging URLs with heads for debugging.
+   * Group tracked handles by depth level, ordered leaf-first (deepest level first).
+   * Returns an array of arrays, where each inner array contains all handles at the
+   * same depth level. Levels are ordered from deepest to shallowest (root).
+   *
+   * This grouping enables level-by-level network sync: all documents at the deepest
+   * level sync in parallel first, then the next level up, etc. This ensures children
+   * are fully synced to the server before their parent directories.
    */
-  private sortHandlesLeafFirst(): DocHandle<unknown>[] {
-    // Sort paths by depth (descending - deepest first), then alphabetically
-    const sortedPaths = Array.from(this.handlesByPath.keys()).sort((a, b) => {
-      const depthA = a ? a.split("/").length : 0;
-      const depthB = b ? b.split("/").length : 0;
-
-      // Deepest first
-      if (depthA !== depthB) {
-        return depthB - depthA;
+  private groupHandlesByDepthLevel(): DocHandle<unknown>[][] {
+    // Group paths by depth
+    const pathsByDepth = new Map<number, string[]>();
+    for (const path of this.handlesByPath.keys()) {
+      const depth = path ? path.split("/").length : 0;
+      if (!pathsByDepth.has(depth)) {
+        pathsByDepth.set(depth, []);
       }
-
-      // Alphabetically by path
-      return a.localeCompare(b);
-    });
-
-    // Log the sync order with versioned URLs for debugging (keep on complete)
-    const handles: DocHandle<unknown>[] = [];
-    for (const path of sortedPaths) {
-      const handle = this.handlesByPath.get(path)!;
-      const versionedUrl = this.getVersionedUrl(handle);
-      out.taskLine(`Sync: ${path || "(root)"} -> ${versionedUrl}`, true);
-      handles.push(handle);
+      pathsByDepth.get(depth)!.push(path);
     }
 
-    return handles;
+    // Sort depths descending (deepest first) to get leaf-first ordering
+    const sortedDepths = Array.from(pathsByDepth.keys()).sort((a, b) => b - a);
+
+    // Build level groups, logging sync order for debugging
+    const levels: DocHandle<unknown>[][] = [];
+    for (const depth of sortedDepths) {
+      const paths = pathsByDepth.get(depth)!;
+      paths.sort((a, b) => a.localeCompare(b)); // Alphabetical within level
+
+      const handlesAtLevel: DocHandle<unknown>[] = [];
+      for (const path of paths) {
+        const handle = this.handlesByPath.get(path)!;
+        const versionedUrl = this.getVersionedUrl(handle);
+        out.taskLine(`Sync: ${path || "(root)"} -> ${versionedUrl}`, true);
+        handlesAtLevel.push(handle);
+      }
+      levels.push(handlesAtLevel);
+    }
+
+    return levels;
   }
 
   /**
