@@ -549,6 +549,17 @@ export async function clone(
   targetPath: string,
   options: CloneOptions
 ): Promise<void> {
+  // Validate that rootUrl is actually an Automerge URL
+  if (!rootUrl.startsWith("automerge:")) {
+    out.error(
+      `Invalid Automerge URL: ${rootUrl}\n` +
+      `Expected format: automerge:XXXXX\n` +
+      `Usage: pushwork clone <automerge-url> <path>`
+    );
+    out.exit(1);
+  }
+
+
   const resolvedPath = path.resolve(targetPath);
 
   out.task(`Cloning ${rootUrl}`);
