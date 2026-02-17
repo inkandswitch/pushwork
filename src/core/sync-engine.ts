@@ -118,6 +118,18 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Reset the snapshot, clearing all tracked files and directories.
+	 * Preserves the rootDirectoryUrl so sync can still operate.
+	 * Used by --force to re-sync every file.
+	 */
+	async resetSnapshot(): Promise<void> {
+		let snapshot = await this.snapshotManager.load()
+		if (!snapshot) return
+		this.snapshotManager.clear(snapshot)
+		await this.snapshotManager.save(snapshot)
+	}
+
+	/**
 	 * Commit local changes only (no network sync)
 	 */
 	async commitLocal(): Promise<SyncResult> {

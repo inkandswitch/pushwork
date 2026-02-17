@@ -139,7 +139,7 @@ export class ConfigManager {
   /**
    * Get default configuration
    */
-  private getDefaultConfig(): DirectoryConfig {
+  getDefaultDirectoryConfig(): DirectoryConfig {
     return {
       sync_enabled: true,
       sync_server: DEFAULT_SYNC_SERVER,
@@ -165,7 +165,7 @@ export class ConfigManager {
     const localConfig = await this.load();
 
     // Merge configurations: default < global < local
-    let merged = this.getDefaultConfig();
+    let merged = this.getDefaultDirectoryConfig();
 
     if (globalConfig) {
       merged = this.mergeConfigs(merged, globalConfig);
@@ -185,7 +185,7 @@ export class ConfigManager {
   async initializeWithOverrides(
     overrides: Partial<DirectoryConfig> = {}
   ): Promise<DirectoryConfig> {
-    const config = this.mergeConfigs(this.getDefaultConfig(), overrides);
+    const config = this.mergeConfigs(this.getDefaultDirectoryConfig(), overrides);
     await this.save(config);
     return config;
   }

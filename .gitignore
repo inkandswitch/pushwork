@@ -85,3 +85,4 @@ pids/
 
 # Optional stylelint cache
 .stylelintcache 
+.claude

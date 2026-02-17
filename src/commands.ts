@@ -66,7 +66,7 @@ async function initializeRepository(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  syncEnabled?: boolean
+  options?: { syncEnabled?: boolean; forceDefaults?: boolean }
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
 
@@ -80,11 +80,22 @@ async function setupCommandContext(
 
   // Load configuration
   const configManager = new ConfigManager(resolvedPath);
-  let config = await configManager.getMerged();
+  let config: DirectoryConfig;
+
+  if (options?.forceDefaults) {
+    // Force mode: use defaults, only preserving root_directory_url from local config
+    const localConfig = await configManager.load();
+    config = configManager.getDefaultDirectoryConfig();
+    if (localConfig?.root_directory_url) {
+      config.root_directory_url = localConfig.root_directory_url;
+    }
+  } else {
+    config = await configManager.getMerged();
+  }
 
   // Override sync_enabled if explicitly specified (e.g., for local-only operations)
-  if (syncEnabled !== undefined) {
-    config = { ...config, sync_enabled: syncEnabled };
+  if (options?.syncEnabled !== undefined) {
+    config = { ...config, sync_enabled: options.syncEnabled };
   }
 
   // Create repo with config
@@ -211,9 +222,15 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
-  out.task("Syncing");
+  out.task(options.force ? "Force syncing" : "Syncing");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath);
+  const { repo, syncEngine } = await setupCommandContext(targetPath, {
+    forceDefaults: options.force,
+  });
+
+  if (options.force) {
+    await syncEngine.resetSnapshot();
+  }
 
   if (options.dryRun) {
     out.update("Analyzing changes");
@@ -318,7 +335,7 @@ export async function diff(
 ): Promise<void> {
   out.task("Analyzing changes");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath, false);
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
   const preview = await syncEngine.previewChanges();
 
   out.done();
@@ -422,7 +439,7 @@ export async function status(
 ): Promise<void> {
   const { repo, syncEngine, config } = await setupCommandContext(
     targetPath,
-    false
+    { syncEnabled: false }
   );
   const syncStatus = await syncEngine.getStatus();
 
@@ -503,7 +520,7 @@ export async function log(
 ): Promise<void> {
   const { repo: logRepo, workingDir } = await setupCommandContext(
     targetPath,
-    false
+    { syncEnabled: false }
   );
 
   // TODO: Implement history tracking
@@ -685,7 +702,7 @@ export async function commit(
 ): Promise<void> {
   out.task("Committing local changes");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath, false);
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
 
   const result = await syncEngine.commitLocal();
   await safeRepoShutdown(repo);
@@ -717,7 +734,7 @@ export async function ls(
   targetPath: string = ".",
   options: CommandOptions = {}
 ): Promise<void> {
-  const { repo, syncEngine } = await setupCommandContext(targetPath, false);
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
   const syncStatus = await syncEngine.getStatus();
 
   if (!syncStatus.snapshot) {

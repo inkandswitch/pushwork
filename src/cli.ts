@@ -99,10 +99,16 @@ program
     "Show what would be done without applying changes",
     false
   )
+  .option(
+    "-f, --force",
+    "Ignore config files and sync with default settings",
+    false
+  )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
       dryRun: opts.dryRun,
+      force: opts.force,
       verbose: opts.verbose,
     });
   });
