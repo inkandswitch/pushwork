@@ -102,6 +102,11 @@ export interface StatusOptions extends CommandOptions {
 }
 
 /**
+ * Push command specific options
+ */
+export interface PushOptions extends CommandOptions {}
+
+/**
  * Watch command specific options
  */
 export interface WatchOptions extends CommandOptions {

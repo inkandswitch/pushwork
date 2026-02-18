@@ -7,6 +7,7 @@ import {
   init,
   clone,
   sync,
+  push,
   diff,
   status,
   log,
@@ -83,6 +84,22 @@ program
   )
   .action(async (path, _opts) => {
     await commit(path);
+  });
+
+// Push command
+program
+  .command("push")
+  .summary("Push local changes to server without pulling remote changes")
+  .argument(
+    "[path]",
+    "Directory path to push (default: current directory)",
+    "."
+  )
+  .option("-v, --verbose", "Verbose output", false)
+  .action(async (path, opts) => {
+    await push(path, {
+      verbose: opts.verbose,
+    });
   });
 
 // Sync command

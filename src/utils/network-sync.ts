@@ -32,12 +32,14 @@ export async function waitForBidirectionalSync(
     timeoutMs?: number;
     pollIntervalMs?: number;
     stableChecksRequired?: number;
+    handles?: DocHandle<unknown>[];
   } = {},
 ): Promise<void> {
   const {
     timeoutMs = 10000,
     pollIntervalMs = 100,
     stableChecksRequired = 3,
+    handles,
   } = options;
 
   if (!syncServerStorageId || !rootDirectoryUrl) {
@@ -48,13 +50,24 @@ export async function waitForBidirectionalSync(
   let lastSeenHeads = new Map<string, string>();
   let stableCount = 0;
   let pollCount = 0;
+  let dynamicTimeoutMs = timeoutMs;
 
-  debug(`waitForBidirectionalSync: starting (timeout=${timeoutMs}ms, stableChecks=${stableChecksRequired})`);
+  debug(`waitForBidirectionalSync: starting (timeout=${timeoutMs}ms, stableChecks=${stableChecksRequired}${handles ? `, tracking ${handles.length} handles` : ', full tree scan'})`);
 
-  while (Date.now() - startTime < timeoutMs) {
+  while (Date.now() - startTime < dynamicTimeoutMs) {
     pollCount++;
-    // Get current heads for all documents in the directory hierarchy
-    const currentHeads = await getAllDocumentHeads(repo, rootDirectoryUrl);
+    // Get current heads: use provided handles if available, otherwise full tree scan
+    const currentHeads = handles
+      ? getHandleHeads(handles)
+      : await getAllDocumentHeads(repo, rootDirectoryUrl);
+
+    // Scale timeout proportionally to tree size after first scan
+    if (pollCount === 1) {
+      dynamicTimeoutMs = Math.max(timeoutMs, 5000 + currentHeads.size * 50);
+      if (dynamicTimeoutMs !== timeoutMs) {
+        debug(`waitForBidirectionalSync: scaled timeout to ${dynamicTimeoutMs}ms for ${currentHeads.size} docs`);
+      }
+    }
 
     // Check if heads are stable (no changes since last check)
     const isStable = headsMapEqual(lastSeenHeads, currentHeads);
@@ -104,6 +117,20 @@ export async function waitForBidirectionalSync(
 }
 
 /**
+ * Get heads from a pre-collected set of handles (cheap, synchronous reads).
+ * Used for post-push stabilization where we already know which documents changed.
+ */
+function getHandleHeads(
+  handles: DocHandle<unknown>[],
+): Map<string, string> {
+  const heads = new Map<string, string>();
+  for (const handle of handles) {
+    heads.set(getPlainUrl(handle.url), JSON.stringify(handle.heads()));
+  }
+  return heads;
+}
+
+/**
  * Get all document heads in the directory hierarchy.
  * Returns a map of document URL -> serialized heads.
  * Uses plain URLs (without heads) to ensure we see current document state.
@@ -139,8 +166,8 @@ async function collectHeadsRecursive(
       return;
     }
 
-    // Process all entries in the directory
-    for (const entry of doc.docs) {
+    // Process all entries in the directory concurrently
+    await Promise.all(doc.docs.map(async (entry: { type: string; url: AutomergeUrl; name: string }) => {
       if (entry.type === "folder") {
         // Recurse into subdirectory (entry.url may have stale heads)
         await collectHeadsRecursive(repo, entry.url, heads);
@@ -154,7 +181,7 @@ async function collectHeadsRecursive(
           // File document may not exist yet
         }
       }
-    }
+    }));
   } catch {
     // Directory may not exist yet
   }

@@ -249,6 +249,111 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Push local changes to server without pulling remote changes.
+	 * Detect changes, push to Automerge docs, upload to server. No bidirectional wait, no pull.
+	 */
+	async pushToRemote(): Promise<SyncResult> {
+		const result: SyncResult = {
+			success: false,
+			filesChanged: 0,
+			directoriesChanged: 0,
+			errors: [],
+			warnings: [],
+		}
+
+		// Reset tracked handles for sync
+		this.handlesByPath = new Map()
+
+		try {
+			const snapshot =
+				(await this.snapshotManager.load()) ||
+				this.snapshotManager.createEmpty()
+
+			debug(`pushToRemote: rootDirectoryUrl=${snapshot.rootDirectoryUrl?.slice(0, 30)}..., files=${snapshot.files.size}, dirs=${snapshot.directories.size}`)
+
+			// Detect all changes
+			debug("pushToRemote: detecting changes")
+			out.update("Detecting local changes")
+			const changes = await this.changeDetector.detectChanges(snapshot)
+
+			// Detect moves
+			const {moves, remainingChanges} = await this.moveDetector.detectMoves(
+				changes,
+				snapshot
+			)
+
+			debug(`pushToRemote: detected ${changes.length} changes, ${moves.length} moves, ${remainingChanges.length} remaining`)
+
+			// Push local changes to remote
+			debug("pushToRemote: pushing local changes")
+			const pushResult = await this.pushLocalChanges(
+				remainingChanges,
+				moves,
+				snapshot
+			)
+
+			result.filesChanged += pushResult.filesChanged
+			result.directoriesChanged += pushResult.directoriesChanged
+			result.errors.push(...pushResult.errors)
+			result.warnings.push(...pushResult.warnings)
+
+			debug(`pushToRemote: push complete - ${pushResult.filesChanged} files, ${pushResult.directoriesChanged} dirs changed`)
+
+			// Touch root directory if any changes were made
+			const hasChanges =
+				result.filesChanged > 0 || result.directoriesChanged > 0
+			if (hasChanges) {
+				await this.touchRootDirectory(snapshot)
+			}
+
+			// Wait for network sync (upload to server)
+			if (this.config.sync_enabled) {
+				try {
+					// Ensure root directory handle is tracked for sync
+					if (snapshot.rootDirectoryUrl) {
+						const rootHandle =
+							await this.repo.find<DirectoryDocument>(
+								snapshot.rootDirectoryUrl
+							)
+						this.handlesByPath.set("", rootHandle)
+					}
+
+					if (this.handlesByPath.size > 0) {
+						const allHandles = Array.from(
+							this.handlesByPath.values()
+						)
+						debug(`pushToRemote: waiting for ${allHandles.length} handles to sync to server`)
+						out.update(`Uploading ${allHandles.length} documents to sync server`)
+						await waitForSync(
+							allHandles,
+							this.config.sync_server_storage_id
+						)
+						debug("pushToRemote: all handles synced to server")
+					}
+				} catch (error) {
+					debug(`pushToRemote: network sync error: ${error}`)
+					out.taskLine(`Network sync failed: ${error}`, true)
+					result.warnings.push(`Network sync failed: ${error}`)
+				}
+			}
+
+			// Save updated snapshot
+			await this.snapshotManager.save(snapshot)
+
+			result.success = result.errors.length === 0
+			return result
+		} catch (error) {
+			result.errors.push({
+				path: "push",
+				operation: "push-to-remote",
+				error: error as Error,
+				recoverable: false,
+			})
+			return result
+		}
+	}
+
+	/**
 	 * Run full bidirectional sync
 	 */
 	async sync(): Promise<SyncResult> {
@@ -348,7 +453,9 @@ export class SyncEngine {
 					}
 
 					// Wait for bidirectional sync to stabilize
-					debug("sync: waiting for bidirectional sync to stabilize")
+					// Use tracked handles for post-push check (cheaper than full tree scan)
+					const changedHandles = Array.from(this.handlesByPath.values())
+					debug(`sync: waiting for bidirectional sync to stabilize (${changedHandles.length} tracked handles)`)
 					out.update("Waiting for bidirectional sync to stabilize")
 					await waitForBidirectionalSync(
 						this.repo,
@@ -358,6 +465,7 @@ export class SyncEngine {
 							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
 							pollIntervalMs: 100,
 							stableChecksRequired: 3,
+							handles: changedHandles.length > 0 ? changedHandles : undefined,
 						}
 					)
 				} catch (error) {

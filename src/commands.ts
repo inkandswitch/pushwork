@@ -17,6 +17,7 @@ import {
   DirectoryConfig,
   DirectoryDocument,
   CommandOptions,
+  PushOptions,
 } from "./types";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
@@ -1025,7 +1026,59 @@ async function runScript(
   });
 }
 
-// TODO: Add push and pull commands later
+/**
+ * Push local changes to server without pulling remote changes
+ */
+export async function push(
+  targetPath: string = ".",
+  _options: PushOptions = {}
+): Promise<void> {
+  out.task("Pushing local changes to server");
+
+  const { repo, syncEngine } = await setupCommandContext(targetPath);
+
+  const result = await syncEngine.pushToRemote();
+
+  out.taskLine("Writing to disk");
+  await safeRepoShutdown(repo);
+
+  if (result.success) {
+    out.done("Pushed");
+    if (result.filesChanged === 0 && result.directoriesChanged === 0) {
+      out.info("No local changes to push");
+    } else {
+      out.successBlock(
+        "PUSHED",
+        `${result.filesChanged} ${plural("file", result.filesChanged)}`
+      );
+    }
+
+    if (result.warnings.length > 0) {
+      out.log("");
+      out.warnBlock("WARNINGS", `${result.warnings.length} warnings`);
+      for (const warning of result.warnings.slice(0, 5)) {
+        out.log(`  ${warning}`);
+      }
+      if (result.warnings.length > 5) {
+        out.log(`  ... and ${result.warnings.length - 5} more`);
+      }
+    }
+  } else {
+    out.done("partial", false);
+    out.warnBlock(
+      "PARTIAL",
+      `${result.filesChanged} updated, ${result.errors.length} errors`
+    );
+    result.errors
+      .slice(0, 5)
+      .forEach((error) => out.error(`${error.path}: ${error.error.message}`));
+    if (result.errors.length > 5) {
+      out.warn(`... and ${result.errors.length - 5} more errors`);
+    }
+  }
+
+  process.exit();
+}
 
 function plural(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
