@@ -128,6 +128,7 @@ export class ConfigManager {
         ".DS_Store",
         ".pushwork",
       ],
+      artifact_directories: ["dist"],
       sync_server: DEFAULT_SYNC_SERVER,
       sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
       sync: {
@@ -151,6 +152,7 @@ export class ConfigManager {
         ".pushwork",
         ".DS_Store",
       ],
+      artifact_directories: ["dist"],
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -217,6 +219,10 @@ export class ConfigManager {
     // Handle GlobalConfig structure
     if ("exclude_patterns" in override && override.exclude_patterns) {
       merged.exclude_patterns = override.exclude_patterns;
+    }
+
+    if ("artifact_directories" in override && override.artifact_directories) {
+      merged.artifact_directories = override.artifact_directories;
     }
 
     if ("sync" in override && override.sync) {

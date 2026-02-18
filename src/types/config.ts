@@ -14,6 +14,7 @@ export interface GlobalConfig {
   sync_server?: string;
   sync_server_storage_id?: StorageId;
   exclude_patterns: string[];
+  artifact_directories: string[];
   sync: {
     move_detection_threshold: number;
   };

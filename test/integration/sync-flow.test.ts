@@ -27,6 +27,7 @@ describe("Sync Flow Integration", () => {
         sync_server: "wss://test.server.com",
         sync_enabled: true,
         exclude_patterns: [".git", "*.tmp"],
+        artifact_directories: ["dist"],
         sync: {
           move_detection_threshold: 0.8,
         },
@@ -49,6 +50,7 @@ describe("Sync Flow Integration", () => {
         sync_server: "wss://local.server.com",
         sync_enabled: true,
         exclude_patterns: [".git", "*.tmp"],
+        artifact_directories: ["dist"],
         sync: {
           move_detection_threshold: 0.9,
         },

@@ -111,6 +111,30 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Determine if a file path is inside an artifact directory.
+	 * Artifact files are stored as immutable strings (RawString) and
+	 * referenced with versioned URLs in directory entries.
+	 */
+	private isArtifactPath(filePath: string): boolean {
+		const artifactDirs = this.config.artifact_directories || []
+		return artifactDirs.some(
+			dir => filePath === dir || filePath.startsWith(dir + "/")
+		)
+	}
+
+	/**
+	 * Get the appropriate URL for a directory entry.
+	 * Artifact paths get versioned URLs (with heads) for exact version fetching.
+	 * Non-artifact paths get plain URLs for collaborative editing.
+	 */
+	private getEntryUrl(handle: DocHandle<unknown>, filePath: string): AutomergeUrl {
+		if (this.isArtifactPath(filePath)) {
+			return this.getVersionedUrl(handle)
+		}
+		return getPlainUrl(handle.url)
+	}
+
+	/**
 	 * Set the root directory URL in the snapshot
 	 */
 	async setRootDirectoryUrl(url: AutomergeUrl): Promise<void> {
@@ -527,8 +551,8 @@ export class SyncEngine {
 						// New file
 						const handle = await this.createRemoteFile(change)
 						if (handle) {
-							const versionedUrl = this.getVersionedUrl(handle)
-							newEntries.push({name: fileName, url: versionedUrl})
+							const entryUrl = this.getEntryUrl(handle, change.path)
+							newEntries.push({name: fileName, url: entryUrl})
 							this.snapshotManager.updateFileEntry(
 								snapshot,
 								change.path,
@@ -537,7 +561,7 @@ export class SyncEngine {
 										this.rootPath,
 										change.path
 									),
-									url: versionedUrl,
+									url: entryUrl,
 									head: handle.heads(),
 									extension: getFileExtension(change.path),
 									mimeType: getEnhancedMimeType(change.path),
@@ -553,7 +577,7 @@ export class SyncEngine {
 							snapshot,
 							change.path
 						)
-						// Get current versioned URL (updateRemoteFile updates snapshot)
+						// Get current entry URL (updateRemoteFile updates snapshot)
 						const updatedFileEntry = snapshot.files.get(change.path)
 						if (updatedFileEntry) {
 							const fileHandle =
@@ -562,7 +586,7 @@ export class SyncEngine {
 								)
 							updatedEntries.push({
 								name: fileName,
-								url: this.getVersionedUrl(fileHandle),
+								url: this.getEntryUrl(fileHandle, change.path),
 							})
 						}
 						result.filesChanged++
@@ -593,7 +617,7 @@ export class SyncEngine {
 							)
 						subdirUpdates.push({
 							name: childName,
-							url: this.getVersionedUrl(childHandle),
+							url: this.getEntryUrl(childHandle, modifiedDir),
 						})
 					}
 				}
@@ -707,12 +731,11 @@ export class SyncEngine {
 					)
 
 					if (fileEntry) {
-						// Get versioned URL from handle (includes heads)
 						const fileHandle = await this.repo.find<FileDocument>(fileEntry.url)
-						const versionedUrl = this.getVersionedUrl(fileHandle)
+						const entryUrl = this.getEntryUrl(fileHandle, change.path)
 						this.snapshotManager.updateFileEntry(snapshot, change.path, {
 							path: localPath,
-							url: versionedUrl,
+							url: entryUrl,
 							head: change.remoteHead,
 							extension: getFileExtension(change.path),
 							mimeType: getEnhancedMimeType(change.path),
@@ -774,11 +797,11 @@ export class SyncEngine {
 				}
 			})
 
-			// Get versioned URL after changes (includes current heads)
-			const versionedUrl = this.getVersionedUrl(handle)
+			// Get appropriate URL for directory entry
+			const entryUrl = this.getEntryUrl(handle, move.toPath)
 
-			// 4) Add file entry to destination directory with versioned URL
-			await this.addFileToDirectory(snapshot, move.toPath, versionedUrl)
+			// 4) Add file entry to destination directory
+			await this.addFileToDirectory(snapshot, move.toPath, entryUrl)
 
 			// Track file handle for network sync
 			this.handlesByPath.set(move.toPath, handle)
@@ -788,7 +811,7 @@ export class SyncEngine {
 			this.snapshotManager.updateFileEntry(snapshot, move.toPath, {
 				...fromEntry,
 				path: joinAndNormalizePath(this.rootPath, move.toPath),
-				url: versionedUrl,
+				url: entryUrl,
 				head: handle.heads(),
 			})
 		} catch (e) {
@@ -809,15 +832,21 @@ export class SyncEngine {
 		if (change.localContent === null) return null
 
 		const isText = this.isTextContent(change.localContent)
+		const isArtifact = this.isArtifactPath(change.path)
 
-		// Create initial document structure with empty string for text content.
-		// We then splice in the actual content so it's stored as collaborative text.
+		// For artifact files, store text as RawString (immutable snapshot).
+		// For regular files, store as collaborative text (empty string + splice).
 		const fileDoc: FileDocument = {
 			"@patchwork": {type: "file"},
 			name: change.path.split("/").pop() || "",
 			extension: getFileExtension(change.path),
 			mimeType: getEnhancedMimeType(change.path),
-			content: isText ? "" : change.localContent,
+			content:
+				isText && isArtifact
+					? new A.RawString(change.localContent as string) as unknown as string
+					: isText
+						? ""
+						: change.localContent,
 			metadata: {
 				permissions: 0o644,
 			},
@@ -825,8 +854,8 @@ export class SyncEngine {
 
 		const handle = this.repo.create(fileDoc)
 
-		// For text files, splice in the content so it's stored as collaborative text
-		if (isText && typeof change.localContent === "string") {
+		// For non-artifact text files, splice in the content so it's stored as collaborative text
+		if (isText && !isArtifact && typeof change.localContent === "string") {
 			handle.change((doc: FileDocument) => {
 				updateTextContent(doc, ["content"], change.localContent as string)
 			})
@@ -855,14 +884,20 @@ export class SyncEngine {
 		const doc = await handle.doc()
 		const rawContent = doc?.content
 
-		// If the existing content is an immutable string, we can't splice into it.
-		// Throw away the old document and create a brand new one with mutable text.
-		// The caller's batch directory update will pick up the new URL from snapshot.
-		if (rawContent != null && A.isImmutableString(rawContent)) {
-			out.taskLine(
-				`Replacing immutable string document for ${filePath}`,
-				true
-			)
+		// For artifact paths, always replace with a new document containing RawString.
+		// For non-artifact paths with immutable strings, replace with mutable text.
+		// In both cases we create a new document and update the snapshot URL.
+		const isArtifact = this.isArtifactPath(filePath)
+		if (
+			isArtifact ||
+			(rawContent != null && A.isImmutableString(rawContent))
+		) {
+			if (!isArtifact) {
+				out.taskLine(
+					`Replacing immutable string document for ${filePath}`,
+					true
+				)
+			}
 			const fakeChange: DetectedChange = {
 				path: filePath,
 				changeType: ChangeType.LOCAL_ONLY,
@@ -874,10 +909,10 @@ export class SyncEngine {
 			}
 			const newHandle = await this.createRemoteFile(fakeChange)
 			if (newHandle) {
-				const versionedUrl = this.getVersionedUrl(newHandle)
+				const entryUrl = this.getEntryUrl(newHandle, filePath)
 				this.snapshotManager.updateFileEntry(snapshot, filePath, {
 					path: joinAndNormalizePath(this.rootPath, filePath),
-					url: versionedUrl,
+					url: entryUrl,
 					head: newHandle.heads(),
 					extension: getFileExtension(filePath),
 					mimeType: getEnhancedMimeType(filePath),
@@ -1059,19 +1094,18 @@ export class SyncEngine {
 						// Track discovered directory for sync
 						this.handlesByPath.set(directoryPath, childDirHandle)
 
-						// Get versioned URL for storage (includes current heads)
-						const versionedUrl = this.getVersionedUrl(childDirHandle)
+						// Get appropriate URL for directory entry
+						const entryUrl = this.getEntryUrl(childDirHandle, directoryPath)
 
-						// Update snapshot with discovered directory using versioned URL
+						// Update snapshot with discovered directory
 						this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
 							path: joinAndNormalizePath(this.rootPath, directoryPath),
-							url: versionedUrl,
+							url: entryUrl,
 							head: childDirHandle.heads(),
 							entries: [],
 						})
 
-						// Return versioned URL (callers use getPlainUrl() when they need to modify)
-						return versionedUrl
+						return entryUrl
 					} catch (resolveErr) {
 						// Failed to resolve directory - fall through to create a fresh directory document
 					}
@@ -1089,8 +1123,8 @@ export class SyncEngine {
 
 		const dirHandle = this.repo.create(dirDoc)
 
-		// Get versioned URL for the new directory (includes heads)
-		const versionedDirUrl = this.getVersionedUrl(dirHandle)
+		// Get appropriate URL for directory entry
+		const dirEntryUrl = this.getEntryUrl(dirHandle, directoryPath)
 
 		// Add this directory to its parent
 		// Use plain URL for mutable handle
@@ -1109,7 +1143,7 @@ export class SyncEngine {
 				doc.docs.push({
 					name: currentDirName,
 					type: "folder",
-					url: versionedDirUrl,
+					url: dirEntryUrl,
 				})
 				didChange = true
 			}
@@ -1126,16 +1160,15 @@ export class SyncEngine {
 			}
 		}
 
-		// Update snapshot with new directory (use versioned URL for storage)
+		// Update snapshot with new directory
 		this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
 			path: joinAndNormalizePath(this.rootPath, directoryPath),
-			url: versionedDirUrl,
+			url: dirEntryUrl,
 			head: dirHandle.heads(),
 			entries: [],
 		})
 
-		// Return versioned URL (callers use getPlainUrl() when they need to modify)
-		return versionedDirUrl
+		return dirEntryUrl
 	}
 
 	/**

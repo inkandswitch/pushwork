@@ -106,6 +106,7 @@ describe("Exclude Patterns", () => {
       sync_server: "wss://test.server.com",
       sync_enabled: true,
       exclude_patterns: [".git", "*.tmp", ".pushwork", "*.env"],
+      artifact_directories: ["dist"],
       sync: {
         move_detection_threshold: 0.8,
       },

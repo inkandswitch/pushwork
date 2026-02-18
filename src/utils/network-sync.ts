@@ -162,7 +162,7 @@ function headsMapEqual(
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
-  timeoutMs: number = 10000,
+  timeoutMs: number = 60000,
 ): Promise<void> {
   const startTime = Date.now();
 
