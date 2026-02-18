@@ -177,8 +177,11 @@ export async function init(
 
   // Create new root directory document
   out.update("Creating root directory");
+  const dirName = path.basename(resolvedPath);
   const rootDoc: DirectoryDocument = {
     "@patchwork": { type: "folder" },
+    name: dirName,
+    title: dirName,
     docs: [],
   };
   const rootHandle = repo.create(rootDoc);

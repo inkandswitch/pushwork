@@ -36,6 +36,7 @@ import {SnapshotManager} from "./snapshot"
 import {ChangeDetector} from "./change-detection"
 import {MoveDetector} from "./move-detection"
 import {out} from "../utils/output"
+import * as path from "path"
 
 const isDebug = !!process.env.DEBUG
 function debug(...args: any[]) {
@@ -1119,6 +1120,8 @@ export class SyncEngine {
 		// CREATE: Directory doesn't exist, create new one
 		const dirDoc: DirectoryDocument = {
 			"@patchwork": {type: "folder"},
+			name: currentDirName,
+			title: currentDirName,
 			docs: [],
 		}
 
@@ -1263,7 +1266,14 @@ export class SyncEngine {
 		const snapshotEntry = snapshot.directories.get(dirPath)
 		const heads = snapshotEntry?.head
 
+		// Determine directory name
+		const dirName = dirPath ? dirPath.split("/").pop() || "" : path.basename(this.rootPath)
+
 		changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+			// Ensure name and title fields are set
+			if (!doc.name) doc.name = dirName
+			if (!doc.title) doc.title = dirName
+
 			// Remove deleted file entries
 			for (const name of deletedNames) {
 				const idx = doc.docs.findIndex(
