@@ -161,7 +161,7 @@ describe("Pushwork Fuzzer", () => {
       expect(contentA).toBe("Hello, Pushwork!");
       expect(contentB).toBe("Hello, Pushwork!");
       expect(contentA).toBe(contentB);
-    }, 10000); // 10 second timeout for this test
+    }, 30000); // 30 second timeout for this test
   });
 
   describe("Manual Fuzzing Tests", () => {

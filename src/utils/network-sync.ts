@@ -9,6 +9,11 @@ import { out } from "./output";
 import { DirectoryDocument } from "../types";
 import { getPlainUrl } from "./directory";
 
+const isDebug = !!process.env.DEBUG;
+function debug(...args: any[]) {
+  if (isDebug) console.error("[pushwork:sync]", ...args);
+}
+
 /**
  * Wait for bidirectional sync to stabilize.
  * This function waits until document heads stop changing, indicating that
@@ -43,6 +48,8 @@ export async function waitForBidirectionalSync(
   let lastSeenHeads = new Map<string, string>();
   let stableCount = 0;
 
+  debug(`waitForBidirectionalSync: starting (timeout=${timeoutMs}ms, stableChecks=${stableChecksRequired})`);
+
   while (Date.now() - startTime < timeoutMs) {
     // Get current heads for all documents in the directory hierarchy
     const currentHeads = await getAllDocumentHeads(repo, rootDirectoryUrl);
@@ -52,10 +59,15 @@ export async function waitForBidirectionalSync(
 
     if (isStable) {
       stableCount++;
+      debug(`waitForBidirectionalSync: stable check ${stableCount}/${stableChecksRequired} (${currentHeads.size} docs)`);
       if (stableCount >= stableChecksRequired) {
+        debug(`waitForBidirectionalSync: converged in ${Date.now() - startTime}ms`);
         return; // Converged!
       }
     } else {
+      if (stableCount > 0) {
+        debug(`waitForBidirectionalSync: heads changed, resetting stable count`);
+      }
       stableCount = 0;
       lastSeenHeads = currentHeads;
     }
@@ -65,6 +77,7 @@ export async function waitForBidirectionalSync(
 
   // Timeout - but don't throw, just log a warning
   // The sync may still work, we just couldn't confirm stability
+  debug(`waitForBidirectionalSync: timed out after ${timeoutMs}ms`);
   out.taskLine(`Sync stability check timed out after ${timeoutMs}ms`, true);
 }
 
@@ -149,19 +162,21 @@ function headsMapEqual(
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
-  timeoutMs: number = 1000000,
+  timeoutMs: number = 10000,
 ): Promise<void> {
   const startTime = Date.now();
 
   if (!syncServerStorageId) {
-    // No sync server storage ID - skip network sync
+    debug("waitForSync: no sync server storage ID, skipping");
     return;
   }
 
   if (handlesToWaitOn.length === 0) {
-    // No documents to sync
+    debug("waitForSync: no documents to sync");
     return;
   }
+
+  debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms)`);
 
   let alreadySynced = 0;
 
@@ -174,12 +189,14 @@ export async function waitForSync(
 
     if (wasAlreadySynced) {
       alreadySynced++;
+      debug(`waitForSync: ${handle.url.slice(0, 20)}... already synced`);
       return Promise.resolve();
     }
 
+    debug(`waitForSync: ${handle.url.slice(0, 20)}... waiting for convergence (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
+
     // Wait for convergence
     return new Promise<void>((resolve, reject) => {
-      // TODO: can we delete this polling?
       let pollInterval: NodeJS.Timeout;
 
       const cleanup = () => {
@@ -189,11 +206,13 @@ export async function waitForSync(
       };
 
       const onConverged = () => {
+        debug(`waitForSync: ${handle.url.slice(0, 20)}... converged in ${Date.now() - startTime}ms`);
         cleanup();
         resolve();
       };
 
       const timeout = setTimeout(() => {
+        debug(`waitForSync: ${handle.url.slice(0, 20)}... timed out after ${timeoutMs}ms`);
         cleanup();
         reject(
           new Error(
@@ -243,10 +262,10 @@ export async function waitForSync(
 
   try {
     await Promise.all(promises);
+    debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${Date.now() - startTime}ms (${alreadySynced} were already synced)`);
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    out.errorBlock("FAILED", `after ${elapsed}ms`);
-    out.crash(error);
+    debug(`waitForSync: failed after ${elapsed}ms: ${error}`);
     throw error;
   }
 }

@@ -37,6 +37,11 @@ import {ChangeDetector} from "./change-detection"
 import {MoveDetector} from "./move-detection"
 import {out} from "../utils/output"
 
+const isDebug = !!process.env.DEBUG
+function debug(...args: any[]) {
+	if (isDebug) console.error("[pushwork:engine]", ...args)
+}
+
 /**
  * Apply a change to a document handle, using changeAt when heads are available
  * to branch from a known version, otherwise falling back to change.
@@ -240,8 +245,11 @@ export class SyncEngine {
 				(await this.snapshotManager.load()) ||
 				this.snapshotManager.createEmpty()
 
+			debug(`sync: rootDirectoryUrl=${snapshot.rootDirectoryUrl?.slice(0, 30)}..., files=${snapshot.files.size}, dirs=${snapshot.directories.size}`)
+
 			// Wait for initial sync to receive any pending remote changes
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+				debug("sync: waiting for initial bidirectional sync")
 				try {
 					await waitForBidirectionalSync(
 						this.repo,
@@ -259,6 +267,7 @@ export class SyncEngine {
 			}
 
 			// Detect all changes
+			debug("sync: detecting changes")
 			const changes = await this.changeDetector.detectChanges(snapshot)
 
 			// Detect moves
@@ -267,7 +276,10 @@ export class SyncEngine {
 				snapshot
 			)
 
+			debug(`sync: detected ${changes.length} changes, ${moves.length} moves, ${remainingChanges.length} remaining`)
+
 			// Phase 1: Push local changes to remote
+			debug("sync: phase 1 - pushing local changes")
 			const phase1Result = await this.pushLocalChanges(
 				remainingChanges,
 				moves,
@@ -278,6 +290,8 @@ export class SyncEngine {
 			result.directoriesChanged += phase1Result.directoriesChanged
 			result.errors.push(...phase1Result.errors)
 			result.warnings.push(...phase1Result.warnings)
+
+			debug(`sync: phase 1 complete - ${phase1Result.filesChanged} files, ${phase1Result.directoriesChanged} dirs changed`)
 
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
@@ -296,6 +310,7 @@ export class SyncEngine {
 						const allHandles = Array.from(
 							this.handlesByPath.values()
 						)
+						debug(`sync: waiting for ${allHandles.length} handles to sync to server`)
 						await waitForSync(
 							allHandles,
 							this.config.sync_server_storage_id
@@ -303,6 +318,7 @@ export class SyncEngine {
 					}
 
 					// Wait for bidirectional sync to stabilize
+					debug("sync: waiting for bidirectional sync to stabilize")
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
@@ -314,12 +330,14 @@ export class SyncEngine {
 						}
 					)
 				} catch (error) {
+					debug(`sync: network sync error: ${error}`)
 					out.taskLine(`Network sync failed: ${error}`, true)
 					result.warnings.push(`Network sync failed: ${error}`)
 				}
 			}
 
 			// Re-detect changes after network sync for fresh state
+			debug("sync: re-detecting changes after network sync")
 			const freshChanges = await this.changeDetector.detectChanges(snapshot)
 			const freshRemoteChanges = freshChanges.filter(
 				c =>
@@ -327,6 +345,7 @@ export class SyncEngine {
 					c.changeType === ChangeType.BOTH_CHANGED
 			)
 
+			debug(`sync: phase 2 - pulling ${freshRemoteChanges.length} remote changes`)
 			// Phase 2: Pull remote changes to local using fresh detection
 			const phase2Result = await this.pullRemoteChanges(
 				freshRemoteChanges,
