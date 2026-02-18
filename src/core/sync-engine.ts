@@ -1465,8 +1465,11 @@ export class SyncEngine {
 
 			const timestamp = Date.now()
 
+			const version = require("../../package.json").version
+
 			changeWithOptionalHeads(rootHandle, heads, (doc: DirectoryDocument) => {
 				doc.lastSyncAt = timestamp
+				doc.with = `pushwork@${version}`
 			})
 
 			// Track root directory for network sync

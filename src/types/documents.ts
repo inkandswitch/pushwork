@@ -18,6 +18,7 @@ export interface DirectoryDocument {
 	title: string
 	docs: DirectoryEntry[]
 	lastSyncAt?: number // Timestamp of last sync operation that made changes
+	with?: string // Tool identifier that last synced, e.g. "pushwork@1.0.19"
 }
 
 /**
