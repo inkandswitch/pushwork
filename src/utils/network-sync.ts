@@ -47,10 +47,12 @@ export async function waitForBidirectionalSync(
   const startTime = Date.now();
   let lastSeenHeads = new Map<string, string>();
   let stableCount = 0;
+  let pollCount = 0;
 
   debug(`waitForBidirectionalSync: starting (timeout=${timeoutMs}ms, stableChecks=${stableChecksRequired})`);
 
   while (Date.now() - startTime < timeoutMs) {
+    pollCount++;
     // Get current heads for all documents in the directory hierarchy
     const currentHeads = await getAllDocumentHeads(repo, rootDirectoryUrl);
 
@@ -59,14 +61,33 @@ export async function waitForBidirectionalSync(
 
     if (isStable) {
       stableCount++;
-      debug(`waitForBidirectionalSync: stable check ${stableCount}/${stableChecksRequired} (${currentHeads.size} docs)`);
+      debug(`waitForBidirectionalSync: stable check ${stableCount}/${stableChecksRequired} (${currentHeads.size} docs, poll #${pollCount})`);
       if (stableCount >= stableChecksRequired) {
-        debug(`waitForBidirectionalSync: converged in ${Date.now() - startTime}ms`);
+        const elapsed = Date.now() - startTime;
+        debug(`waitForBidirectionalSync: converged in ${elapsed}ms after ${pollCount} polls (${currentHeads.size} docs)`);
+        out.taskLine(`Bidirectional sync converged (${currentHeads.size} docs, ${elapsed}ms)`);
         return; // Converged!
       }
     } else {
+      // Find which docs changed
+      if (lastSeenHeads.size > 0) {
+        const changedDocs: string[] = [];
+        for (const [url, heads] of currentHeads) {
+          if (lastSeenHeads.get(url) !== heads) {
+            changedDocs.push(url.slice(0, 20) + "...");
+          }
+        }
+        const newDocs = currentHeads.size - lastSeenHeads.size;
+        if (newDocs > 0) {
+          debug(`waitForBidirectionalSync: ${newDocs} new docs discovered, ${changedDocs.length} docs changed heads (poll #${pollCount})`);
+        } else if (changedDocs.length > 0) {
+          debug(`waitForBidirectionalSync: ${changedDocs.length} docs changed heads: ${changedDocs.slice(0, 5).join(", ")}${changedDocs.length > 5 ? ` ...and ${changedDocs.length - 5} more` : ""} (poll #${pollCount})`);
+        }
+      } else {
+        debug(`waitForBidirectionalSync: initial scan found ${currentHeads.size} docs (poll #${pollCount})`);
+      }
       if (stableCount > 0) {
-        debug(`waitForBidirectionalSync: heads changed, resetting stable count`);
+        debug(`waitForBidirectionalSync: heads changed after ${stableCount} stable checks, resetting`);
       }
       stableCount = 0;
       lastSeenHeads = currentHeads;
@@ -77,8 +98,9 @@ export async function waitForBidirectionalSync(
 
   // Timeout - but don't throw, just log a warning
   // The sync may still work, we just couldn't confirm stability
-  debug(`waitForBidirectionalSync: timed out after ${timeoutMs}ms`);
-  out.taskLine(`Sync stability check timed out after ${timeoutMs}ms`, true);
+  const elapsed = Date.now() - startTime;
+  debug(`waitForBidirectionalSync: timed out after ${elapsed}ms (${pollCount} polls, ${lastSeenHeads.size} docs tracked, reached ${stableCount}/${stableChecksRequired} stable checks)`);
+  out.taskLine(`Bidirectional sync timed out after ${(elapsed / 1000).toFixed(1)}s - document heads were still changing after ${pollCount} checks across ${lastSeenHeads.size} docs (reached ${stableCount}/${stableChecksRequired} stability checks). This may mean another peer is actively editing, or the sync server is slow to relay changes. The sync will continue but some remote changes may not be reflected yet.`, true);
 }
 
 /**
@@ -260,12 +282,23 @@ export async function waitForSync(
     });
   });
 
+  const needSync = handlesToWaitOn.length - alreadySynced;
+  if (needSync > 0) {
+    debug(`waitForSync: ${alreadySynced} already synced, waiting for ${needSync} remaining`);
+    out.taskLine(`Uploading: ${alreadySynced}/${handlesToWaitOn.length} already synced, waiting for ${needSync} more`);
+  } else {
+    debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
+  }
+
   try {
     await Promise.all(promises);
-    debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${Date.now() - startTime}ms (${alreadySynced} were already synced)`);
+    const elapsed = Date.now() - startTime;
+    debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms (${alreadySynced} were already synced)`);
+    out.taskLine(`All ${handlesToWaitOn.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`);
   } catch (error) {
     const elapsed = Date.now() - startTime;
     debug(`waitForSync: failed after ${elapsed}ms: ${error}`);
+    out.taskLine(`Upload to server failed after ${(elapsed / 1000).toFixed(1)}s: ${error}`, true);
     throw error;
   }
 }

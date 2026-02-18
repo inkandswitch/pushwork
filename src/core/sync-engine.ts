@@ -275,6 +275,7 @@ export class SyncEngine {
 			// Wait for initial sync to receive any pending remote changes
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
 				debug("sync: waiting for initial bidirectional sync")
+				out.update("Waiting for initial sync from server")
 				try {
 					await waitForBidirectionalSync(
 						this.repo,
@@ -293,6 +294,7 @@ export class SyncEngine {
 
 			// Detect all changes
 			debug("sync: detecting changes")
+			out.update("Detecting local and remote changes")
 			const changes = await this.changeDetector.detectChanges(snapshot)
 
 			// Detect moves
@@ -335,15 +337,19 @@ export class SyncEngine {
 						const allHandles = Array.from(
 							this.handlesByPath.values()
 						)
-						debug(`sync: waiting for ${allHandles.length} handles to sync to server`)
+						const handlePaths = Array.from(this.handlesByPath.keys())
+						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
+						out.update(`Uploading ${allHandles.length} documents to sync server`)
 						await waitForSync(
 							allHandles,
 							this.config.sync_server_storage_id
 						)
+						debug("sync: all handles synced to server")
 					}
 
 					// Wait for bidirectional sync to stabilize
 					debug("sync: waiting for bidirectional sync to stabilize")
+					out.update("Waiting for bidirectional sync to stabilize")
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
@@ -371,6 +377,9 @@ export class SyncEngine {
 			)
 
 			debug(`sync: phase 2 - pulling ${freshRemoteChanges.length} remote changes`)
+			if (freshRemoteChanges.length > 0) {
+				out.update(`Pulling ${freshRemoteChanges.length} remote changes`)
+			}
 			// Phase 2: Pull remote changes to local using fresh detection
 			const phase2Result = await this.pullRemoteChanges(
 				freshRemoteChanges,
@@ -460,11 +469,19 @@ export class SyncEngine {
 		}
 
 		// Process moves first - all detected moves are applied
-		for (const move of moves) {
+		if (moves.length > 0) {
+			debug(`push: processing ${moves.length} moves`)
+			out.update(`Processing ${moves.length} move${moves.length > 1 ? "s" : ""}`)
+		}
+		for (let i = 0; i < moves.length; i++) {
+			const move = moves[i]
 			try {
+				debug(`push: move ${i + 1}/${moves.length}: ${move.fromPath} -> ${move.toPath}`)
+				out.taskLine(`Moving ${move.fromPath} -> ${move.toPath}`)
 				await this.applyMoveToRemote(move, snapshot)
 				result.filesChanged++
 			} catch (error) {
+				debug(`push: move failed for ${move.fromPath}: ${error}`)
 				result.errors.push({
 					path: move.fromPath,
 					operation: "move",
@@ -481,7 +498,16 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
-		if (localChanges.length === 0) return result
+		if (localChanges.length === 0) {
+			debug("push: no local changes to push")
+			return result
+		}
+
+		const newFiles = localChanges.filter(c => !snapshot.files.has(c.path) && c.localContent !== null)
+		const modifiedFiles = localChanges.filter(c => snapshot.files.has(c.path) && c.localContent !== null)
+		const deletedFiles = localChanges.filter(c => c.localContent === null && snapshot.files.has(c.path))
+		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
+		out.update(`Pushing ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 
 		// Group changes by parent directory path
 		const changesByDir = new Map<string, DetectedChange[]>()
@@ -517,11 +543,20 @@ export class SyncEngine {
 			return depthB - depthA
 		})
 
+		debug(`push: processing ${sortedDirPaths.length} directories (deepest first)`)
+
 		// Track which directories were modified (for subdirectory URL propagation)
 		const modifiedDirs = new Set<string>()
+		let filesProcessed = 0
+		const totalFiles = localChanges.length
 
 		for (const dirPath of sortedDirPaths) {
 			const dirChanges = changesByDir.get(dirPath) || []
+			const dirLabel = dirPath || "(root)"
+
+			if (dirChanges.length > 0) {
+				debug(`push: directory "${dirLabel}": ${dirChanges.length} file changes`)
+			}
 
 			// Ensure directory document exists
 			if (snapshot.rootDirectoryUrl) {
@@ -536,10 +571,13 @@ export class SyncEngine {
 			for (const change of dirChanges) {
 				const fileName = change.path.split("/").pop() || ""
 				const snapshotEntry = snapshot.files.get(change.path)
+				filesProcessed++
 
 				try {
 					if (change.localContent === null && snapshotEntry) {
 						// Delete file
+						debug(`push: [${filesProcessed}/${totalFiles}] delete ${change.path}`)
+						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] deleting ${change.path}`)
 						await this.deleteRemoteFile(
 							snapshotEntry.url,
 							snapshot,
@@ -550,6 +588,8 @@ export class SyncEngine {
 						result.filesChanged++
 					} else if (!snapshotEntry) {
 						// New file
+						debug(`push: [${filesProcessed}/${totalFiles}] create ${change.path} (${change.fileType})`)
+						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] creating ${change.path}`)
 						const handle = await this.createRemoteFile(change)
 						if (handle) {
 							const entryUrl = this.getEntryUrl(handle, change.path)
@@ -569,9 +609,15 @@ export class SyncEngine {
 								}
 							)
 							result.filesChanged++
+							debug(`push: created ${change.path} -> ${handle.url.slice(0, 20)}...`)
 						}
 					} else {
 						// Update existing file
+						const contentSize = typeof change.localContent === "string"
+							? `${change.localContent!.length} chars`
+							: `${(change.localContent as Uint8Array).length} bytes`
+						debug(`push: [${filesProcessed}/${totalFiles}] update ${change.path} (${contentSize})`)
+						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] updating ${change.path}`)
 						await this.updateRemoteFile(
 							snapshotEntry.url,
 							change.localContent!,
@@ -593,6 +639,8 @@ export class SyncEngine {
 						result.filesChanged++
 					}
 				} catch (error) {
+					debug(`push: error processing ${change.path}: ${error}`)
+					out.taskLine(`Error pushing ${change.path}: ${error}`, true)
 					result.errors.push({
 						path: change.path,
 						operation: "local-to-remote",
@@ -631,6 +679,7 @@ export class SyncEngine {
 				deletedNames.length > 0 ||
 				subdirUpdates.length > 0
 			if (hasChanges && snapshot.rootDirectoryUrl) {
+				debug(`push: batch-updating directory "${dirLabel}" (+${newEntries.length} new, ~${updatedEntries.length} updated, -${deletedNames.length} deleted, ${subdirUpdates.length} subdir URL updates)`)
 				await this.batchUpdateDirectory(
 					snapshot,
 					dirPath,
@@ -644,6 +693,7 @@ export class SyncEngine {
 			}
 		}
 
+		debug(`push: complete - ${result.filesChanged} files, ${result.directoriesChanged} dirs changed, ${result.errors.length} errors`)
 		return result
 	}
 
