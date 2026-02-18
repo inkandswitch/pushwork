@@ -4,6 +4,12 @@
 
 Always run `npm run build` (which runs `tsc`) after finishing changes to verify compilation.
 
+## Code style
+
+- `src/core/sync-engine.ts` and `src/commands.ts` use tabs for indentation
+- `src/utils/network-sync.ts` and `src/cli.ts` use 2-space indentation
+- Adding a new CLI command requires changes in 4 places: types (`src/types/config.ts` for options interface), engine (`src/core/sync-engine.ts` for method), commands (`src/commands.ts` for command function), CLI (`src/cli.ts` for registration + import)
+
 ## What pushwork is
 
 Pushwork is a CLI tool for bidirectional file synchronization using Automerge CRDTs. It maps a local filesystem directory to a tree of Automerge documents, syncing changes in both directions through a relay server. Multiple users can edit the same files and changes merge automatically without conflicts.
@@ -78,6 +84,7 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
   - `--dry-run` - Preview only
   - `--force` - Use default config, reset snapshot, re-sync every file
   - `--force --nuclear` - Also recreate all Automerge documents from scratch (except root)
+- `pushwork push [path]` - Push local changes to server without pulling remote changes
 - `pushwork commit [path]` - Save to Automerge docs without network sync
 - `pushwork status [path]` - Show sync status
 - `pushwork diff [path]` - Show changes
@@ -102,12 +109,16 @@ Key fields:
 
 - Uses `waitForSync()` to verify documents reach the server by comparing local and remote heads
 - Uses `waitForBidirectionalSync()` to poll until document heads stabilize (no more incoming changes)
+  - Accepts optional `handles` param to check only specific handles instead of full tree traversal (used post-push in `sync()`)
+  - Timeout scales dynamically: `max(timeoutMs, 5000 + docCount * 50)` so large trees don't prematurely time out
+  - Tree traversal (`collectHeadsRecursive`) fetches siblings concurrently via `Promise.all`
 - Documents sync level-by-level, deepest first, so children are on the server before their parents
 - `handlesByPath` map tracks which documents changed and need syncing
+- `pushToRemote()` does detect + push + `waitForSync` only (no bidirectional wait, no pull) - used by `push` command
 
 ## Leaf-first ordering
 
-After all changes are applied, `updateDirectoryUrlsLeafFirst()` walks the tree bottom-up updating versioned URLs in parent directories. This ensures directory entries always point to the latest version of their children.
+`pushLocalChanges()` processes directories deepest-first via `batchUpdateDirectory()`, propagating subdirectory URL updates as it walks up toward the root. This ensures directory entries always point to the latest version of their children.
 
 ## The `changeWithOptionalHeads` helper
 
