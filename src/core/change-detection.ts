@@ -420,13 +420,17 @@ export class ChangeDetector {
 		url: AutomergeUrl,
 		heads: UrlHeads
 	): Promise<string | Uint8Array | null> {
-		// Strip heads for current document state
-		const plainUrl = getPlainUrl(url)
-		const handle = await this.repo.find<FileDocument>(plainUrl)
-		const doc = await handle.view(heads).doc()
+		try {
+			// Strip heads for current document state
+			const plainUrl = getPlainUrl(url)
+			const handle = await this.repo.find<FileDocument>(plainUrl)
+			const doc = await handle.view(heads).doc()
 
-		const content = (doc as FileDocument | undefined)?.content
-		return readDocContent(content)
+			const content = (doc as FileDocument | undefined)?.content
+			return readDocContent(content)
+		} catch {
+			return null
+		}
 	}
 
 	/**
@@ -484,10 +488,16 @@ export class ChangeDetector {
 	 * Get current head of Automerge document
 	 */
 	private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
-		// Strip heads for current document state
-		const plainUrl = getPlainUrl(url)
-		const handle = await this.repo.find<FileDocument>(plainUrl)
-		return handle.heads()
+		try {
+			// Strip heads for current document state
+			const plainUrl = getPlainUrl(url)
+			const handle = await this.repo.find<FileDocument>(plainUrl)
+			const doc = await handle.doc()
+			if (!doc) return [] as unknown as UrlHeads
+			return handle.heads()
+		} catch {
+			return [] as unknown as UrlHeads
+		}
 	}
 
 	/**
