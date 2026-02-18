@@ -222,13 +222,26 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
-  out.task(options.force ? "Force syncing" : "Syncing");
+  if (options.nuclear && !options.force) {
+    out.error("--nuclear requires --force");
+    out.exit(1);
+  }
+
+  out.task(
+    options.nuclear
+      ? "Nuclear syncing"
+      : options.force
+      ? "Force syncing"
+      : "Syncing"
+  );
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
     forceDefaults: options.force,
   });
 
-  if (options.force) {
+  if (options.nuclear) {
+    await syncEngine.nuclearReset();
+  } else if (options.force) {
     await syncEngine.resetSnapshot();
   }
 

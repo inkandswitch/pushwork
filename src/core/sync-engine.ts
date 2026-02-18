@@ -130,6 +130,30 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Nuclear reset: clear the snapshot AND wipe the root directory document's
+	 * entries so that every file and subdirectory gets brand-new Automerge
+	 * documents. The root directory document itself is preserved.
+	 */
+	async nuclearReset(): Promise<void> {
+		let snapshot = await this.snapshotManager.load()
+		if (!snapshot) return
+
+		// Clear the root directory document's entries
+		if (snapshot.rootDirectoryUrl) {
+			const rootHandle = await this.repo.find<DirectoryDocument>(
+				getPlainUrl(snapshot.rootDirectoryUrl)
+			)
+			rootHandle.change((doc: DirectoryDocument) => {
+				doc.docs.splice(0, doc.docs.length)
+			})
+		}
+
+		// Clear all tracked files and directories from snapshot
+		this.snapshotManager.clear(snapshot)
+		await this.snapshotManager.save(snapshot)
+	}
+
+	/**
 	 * Commit local changes only (no network sync)
 	 */
 	async commitLocal(): Promise<SyncResult> {
@@ -168,9 +192,6 @@ export class SyncEngine {
 			result.directoriesChanged += commitResult.directoriesChanged
 			result.errors.push(...commitResult.errors)
 			result.warnings.push(...commitResult.warnings)
-
-			// Update directory URLs with current heads after all children are populated
-			await this.updateDirectoryUrlsLeafFirst(snapshot)
 
 			// Touch root directory if any changes were made
 			const hasChanges =
@@ -258,38 +279,30 @@ export class SyncEngine {
 			result.errors.push(...phase1Result.errors)
 			result.warnings.push(...phase1Result.warnings)
 
-			// Update directory URLs with current heads after all children are populated
-			await this.updateDirectoryUrlsLeafFirst(snapshot)
-
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
 				try {
-					// If we have a root directory URL, add it to tracked handles
+					// Ensure root directory handle is tracked for sync
 					if (snapshot.rootDirectoryUrl) {
-						const rootDirUrl = snapshot.rootDirectoryUrl
 						const rootHandle =
-							await this.repo.find<DirectoryDocument>(rootDirUrl)
+							await this.repo.find<DirectoryDocument>(
+								snapshot.rootDirectoryUrl
+							)
 						this.handlesByPath.set("", rootHandle)
 					}
 
+					// Single waitForSync with ALL tracked handles at once
 					if (this.handlesByPath.size > 0) {
-						// Sync level-by-level: deepest paths first, then shallower.
-						// Within each level, documents sync in parallel. But we wait
-						// for each level to complete before starting the next, ensuring
-						// children are on the server before their parent directories.
-						const levels = this.groupHandlesByDepthLevel()
-						for (const handlesAtLevel of levels) {
-							await waitForSync(
-								handlesAtLevel,
-								this.config.sync_server_storage_id
-							)
-						}
+						const allHandles = Array.from(
+							this.handlesByPath.values()
+						)
+						await waitForSync(
+							allHandles,
+							this.config.sync_server_storage_id
+						)
 					}
 
-					// Wait for bidirectional sync to stabilize.
-					// This polls document heads until they stop changing, which indicates
-					// that both our outgoing changes and any incoming peer changes have
-					// been received.
+					// Wait for bidirectional sync to stabilize
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
@@ -382,7 +395,12 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Phase 1: Push local changes to Automerge documents
+	 * Phase 1: Push local changes to Automerge documents.
+	 *
+	 * Works depth-first: processes the deepest files first, creates/updates all
+	 * file docs at each level, then batch-updates the parent directory document
+	 * in a single change. Propagates subdirectory URL updates as we walk up
+	 * toward the root. This eliminates the need for a separate URL update pass.
 	 */
 	private async pushLocalChanges(
 		changes: DetectedChange[],
@@ -412,24 +430,173 @@ export class SyncEngine {
 			}
 		}
 
-		// Process local changes
+		// Filter to local changes only
 		const localChanges = changes.filter(
 			c =>
 				c.changeType === ChangeType.LOCAL_ONLY ||
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
+		if (localChanges.length === 0) return result
+
+		// Group changes by parent directory path
+		const changesByDir = new Map<string, DetectedChange[]>()
 		for (const change of localChanges) {
-			try {
-				await this.applyLocalChangeToRemote(change, snapshot)
-				result.filesChanged++
-			} catch (error) {
-				result.errors.push({
-					path: change.path,
-					operation: "local-to-remote",
-					error: error as Error,
-					recoverable: true,
-				})
+			const pathParts = change.path.split("/")
+			pathParts.pop() // remove filename
+			const dirPath = pathParts.join("/")
+			if (!changesByDir.has(dirPath)) {
+				changesByDir.set(dirPath, [])
+			}
+			changesByDir.get(dirPath)!.push(change)
+		}
+
+		// Collect all directory paths that need processing:
+		// directories with file changes + all ancestors up to root
+		const allDirsToProcess = new Set<string>()
+		for (const dirPath of changesByDir.keys()) {
+			allDirsToProcess.add(dirPath)
+			// Add ancestors so subdirectory URL updates propagate to root
+			let current = dirPath
+			while (current) {
+				const parts = current.split("/")
+				parts.pop()
+				current = parts.join("/")
+				allDirsToProcess.add(current)
+			}
+		}
+
+		// Sort deepest-first
+		const sortedDirPaths = Array.from(allDirsToProcess).sort((a, b) => {
+			const depthA = a ? a.split("/").length : 0
+			const depthB = b ? b.split("/").length : 0
+			return depthB - depthA
+		})
+
+		// Track which directories were modified (for subdirectory URL propagation)
+		const modifiedDirs = new Set<string>()
+
+		for (const dirPath of sortedDirPaths) {
+			const dirChanges = changesByDir.get(dirPath) || []
+
+			// Ensure directory document exists
+			if (snapshot.rootDirectoryUrl) {
+				await this.ensureDirectoryDocument(snapshot, dirPath)
+			}
+
+			// Process all file changes in this directory
+			const newEntries: {name: string; url: AutomergeUrl}[] = []
+			const updatedEntries: {name: string; url: AutomergeUrl}[] = []
+			const deletedNames: string[] = []
+
+			for (const change of dirChanges) {
+				const fileName = change.path.split("/").pop() || ""
+				const snapshotEntry = snapshot.files.get(change.path)
+
+				try {
+					if (change.localContent === null && snapshotEntry) {
+						// Delete file
+						await this.deleteRemoteFile(
+							snapshotEntry.url,
+							snapshot,
+							change.path
+						)
+						deletedNames.push(fileName)
+						this.snapshotManager.removeFileEntry(snapshot, change.path)
+						result.filesChanged++
+					} else if (!snapshotEntry) {
+						// New file
+						const handle = await this.createRemoteFile(change)
+						if (handle) {
+							const versionedUrl = this.getVersionedUrl(handle)
+							newEntries.push({name: fileName, url: versionedUrl})
+							this.snapshotManager.updateFileEntry(
+								snapshot,
+								change.path,
+								{
+									path: joinAndNormalizePath(
+										this.rootPath,
+										change.path
+									),
+									url: versionedUrl,
+									head: handle.heads(),
+									extension: getFileExtension(change.path),
+									mimeType: getEnhancedMimeType(change.path),
+								}
+							)
+							result.filesChanged++
+						}
+					} else {
+						// Update existing file
+						await this.updateRemoteFile(
+							snapshotEntry.url,
+							change.localContent!,
+							snapshot,
+							change.path
+						)
+						// Get current versioned URL (updateRemoteFile updates snapshot)
+						const updatedFileEntry = snapshot.files.get(change.path)
+						if (updatedFileEntry) {
+							const fileHandle =
+								await this.repo.find<FileDocument>(
+									getPlainUrl(updatedFileEntry.url)
+								)
+							updatedEntries.push({
+								name: fileName,
+								url: this.getVersionedUrl(fileHandle),
+							})
+						}
+						result.filesChanged++
+					}
+				} catch (error) {
+					result.errors.push({
+						path: change.path,
+						operation: "local-to-remote",
+						error: error as Error,
+						recoverable: true,
+					})
+				}
+			}
+
+			// Collect subdirectory URL updates for child dirs already processed
+			const subdirUpdates: {name: string; url: AutomergeUrl}[] = []
+			for (const modifiedDir of modifiedDirs) {
+				// Check if modifiedDir is a direct child of dirPath
+				const parts = modifiedDir.split("/")
+				const childName = parts.pop() || ""
+				const parentOfModified = parts.join("/")
+				if (parentOfModified === dirPath) {
+					const dirEntry = snapshot.directories.get(modifiedDir)
+					if (dirEntry) {
+						const childHandle =
+							await this.repo.find<DirectoryDocument>(
+								getPlainUrl(dirEntry.url)
+							)
+						subdirUpdates.push({
+							name: childName,
+							url: this.getVersionedUrl(childHandle),
+						})
+					}
+				}
+			}
+
+			// Batch-update the directory document in a single change
+			const hasChanges =
+				newEntries.length > 0 ||
+				updatedEntries.length > 0 ||
+				deletedNames.length > 0 ||
+				subdirUpdates.length > 0
+			if (hasChanges && snapshot.rootDirectoryUrl) {
+				await this.batchUpdateDirectory(
+					snapshot,
+					dirPath,
+					newEntries,
+					updatedEntries,
+					deletedNames,
+					subdirUpdates
+				)
+				modifiedDirs.add(dirPath)
+				result.directoriesChanged++
 			}
 		}
 
@@ -476,54 +643,6 @@ export class SyncEngine {
 		}
 
 		return result
-	}
-
-	/**
-	 * Apply local file change to remote Automerge document
-	 */
-	private async applyLocalChangeToRemote(
-		change: DetectedChange,
-		snapshot: SyncSnapshot
-	): Promise<void> {
-		const snapshotEntry = snapshot.files.get(change.path)
-
-		// Check for null (empty string/Uint8Array are valid content)
-		if (change.localContent === null) {
-			// File was deleted locally
-			if (snapshotEntry) {
-				await this.deleteRemoteFile(snapshotEntry.url, snapshot, change.path)
-				// Remove from directory document
-				await this.removeFileFromDirectory(snapshot, change.path)
-				this.snapshotManager.removeFileEntry(snapshot, change.path)
-			}
-			return
-		}
-
-		if (!snapshotEntry) {
-			// New file
-			const handle = await this.createRemoteFile(change)
-			if (handle) {
-				// Use versioned URL (includes heads) so clients fetch correct version
-				const versionedUrl = this.getVersionedUrl(handle)
-				await this.addFileToDirectory(snapshot, change.path, versionedUrl)
-
-				this.snapshotManager.updateFileEntry(snapshot, change.path, {
-					path: joinAndNormalizePath(this.rootPath, change.path),
-					url: versionedUrl,
-					head: handle.heads(),
-					extension: getFileExtension(change.path),
-					mimeType: getEnhancedMimeType(change.path),
-				})
-			}
-		} else {
-			// Update existing file
-			await this.updateRemoteFile(
-				snapshotEntry.url,
-				change.localContent,
-				snapshot,
-				change.path
-			)
-		}
 	}
 
 	/**
@@ -718,8 +837,8 @@ export class SyncEngine {
 		const rawContent = doc?.content
 
 		// If the existing content is an immutable string, we can't splice into it.
-		// Throw away the old document and create a brand new one with mutable text,
-		// then replace the entry in the parent directory.
+		// Throw away the old document and create a brand new one with mutable text.
+		// The caller's batch directory update will pick up the new URL from snapshot.
 		if (rawContent != null && A.isImmutableString(rawContent)) {
 			out.taskLine(
 				`Replacing immutable string document for ${filePath}`,
@@ -737,12 +856,6 @@ export class SyncEngine {
 			const newHandle = await this.createRemoteFile(fakeChange)
 			if (newHandle) {
 				const versionedUrl = this.getVersionedUrl(newHandle)
-				// Replace the entry in the parent directory
-				await this.replaceFileInDirectory(
-					snapshot,
-					filePath,
-					versionedUrl
-				)
 				this.snapshotManager.updateFileEntry(snapshot, filePath, {
 					path: joinAndNormalizePath(this.rootPath, filePath),
 					url: versionedUrl,
@@ -872,71 +985,6 @@ export class SyncEngine {
 
 		if (didChange && snapshotEntry) {
 			snapshotEntry.head = dirHandle.heads()
-		}
-	}
-
-	/**
-	 * Replace a file entry's URL in the parent directory document.
-	 * Used when an old document (e.g. with immutable string content) is replaced
-	 * by a new document with proper mutable text.
-	 */
-	private async replaceFileInDirectory(
-		snapshot: SyncSnapshot,
-		filePath: string,
-		newFileUrl: AutomergeUrl
-	): Promise<void> {
-		if (!snapshot.rootDirectoryUrl) return
-
-		const pathParts = filePath.split("/")
-		const fileName = pathParts.pop() || ""
-		const directoryPath = pathParts.join("/")
-
-		let parentDirUrl: AutomergeUrl
-		if (!directoryPath || directoryPath === "") {
-			parentDirUrl = snapshot.rootDirectoryUrl
-		} else {
-			const existingDir = snapshot.directories.get(directoryPath)
-			if (!existingDir) return
-			parentDirUrl = existingDir.url
-		}
-
-		try {
-			const dirHandle = await this.repo.find<DirectoryDocument>(
-				getPlainUrl(parentDirUrl)
-			)
-
-			const snapshotEntry = snapshot.directories.get(directoryPath)
-			const heads = snapshotEntry?.head
-
-			let didChange = false
-			changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
-				const existingIndex = doc.docs.findIndex(
-					entry => entry.name === fileName && entry.type === "file"
-				)
-				if (existingIndex !== -1) {
-					doc.docs[existingIndex].url = newFileUrl
-					didChange = true
-				} else {
-					// Entry didn't exist yet, add it
-					doc.docs.push({
-						name: fileName,
-						type: "file",
-						url: newFileUrl,
-					})
-					didChange = true
-				}
-			})
-
-			this.handlesByPath.set(directoryPath, dirHandle)
-
-			if (didChange && snapshotEntry) {
-				snapshotEntry.head = dirHandle.heads()
-			}
-		} catch (error) {
-			out.taskLine(
-				`Warning: Failed to replace file in directory for ${filePath}`,
-				true
-			)
 		}
 	}
 
@@ -1133,6 +1181,93 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Batch-update a directory document in a single change: add new file entries,
+	 * update URLs for modified files, remove deleted entries, and update
+	 * subdirectory URLs. This replaces the separate per-file directory mutations
+	 * and the post-hoc URL update pass.
+	 */
+	private async batchUpdateDirectory(
+		snapshot: SyncSnapshot,
+		dirPath: string,
+		newEntries: {name: string; url: AutomergeUrl}[],
+		updatedEntries: {name: string; url: AutomergeUrl}[],
+		deletedNames: string[],
+		subdirUpdates: {name: string; url: AutomergeUrl}[]
+	): Promise<void> {
+		let dirUrl: AutomergeUrl
+		if (!dirPath || dirPath === "") {
+			dirUrl = snapshot.rootDirectoryUrl!
+		} else {
+			const dirEntry = snapshot.directories.get(dirPath)
+			if (!dirEntry) return
+			dirUrl = dirEntry.url
+		}
+
+		const dirHandle = await this.repo.find<DirectoryDocument>(
+			getPlainUrl(dirUrl)
+		)
+
+		const snapshotEntry = snapshot.directories.get(dirPath)
+		const heads = snapshotEntry?.head
+
+		changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+			// Remove deleted file entries
+			for (const name of deletedNames) {
+				const idx = doc.docs.findIndex(
+					entry => entry.name === name && entry.type === "file"
+				)
+				if (idx !== -1) {
+					doc.docs.splice(idx, 1)
+					out.taskLine(
+						`Removed ${name} from ${
+							formatRelativePath(dirPath) || "root"
+						}`
+					)
+				}
+			}
+
+			// Update URLs for modified files
+			for (const {name, url} of updatedEntries) {
+				const idx = doc.docs.findIndex(
+					entry => entry.name === name && entry.type === "file"
+				)
+				if (idx !== -1) {
+					doc.docs[idx].url = url
+				}
+			}
+
+			// Add new file entries
+			for (const {name, url} of newEntries) {
+				const existing = doc.docs.findIndex(
+					entry => entry.name === name && entry.type === "file"
+				)
+				if (existing === -1) {
+					doc.docs.push({name, type: "file", url})
+				} else {
+					// Entry already exists (e.g. from immutable string replacement)
+					doc.docs[existing].url = url
+				}
+			}
+
+			// Update subdirectory URLs with current heads
+			for (const {name, url} of subdirUpdates) {
+				const idx = doc.docs.findIndex(
+					entry => entry.name === name && entry.type === "folder"
+				)
+				if (idx !== -1) {
+					doc.docs[idx].url = url
+				}
+			}
+		})
+
+		// Track directory handle and update snapshot heads
+		this.handlesByPath.set(dirPath, dirHandle)
+		if (snapshotEntry) {
+			snapshotEntry.head = dirHandle.heads()
+		}
+	}
+
+	/**
 	 * Sort changes by dependency order
 	 */
 	private sortChangesByDependency(changes: DetectedChange[]): DetectedChange[] {
@@ -1282,281 +1417,4 @@ export class SyncEngine {
 		}
 	}
 
-	/**
-	 * Group tracked handles by depth level, ordered leaf-first (deepest level first).
-	 * Returns an array of arrays, where each inner array contains all handles at the
-	 * same depth level. Levels are ordered from deepest to shallowest (root).
-	 *
-	 * This grouping enables level-by-level network sync: all documents at the deepest
-	 * level sync in parallel first, then the next level up, etc. This ensures children
-	 * are fully synced to the server before their parent directories.
-	 */
-	private groupHandlesByDepthLevel(): DocHandle<unknown>[][] {
-		// Group paths by depth
-		const pathsByDepth = new Map<number, string[]>()
-		for (const path of this.handlesByPath.keys()) {
-			const depth = path ? path.split("/").length : 0
-			if (!pathsByDepth.has(depth)) {
-				pathsByDepth.set(depth, [])
-			}
-			pathsByDepth.get(depth)!.push(path)
-		}
-
-		// Sort depths descending (deepest first) to get leaf-first ordering
-		const sortedDepths = Array.from(pathsByDepth.keys()).sort((a, b) => b - a)
-
-		// Build level groups, logging sync order for debugging
-		const levels: DocHandle<unknown>[][] = []
-		for (const depth of sortedDepths) {
-			const paths = pathsByDepth.get(depth)!
-			paths.sort((a, b) => a.localeCompare(b)) // Alphabetical within level
-
-			const handlesAtLevel: DocHandle<unknown>[] = []
-			for (const path of paths) {
-				const handle = this.handlesByPath.get(path)!
-				const versionedUrl = this.getVersionedUrl(handle)
-				out.taskLine(`Sync: ${path || "(root)"} -> ${versionedUrl}`, true)
-				handlesAtLevel.push(handle)
-			}
-			levels.push(handlesAtLevel)
-		}
-
-		return levels
-	}
-
-	/**
-	 * Update all URLs (files and directories) in directory documents with current heads.
-	 *
-	 * This MUST be called AFTER all changes are applied but BEFORE network sync.
-	 * The problem it solves:
-	 * 1. When we create/update a file or directory and store its URL, the URL captures
-	 *    the heads at that moment
-	 * 2. Later operations may advance the document's heads
-	 * 3. But the URL stored in the parent directory has stale heads
-	 * 4. Clients reading the directory would get old views of entries
-	 *
-	 * The fix: walk leaf-first and update all entry URLs with current heads,
-	 * AFTER all changes have been applied. This ensures clients get consistent,
-	 * up-to-date versioned URLs.
-	 */
-	private async updateDirectoryUrlsLeafFirst(
-		snapshot: SyncSnapshot
-	): Promise<void> {
-		// First, update file URLs in their parent directories
-		await this.updateFileUrlsInDirectories(snapshot)
-
-		// Then, update directory URLs in their parent directories (leaf-first)
-		await this.updateSubdirectoryUrls(snapshot)
-	}
-
-	/**
-	 * Update file URLs in directory documents with current heads.
-	 */
-	private async updateFileUrlsInDirectories(
-		snapshot: SyncSnapshot
-	): Promise<void> {
-		// Group files by their parent directory
-		const filesByDir = new Map<string, string[]>()
-
-		for (const filePath of snapshot.files.keys()) {
-			const pathParts = filePath.split("/")
-			pathParts.pop() // Remove filename
-			const dirPath = pathParts.join("/")
-
-			if (!filesByDir.has(dirPath)) {
-				filesByDir.set(dirPath, [])
-			}
-			filesByDir.get(dirPath)!.push(filePath)
-		}
-
-		// Process each directory that has files
-		for (const [dirPath, filePaths] of filesByDir.entries()) {
-			try {
-				// Get the directory URL
-				let dirUrl: AutomergeUrl
-				if (!dirPath || dirPath === "") {
-					if (!snapshot.rootDirectoryUrl) continue
-					dirUrl = snapshot.rootDirectoryUrl
-				} else {
-					const dirEntry = snapshot.directories.get(dirPath)
-					if (!dirEntry) continue
-					dirUrl = dirEntry.url
-				}
-
-				// Get directory handle
-				const dirHandle = await this.repo.find<DirectoryDocument>(
-					getPlainUrl(dirUrl)
-				)
-
-				// Get current heads for changeAt
-				const snapshotEntry = snapshot.directories.get(dirPath)
-				const heads = snapshotEntry?.head
-
-				// Build a map of file names to their current versioned URLs
-				const fileUrlUpdates = new Map<string, AutomergeUrl>()
-
-				for (const filePath of filePaths) {
-					const fileEntry = snapshot.files.get(filePath)
-					if (!fileEntry) continue
-
-					// Get current handle for this file
-					const fileHandle = await this.repo.find<FileDocument>(
-						getPlainUrl(fileEntry.url)
-					)
-
-					// Get versioned URL with current heads
-					const currentVersionedUrl = this.getVersionedUrl(fileHandle)
-
-					// Update snapshot entry
-					snapshot.files.set(filePath, {
-						...fileEntry,
-						url: currentVersionedUrl,
-						head: fileHandle.heads(),
-					})
-
-					// Store for directory update
-					const fileName = filePath.split("/").pop() || ""
-					fileUrlUpdates.set(fileName, currentVersionedUrl)
-				}
-
-				// Update all file entries in the directory document
-				let didChange = false
-				changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
-					for (const [fileName, newUrl] of fileUrlUpdates) {
-						const existingIndex = doc.docs.findIndex(
-							entry => entry.name === fileName && entry.type === "file"
-						)
-						if (
-							existingIndex !== -1 &&
-							doc.docs[existingIndex].url !== newUrl
-						) {
-							doc.docs[existingIndex].url = newUrl
-							didChange = true
-						}
-					}
-				})
-
-				// Track directory and update heads
-				if (didChange) {
-					this.handlesByPath.set(dirPath, dirHandle)
-					if (snapshotEntry) {
-						snapshotEntry.head = dirHandle.heads()
-					}
-				}
-			} catch (error) {
-				out.taskLine(
-					`Warning: Failed to update file URLs in directory ${dirPath}`,
-					true
-				)
-			}
-		}
-	}
-
-	/**
-	 * Update subdirectory URLs in parent directories with current heads.
-	 * Processes leaf-first (deepest directories first).
-	 */
-	private async updateSubdirectoryUrls(snapshot: SyncSnapshot): Promise<void> {
-		// Get all directory paths and sort leaf-first (deepest first)
-		const directoryPaths = Array.from(snapshot.directories.keys()).sort(
-			(a, b) => {
-				const depthA = a ? a.split("/").length : 0
-				const depthB = b ? b.split("/").length : 0
-
-				// Deepest first
-				if (depthA !== depthB) {
-					return depthB - depthA
-				}
-
-				// Alphabetically by path
-				return a.localeCompare(b)
-			}
-		)
-
-		// Update each directory's URL in its parent
-		for (const dirPath of directoryPaths) {
-			// Skip root directory (has no parent)
-			if (!dirPath || dirPath === "") {
-				continue
-			}
-
-			const dirEntry = snapshot.directories.get(dirPath)
-			if (!dirEntry) continue
-
-			try {
-				// Get current handle for this directory (use plain URL to get mutable handle)
-				const dirHandle = await this.repo.find<DirectoryDocument>(
-					getPlainUrl(dirEntry.url)
-				)
-
-				// Get versioned URL with CURRENT heads (after all children populated)
-				const currentVersionedUrl = this.getVersionedUrl(dirHandle)
-
-				// Update snapshot entry with current heads and versioned URL
-				snapshot.directories.set(dirPath, {
-					...dirEntry,
-					url: currentVersionedUrl,
-					head: dirHandle.heads(),
-				})
-
-				// Get parent path
-				const pathParts = dirPath.split("/")
-				const dirName = pathParts.pop() || ""
-				const parentPath = pathParts.join("/")
-
-				// Get parent directory handle
-				let parentDirUrl: AutomergeUrl
-				if (!parentPath || parentPath === "") {
-					// Parent is root
-					if (!snapshot.rootDirectoryUrl) continue
-					parentDirUrl = snapshot.rootDirectoryUrl
-				} else {
-					const parentEntry = snapshot.directories.get(parentPath)
-					if (!parentEntry) continue
-					parentDirUrl = parentEntry.url
-				}
-
-				// Update the directory entry in the parent with the new versioned URL
-				const parentHandle = await this.repo.find<DirectoryDocument>(
-					getPlainUrl(parentDirUrl)
-				)
-
-				// Get parent's current heads for changeAt
-				const parentSnapshotEntry =
-					parentPath === ""
-						? snapshot.directories.get("")
-						: snapshot.directories.get(parentPath)
-				const parentHeads = parentSnapshotEntry?.head
-
-				let didChange = false
-				changeWithOptionalHeads(
-					parentHandle,
-					parentHeads,
-					(doc: DirectoryDocument) => {
-						const existingIndex = doc.docs.findIndex(
-							entry => entry.name === dirName && entry.type === "folder"
-						)
-						if (existingIndex !== -1) {
-							// Update the URL with current versioned URL
-							doc.docs[existingIndex].url = currentVersionedUrl
-							didChange = true
-						}
-					}
-				)
-
-				// Track parent for sync and update its heads in snapshot
-				if (didChange) {
-					this.handlesByPath.set(parentPath, parentHandle)
-					if (parentSnapshotEntry) {
-						parentSnapshotEntry.head = parentHandle.heads()
-					}
-				}
-			} catch (error) {
-				out.taskLine(
-					`Warning: Failed to update directory URL for ${dirPath}`,
-					true
-				)
-			}
-		}
-	}
 }

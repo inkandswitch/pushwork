@@ -104,11 +104,17 @@ program
     "Ignore config files and sync with default settings",
     false
   )
+  .option(
+    "--nuclear",
+    "With --force: recreate all Automerge documents from scratch",
+    false
+  )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
       dryRun: opts.dryRun,
       force: opts.force,
+      nuclear: opts.nuclear,
       verbose: opts.verbose,
     });
   });
