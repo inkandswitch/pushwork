@@ -890,11 +890,12 @@ export class SyncEngine {
 		const isArtifact = this.isArtifactPath(filePath)
 		if (
 			isArtifact ||
+			!doc ||
 			(rawContent != null && A.isImmutableString(rawContent))
 		) {
 			if (!isArtifact) {
 				out.taskLine(
-					`Replacing immutable string document for ${filePath}`,
+					`Replacing ${!doc ? 'unavailable' : 'immutable string'} document for ${filePath}`,
 					true
 				)
 			}
