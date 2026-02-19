@@ -30,7 +30,7 @@ import {
 	updateTextContent,
 	readDocContent,
 } from "../utils"
-import {isContentEqual} from "../utils/content"
+import {isContentEqual, contentHash} from "../utils/content"
 import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
 import {SnapshotManager} from "./snapshot"
 import {ChangeDetector} from "./change-detection"
@@ -86,7 +86,8 @@ export class SyncEngine {
 		this.changeDetector = new ChangeDetector(
 			repo,
 			rootPath,
-			config.exclude_patterns
+			config.exclude_patterns,
+			config.artifact_directories || []
 		)
 		this.moveDetector = new MoveDetector(config.sync.move_detection_threshold)
 	}
@@ -714,6 +715,9 @@ export class SyncEngine {
 									head: handle.heads(),
 									extension: getFileExtension(change.path),
 									mimeType: getEnhancedMimeType(change.path),
+									...(this.isArtifactPath(change.path) && change.localContent
+										? {contentHash: contentHash(change.localContent)}
+										: {}),
 								}
 							)
 							result.filesChanged++
@@ -936,34 +940,55 @@ export class SyncEngine {
 
 		// 3) Update the FileDocument name and content to match new location/state
 		try {
-			// Use plain URL for mutable handle
-			const handle = await this.repo.find<FileDocument>(
-				getPlainUrl(fromEntry.url)
-			)
-			const heads = fromEntry.head
+			let entryUrl: AutomergeUrl
+			let finalHeads: UrlHeads
 
-			// Update both name and content (if content changed during move)
-			changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
-				doc.name = toFileName
-
-				// If new content is provided, update it (handles move + modification case)
-				if (move.newContent !== undefined) {
-					if (typeof move.newContent === "string") {
-						updateTextContent(doc, ["content"], move.newContent)
-					} else {
-						doc.content = move.newContent
-					}
+			if (this.isArtifactPath(move.toPath)) {
+				// Artifact files use RawString — no diffing needed, just create a fresh doc
+				const content = move.newContent !== undefined
+					? move.newContent
+					: readDocContent((await (await this.repo.find<FileDocument>(getPlainUrl(fromEntry.url))).doc())?.content)
+				const fakeChange: DetectedChange = {
+					path: move.toPath,
+					changeType: ChangeType.LOCAL_ONLY,
+					fileType: content != null && typeof content === "string" ? FileType.TEXT : FileType.BINARY,
+					localContent: content,
+					remoteContent: null,
 				}
-			})
+				const newHandle = await this.createRemoteFile(fakeChange)
+				if (!newHandle) return
+				entryUrl = this.getEntryUrl(newHandle, move.toPath)
+				finalHeads = newHandle.heads()
+			} else {
+				// Use plain URL for mutable handle
+				const handle = await this.repo.find<FileDocument>(
+					getPlainUrl(fromEntry.url)
+				)
+				const heads = fromEntry.head
 
-			// Get appropriate URL for directory entry
-			const entryUrl = this.getEntryUrl(handle, move.toPath)
+				// Update both name and content (if content changed during move)
+				changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
+					doc.name = toFileName
+
+					// If new content is provided, update it (handles move + modification case)
+					if (move.newContent !== undefined) {
+						if (typeof move.newContent === "string") {
+							updateTextContent(doc, ["content"], move.newContent)
+						} else {
+							doc.content = move.newContent
+						}
+					}
+				})
+
+				entryUrl = this.getEntryUrl(handle, move.toPath)
+				finalHeads = handle.heads()
+
+				// Track file handle for network sync
+				this.handlesByPath.set(move.toPath, handle)
+			}
 
 			// 4) Add file entry to destination directory
 			await this.addFileToDirectory(snapshot, move.toPath, entryUrl)
-
-			// Track file handle for network sync
-			this.handlesByPath.set(move.toPath, handle)
 
 			// 5) Update snapshot entries
 			this.snapshotManager.removeFileEntry(snapshot, move.fromPath)
@@ -971,7 +996,10 @@ export class SyncEngine {
 				...fromEntry,
 				path: joinAndNormalizePath(this.rootPath, move.toPath),
 				url: entryUrl,
-				head: handle.heads(),
+				head: finalHeads,
+				...(this.isArtifactPath(move.toPath) && move.newContent != null
+					? {contentHash: contentHash(move.newContent)}
+					: {}),
 			})
 		} catch (e) {
 			// Failed to update file name - file may have been deleted
@@ -1076,6 +1104,9 @@ export class SyncEngine {
 					head: newHandle.heads(),
 					extension: getFileExtension(filePath),
 					mimeType: getEnhancedMimeType(filePath),
+					...(this.isArtifactPath(filePath)
+						? {contentHash: contentHash(content)}
+						: {}),
 				})
 			}
 			return
@@ -1130,27 +1161,14 @@ export class SyncEngine {
 	 * Delete remote file document
 	 */
 	private async deleteRemoteFile(
-		url: AutomergeUrl,
-		snapshot?: SyncSnapshot,
-		filePath?: string
+		_url: AutomergeUrl,
+		_snapshot?: SyncSnapshot,
+		_filePath?: string
 	): Promise<void> {
-		// In Automerge, we don't actually delete documents
-		// They become orphaned and will be garbage collected
-		// For now, we just mark them as deleted by clearing content
-		// Use plain URL for mutable handle
-		const handle = await this.repo.find<FileDocument>(getPlainUrl(url))
-		// const doc = await handle.doc(); // no longer needed
-		let heads
-		if (snapshot && filePath) {
-			heads = snapshot.files.get(filePath)?.head
-		}
-		changeWithOptionalHeads(handle, heads, (doc: FileDocument) => {
-			if (doc.content instanceof Uint8Array) {
-				doc.content = new Uint8Array(0)
-			} else {
-				updateTextContent(doc, ["content"], "")
-			}
-		})
+		// In Automerge, we don't actually delete documents.
+		// The file entry is removed from its parent directory, making the
+		// document orphaned. Clearing content via splice is expensive for
+		// large text files (every character is a CRDT op), so we skip it.
 	}
 
 	/**

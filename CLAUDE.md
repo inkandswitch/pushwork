@@ -1,5 +1,7 @@
 # Pushwork - Claude's Notes
 
+Always update this file as you learn new things about the codebase — patterns, pitfalls, performance considerations, architectural decisions. This is your persistent memory across sessions.
+
 ## What to do after changing code
 
 Always run `npm run build` (which runs `tsc`) after finishing changes to verify compilation.
@@ -50,7 +52,7 @@ Every file becomes an Automerge document (`FileDocument`) with content stored as
 
 ### Two-phase sync
 
-1. **Push** (local -> remote): Detect local filesystem changes vs snapshot. New files get new Automerge docs. Modified files get spliced. Deleted files get cleared and removed from parent directory.
+1. **Push** (local -> remote): Detect local filesystem changes vs snapshot. New files get new Automerge docs. Modified files get spliced. Deleted files are removed from their parent directory document (the orphaned doc is left as-is).
 2. **Network sync**: Wait for documents to reach the relay server, level-by-level deepest-first (children before parents).
 3. **Pull** (remote -> local): Re-detect changes after network sync. Write remote-only changes to the local filesystem.
 
@@ -123,3 +125,9 @@ Key fields:
 ## The `changeWithOptionalHeads` helper
 
 Used throughout sync-engine: if heads are available, calls `handle.changeAt(heads, cb)` to branch from a known version; otherwise falls back to `handle.change(cb)`. This is important for conflict-free merging when multiple peers are editing.
+
+## Performance pitfalls
+
+- **Avoid splicing large text deletions.** Automerge text CRDTs track every character as an individual op. `A.splice(doc, path, 0, largeString.length)` to clear a large file is O(n) in CRDT ops and very slow. This is why `deleteRemoteFile()` no longer clears content — it just lets the document become orphaned when removed from its parent directory.
+- **Avoid diffing artifact files.** `diffChars()` is O(n*m) and pointless for artifact directories since they use RawString (immutable snapshots). Artifact files should always be replaced with a fresh document rather than diffed+spliced. This applies to `updateRemoteFile()`, `applyMoveToRemote()`, and change detection. `ChangeDetector` skips `getContentAtHead()` and `getCurrentRemoteContent()` for artifact paths — it uses a SHA-256 `contentHash` stored in the snapshot to detect local changes, and checks heads to detect remote changes. If neither changed, the artifact is skipped entirely. The `contentHash` field on `SnapshotFileEntry` is optional and only populated for artifact files.
+- **`waitForBidirectionalSync` on large trees.** Full tree traversal (`getAllDocumentHeads`) is expensive because it `repo.find()`s every document. For post-push stabilization, pass the `handles` option to only check documents that actually changed. The initial pre-pull call still needs the full scan to discover remote changes. The dynamic timeout adds the first scan's duration on top of the base timeout, since the first scan is just establishing baseline — its duration shouldn't count against stability-wait time.

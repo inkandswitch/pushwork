@@ -17,7 +17,7 @@ import {
 	getPlainUrl,
 	readDocContent,
 } from "../utils"
-import {isContentEqual} from "../utils/content"
+import {isContentEqual, contentHash} from "../utils/content"
 import {out} from "../utils/output"
 
 /**
@@ -27,8 +27,20 @@ export class ChangeDetector {
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
-		private excludePatterns: string[] = []
+		private excludePatterns: string[] = [],
+		private artifactDirectories: string[] = []
 	) {}
+
+	/**
+	 * Check if a file path is inside an artifact directory.
+	 * Artifact files use RawString and are always replaced wholesale,
+	 * so we can skip expensive remote content reads for them.
+	 */
+	private isArtifactPath(filePath: string): boolean {
+		return this.artifactDirectories.some(
+			dir => filePath === dir || filePath.startsWith(dir + "/")
+		)
+	}
 
 	/**
 	 * Detect all changes between local filesystem and snapshot
@@ -78,6 +90,35 @@ export class ChangeDetector {
 							localContent: fileInfo.content,
 							remoteContent: null,
 						})
+					} else if (this.isArtifactPath(relativePath)) {
+						// Artifact files are always replaced wholesale (RawString).
+						// Skip remote doc content reads — compare local hash against
+						// stored hash to detect local changes, and check heads for remote.
+						const localHash = contentHash(fileInfo.content)
+						const localChanged = snapshotEntry.contentHash
+							? localHash !== snapshotEntry.contentHash
+							: true // No stored hash = first sync with hash support, assume changed
+
+						const remoteHead = await this.getCurrentRemoteHead(
+							snapshotEntry.url
+						)
+						const remoteChanged = !A.equals(remoteHead, snapshotEntry.head)
+
+						if (localChanged || remoteChanged) {
+							changes.push({
+								path: relativePath,
+								changeType: localChanged && remoteChanged
+									? ChangeType.BOTH_CHANGED
+									: localChanged
+										? ChangeType.LOCAL_ONLY
+										: ChangeType.REMOTE_ONLY,
+								fileType: fileInfo.type,
+								localContent: fileInfo.content,
+								remoteContent: null,
+								localHead: snapshotEntry.head,
+								remoteHead,
+							})
+						}
 					} else {
 						// Check if content changed
 						const lastKnownContent = await this.getContentAtHead(
@@ -129,6 +170,27 @@ export class ChangeDetector {
 			Array.from(snapshot.files.entries())
 				.filter(([relativePath]) => !currentFiles.has(relativePath))
 				.map(async ([relativePath, snapshotEntry]) => {
+					if (this.isArtifactPath(relativePath)) {
+						// Artifact deletion: skip remote content read
+						const remoteHead = await this.getCurrentRemoteHead(
+							snapshotEntry.url
+						)
+						const remoteChanged = !A.equals(remoteHead, snapshotEntry.head)
+
+						changes.push({
+							path: relativePath,
+							changeType: remoteChanged
+								? ChangeType.BOTH_CHANGED
+								: ChangeType.LOCAL_ONLY,
+							fileType: FileType.TEXT,
+							localContent: null,
+							remoteContent: null,
+							localHead: snapshotEntry.head,
+							remoteHead,
+						})
+						return
+					}
+
 					// File was deleted locally
 					const currentRemoteContent = await this.getCurrentRemoteContent(
 						snapshotEntry.url
@@ -204,6 +266,23 @@ export class ChangeDetector {
 					)
 
 					if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
+						if (this.isArtifactPath(relativePath)) {
+							// Artifact: skip content reads, just report head change
+							const localContent = await this.getLocalContent(relativePath)
+							changes.push({
+								path: relativePath,
+								changeType: localContent !== null
+									? ChangeType.BOTH_CHANGED
+									: ChangeType.REMOTE_ONLY,
+								fileType: FileType.TEXT,
+								localContent,
+								remoteContent: null,
+								localHead: snapshotEntry.head,
+								remoteHead: currentRemoteHead,
+							})
+							return
+						}
+
 						// Remote document has changed
 						const currentRemoteContent = await this.getCurrentRemoteContent(
 							snapshotEntry.url

@@ -1,3 +1,13 @@
+import { createHash } from "crypto";
+
+/**
+ * Compute a SHA-256 hash of file content.
+ * Used to detect local changes for artifact files without reading remote docs.
+ */
+export function contentHash(content: string | Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
 /**
  * Compare two content pieces for equality
  */

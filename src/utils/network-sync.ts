@@ -61,12 +61,13 @@ export async function waitForBidirectionalSync(
       ? getHandleHeads(handles)
       : await getAllDocumentHeads(repo, rootDirectoryUrl);
 
-    // Scale timeout proportionally to tree size after first scan
+    // After first scan: scale timeout to tree size and reset the clock.
+    // The first scan is just establishing a baseline — its duration
+    // shouldn't count against the stability-wait timeout.
     if (pollCount === 1) {
-      dynamicTimeoutMs = Math.max(timeoutMs, 5000 + currentHeads.size * 50);
-      if (dynamicTimeoutMs !== timeoutMs) {
-        debug(`waitForBidirectionalSync: scaled timeout to ${dynamicTimeoutMs}ms for ${currentHeads.size} docs`);
-      }
+      const scanDuration = Date.now() - startTime;
+      dynamicTimeoutMs = Math.max(timeoutMs, 5000 + currentHeads.size * 50) + scanDuration;
+      debug(`waitForBidirectionalSync: first scan took ${scanDuration}ms, timeout now ${dynamicTimeoutMs}ms for ${currentHeads.size} docs`);
     }
 
     // Check if heads are stable (no changes since last check)

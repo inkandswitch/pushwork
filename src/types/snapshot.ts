@@ -9,6 +9,7 @@ export interface SnapshotFileEntry {
   head: UrlHeads; // Document head at last sync
   extension: string; // File extension
   mimeType: string; // MIME type
+  contentHash?: string; // SHA-256 of content at last sync (used by artifact files to skip remote reads)
 }
 
 /**
