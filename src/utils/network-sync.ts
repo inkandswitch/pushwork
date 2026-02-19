@@ -207,23 +207,32 @@ function headsMapEqual(
 }
 
 /**
- * Wait for documents to sync to the remote server
+ * Result of waitForSync — lists which handles failed to sync.
+ */
+export interface SyncWaitResult {
+  failed: DocHandle<unknown>[];
+}
+
+/**
+ * Wait for documents to sync to the remote server.
+ * Returns a result with any failed handles instead of throwing,
+ * so callers can attempt recovery (e.g. recreating documents).
  */
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
   timeoutMs: number = 60000,
-): Promise<void> {
+): Promise<SyncWaitResult> {
   const startTime = Date.now();
 
   if (!syncServerStorageId) {
     debug("waitForSync: no sync server storage ID, skipping");
-    return;
+    return { failed: [] };
   }
 
   if (handlesToWaitOn.length === 0) {
     debug("waitForSync: no documents to sync");
-    return;
+    return { failed: [] };
   }
 
   debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms)`);
@@ -240,13 +249,13 @@ export async function waitForSync(
     if (wasAlreadySynced) {
       alreadySynced++;
       debug(`waitForSync: ${handle.url.slice(0, 20)}... already synced`);
-      return Promise.resolve();
+      return Promise.resolve(handle);
     }
 
     debug(`waitForSync: ${handle.url.slice(0, 20)}... waiting for convergence (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
 
     // Wait for convergence
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<DocHandle<unknown>>((resolve, reject) => {
       let pollInterval: NodeJS.Timeout;
 
       const cleanup = () => {
@@ -258,17 +267,13 @@ export async function waitForSync(
       const onConverged = () => {
         debug(`waitForSync: ${handle.url.slice(0, 20)}... converged in ${Date.now() - startTime}ms`);
         cleanup();
-        resolve();
+        resolve(handle);
       };
 
       const timeout = setTimeout(() => {
         debug(`waitForSync: ${handle.url.slice(0, 20)}... timed out after ${timeoutMs}ms`);
         cleanup();
-        reject(
-          new Error(
-            `Sync timeout after ${timeoutMs}ms for document ${handle.url}`,
-          ),
-        );
+        reject(handle);
       }, timeoutMs);
 
       const isConverged = () => {
@@ -318,15 +323,22 @@ export async function waitForSync(
     debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
   }
 
-  try {
-    await Promise.all(promises);
-    const elapsed = Date.now() - startTime;
+  const results = await Promise.allSettled(promises);
+  const failed: DocHandle<unknown>[] = [];
+  for (const result of results) {
+    if (result.status === "rejected") {
+      failed.push(result.reason as DocHandle<unknown>);
+    }
+  }
+
+  const elapsed = Date.now() - startTime;
+  if (failed.length > 0) {
+    debug(`waitForSync: ${failed.length} documents failed after ${elapsed}ms`);
+    out.taskLine(`Upload: ${handlesToWaitOn.length - failed.length} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`, true);
+  } else {
     debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms (${alreadySynced} were already synced)`);
     out.taskLine(`All ${handlesToWaitOn.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`);
-  } catch (error) {
-    const elapsed = Date.now() - startTime;
-    debug(`waitForSync: failed after ${elapsed}ms: ${error}`);
-    out.taskLine(`Upload to server failed after ${(elapsed / 1000).toFixed(1)}s: ${error}`, true);
-    throw error;
   }
+
+  return { failed };
 }

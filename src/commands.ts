@@ -194,11 +194,10 @@ export async function init(
   // This ensures the document is uploaded before we exit
   // waitForSync() verifies the server has the document by comparing local and remote heads
   if (config.sync_enabled && config.sync_server_storage_id) {
-    try {
-      out.update("Syncing to server");
-      await waitForSync([rootHandle], config.sync_server_storage_id);
-    } catch (error) {
-      out.taskLine(`Network sync failed: ${error}`, true);
+    out.update("Syncing to server");
+    const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
+    if (failed.length > 0) {
+      out.taskLine("Root document failed to sync to server", true);
       // Continue anyway - the document is created locally and will sync later
     }
   }

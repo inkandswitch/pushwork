@@ -250,6 +250,113 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Recreate documents that failed to sync. Creates new Automerge documents
+	 * with the same content and updates all references (snapshot, parent directory).
+	 * Returns new handles that should be retried for sync.
+	 */
+	private async recreateFailedDocuments(
+		failedHandles: DocHandle<unknown>[],
+		snapshot: SyncSnapshot
+	): Promise<DocHandle<unknown>[]> {
+		const failedUrls = new Set(failedHandles.map(h => getPlainUrl(h.url)))
+		const newHandles: DocHandle<unknown>[] = []
+
+		// Find which paths correspond to the failed handles
+		for (const [filePath, entry] of snapshot.files.entries()) {
+			const plainUrl = getPlainUrl(entry.url)
+			if (!failedUrls.has(plainUrl)) continue
+
+			debug(`recreate: recreating document for ${filePath} (${plainUrl.slice(0, 20)}...)`)
+			out.taskLine(`Recreating document for ${filePath}`)
+
+			try {
+				// Read the current content from the old handle
+				const oldHandle = await this.repo.find<FileDocument>(plainUrl)
+				const doc = await oldHandle.doc()
+				if (!doc) {
+					debug(`recreate: could not read doc for ${filePath}, skipping`)
+					continue
+				}
+
+				const content = readDocContent(doc.content)
+				if (content === null) {
+					debug(`recreate: null content for ${filePath}, skipping`)
+					continue
+				}
+
+				// Create a fresh document
+				const fakeChange: DetectedChange = {
+					path: filePath,
+					changeType: ChangeType.LOCAL_ONLY,
+					fileType: this.isTextContent(content) ? FileType.TEXT : FileType.BINARY,
+					localContent: content,
+					remoteContent: null,
+				}
+				const newHandle = await this.createRemoteFile(fakeChange)
+				if (!newHandle) continue
+
+				const entryUrl = this.getEntryUrl(newHandle, filePath)
+
+				// Update snapshot entry
+				this.snapshotManager.updateFileEntry(snapshot, filePath, {
+					...entry,
+					url: entryUrl,
+					head: newHandle.heads(),
+					...(this.isArtifactPath(filePath) ? {contentHash: contentHash(content)} : {}),
+				})
+
+				// Update parent directory entry to point to new document
+				const pathParts = filePath.split("/")
+				const fileName = pathParts.pop() || ""
+				const dirPath = pathParts.join("/")
+
+				let dirUrl: AutomergeUrl
+				if (!dirPath || dirPath === "") {
+					dirUrl = snapshot.rootDirectoryUrl!
+				} else {
+					const dirEntry = snapshot.directories.get(dirPath)
+					if (!dirEntry) continue
+					dirUrl = dirEntry.url
+				}
+
+				const dirHandle = await this.repo.find<DirectoryDocument>(getPlainUrl(dirUrl))
+				dirHandle.change((d: DirectoryDocument) => {
+					const idx = d.docs.findIndex(
+						e => e.name === fileName && e.type === "file"
+					)
+					if (idx !== -1) {
+						d.docs[idx].url = entryUrl
+					}
+				})
+
+				// Track new handles
+				this.handlesByPath.set(filePath, newHandle)
+				this.handlesByPath.set(dirPath, dirHandle)
+				newHandles.push(newHandle)
+				newHandles.push(dirHandle)
+
+				debug(`recreate: created new doc for ${filePath} -> ${newHandle.url.slice(0, 20)}...`)
+			} catch (error) {
+				debug(`recreate: failed for ${filePath}: ${error}`)
+				out.taskLine(`Failed to recreate ${filePath}: ${error}`, true)
+			}
+		}
+
+		// Also check directory documents
+		for (const [dirPath, entry] of snapshot.directories.entries()) {
+			const plainUrl = getPlainUrl(entry.url)
+			if (!failedUrls.has(plainUrl)) continue
+
+			// Directory docs can't be easily recreated (they reference children).
+			// Just log a warning — the child recreation above should handle most cases.
+			debug(`recreate: directory ${dirPath || "(root)"} failed to sync, cannot recreate`)
+			out.taskLine(`Warning: directory ${dirPath || "(root)"} failed to sync`, true)
+		}
+
+		return newHandles
+	}
+
+	/**
 	 * Push local changes to server without pulling remote changes.
 	 * Detect changes, push to Automerge docs, upload to server. No bidirectional wait, no pull.
 	 */
@@ -325,11 +432,30 @@ export class SyncEngine {
 						)
 						debug(`pushToRemote: waiting for ${allHandles.length} handles to sync to server`)
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
-						await waitForSync(
+						const {failed} = await waitForSync(
 							allHandles,
 							this.config.sync_server_storage_id
 						)
-						debug("pushToRemote: all handles synced to server")
+
+						// Recreate failed documents and retry once
+						if (failed.length > 0) {
+							debug(`pushToRemote: ${failed.length} documents failed, recreating`)
+							out.update(`Recreating ${failed.length} failed documents`)
+							const retryHandles = await this.recreateFailedDocuments(failed, snapshot)
+							if (retryHandles.length > 0) {
+								debug(`pushToRemote: retrying ${retryHandles.length} recreated handles`)
+								out.update(`Retrying ${retryHandles.length} recreated documents`)
+								const retry = await waitForSync(
+									retryHandles,
+									this.config.sync_server_storage_id
+								)
+								if (retry.failed.length > 0) {
+									result.warnings.push(`${retry.failed.length} documents still failed after recreation`)
+								}
+							}
+						}
+
+						debug("pushToRemote: sync to server complete")
 					}
 				} catch (error) {
 					debug(`pushToRemote: network sync error: ${error}`)
@@ -446,10 +572,29 @@ export class SyncEngine {
 						const handlePaths = Array.from(this.handlesByPath.keys())
 						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
-						await waitForSync(
+						const {failed} = await waitForSync(
 							allHandles,
 							this.config.sync_server_storage_id
 						)
+
+						// Recreate failed documents and retry once
+						if (failed.length > 0) {
+							debug(`sync: ${failed.length} documents failed, recreating`)
+							out.update(`Recreating ${failed.length} failed documents`)
+							const retryHandles = await this.recreateFailedDocuments(failed, snapshot)
+							if (retryHandles.length > 0) {
+								debug(`sync: retrying ${retryHandles.length} recreated handles`)
+								out.update(`Retrying ${retryHandles.length} recreated documents`)
+								const retry = await waitForSync(
+									retryHandles,
+									this.config.sync_server_storage_id
+								)
+								if (retry.failed.length > 0) {
+									result.warnings.push(`${retry.failed.length} documents still failed after recreation`)
+								}
+							}
+						}
+
 						debug("sync: all handles synced to server")
 					}
 
