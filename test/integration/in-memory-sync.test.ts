@@ -127,9 +127,9 @@ async function syncUntilConverged(
       );
     }
 
-    // Sync both repos
-    await pushwork(["sync"], repoA);
-    await pushwork(["sync"], repoB);
+    // Sync both repos (use --gentle for incremental sync)
+    await pushwork(["sync", "--gentle"], repoA);
+    await pushwork(["sync", "--gentle"], repoB);
 
     // Check if converged
     const hashA = await hashDirectory(repoA);

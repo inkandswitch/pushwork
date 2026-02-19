@@ -224,26 +224,21 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
-  if (options.nuclear && !options.force) {
-    out.error("--nuclear requires --force");
-    out.exit(1);
-  }
-
   out.task(
     options.nuclear
       ? "Nuclear syncing"
-      : options.force
-      ? "Force syncing"
-      : "Syncing"
+      : options.gentle
+      ? "Syncing"
+      : "Force syncing"
   );
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
-    forceDefaults: options.force,
+    forceDefaults: !options.gentle,
   });
 
   if (options.nuclear) {
     await syncEngine.nuclearReset();
-  } else if (options.force) {
+  } else if (!options.gentle) {
     await syncEngine.resetSnapshot();
   }
 

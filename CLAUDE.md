@@ -82,10 +82,11 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
 
 - `pushwork init [path]` - Initialize, creates root directory document
 - `pushwork clone <url> <path>` - Clone from an Automerge URL
-- `pushwork sync [path]` - Full bidirectional sync
+- `pushwork sync [path]` - Full bidirectional sync (default: force mode — uses default config, resets snapshot, re-syncs every file)
   - `--dry-run` - Preview only
-  - `--force` - Use default config, reset snapshot, re-sync every file
-  - `--force --nuclear` - Also recreate all Automerge documents from scratch (except root)
+  - `--gentle` - Use merged config and only sync changed files (old default behavior)
+  - `--nuclear` - Recreate all Automerge documents from scratch (except root)
+  - `--force` - Silently accepted for backwards compatibility (does nothing, force is now the default)
 - `pushwork root <url> [path]` - Set root directory URL without full init (creates minimal `.pushwork/snapshot.json`)
 - `pushwork commit [path]` - Save to Automerge docs without network sync
 - `pushwork status [path]` - Show sync status

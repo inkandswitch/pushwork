@@ -219,11 +219,11 @@ describe("Pushwork Fuzzer", () => {
         await fs.writeFile(path.join(repoA, "test.txt"), "modified content");
 
         // Sync A
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
 
         // Sync B to pull changes
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
         // Verify they match
@@ -280,15 +280,15 @@ describe("Pushwork Fuzzer", () => {
         );
 
         // Sync both sides
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
         // One more round for convergence
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
         // Verify: original.txt should not exist, renamed.txt should exist with edited content
@@ -356,11 +356,11 @@ describe("Pushwork Fuzzer", () => {
         await fs.writeFile(path.join(repoB, "aaa.txt"), "");
 
         // B syncs
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
         // A syncs
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
 
         // Check convergence
@@ -418,16 +418,16 @@ describe("Pushwork Fuzzer", () => {
 
         // Sync multiple rounds (use 1s waits for reliable network propagation)
         // Pattern: A, B, A (like manual test that worked)
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
 
         // Check what B sees before sync
         await pushwork(["diff", "--name-only"], repoB);
 
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
 
         // Debug: Check what files exist
@@ -494,9 +494,9 @@ describe("Pushwork Fuzzer", () => {
         await fs.writeFile(path.join(repoA, "dir2", "file2.txt"), "in dir2");
 
         // Sync both sides
-        await pushwork(["sync"], repoA);
+        await pushwork(["sync", "--gentle"], repoA);
         await wait(1000);
-        await pushwork(["sync"], repoB);
+        await pushwork(["sync", "--gentle"], repoB);
         await wait(1000);
 
         // Verify B got the new subdirectory and file
@@ -738,27 +738,27 @@ describe("Pushwork Fuzzer", () => {
               // Multiple sync rounds for convergence
               // Need enough time for network propagation between CLI invocations
               // Round 1: A pushes changes
-              await pushwork(["sync"], repoA);
+              await pushwork(["sync", "--gentle"], repoA);
               await wait(1000);
 
               // Round 2: B pushes changes and pulls A's changes
-              await pushwork(["sync"], repoB);
+              await pushwork(["sync", "--gentle"], repoB);
               await wait(1000);
 
               // Round 3: A pulls B's changes
-              await pushwork(["sync"], repoA);
+              await pushwork(["sync", "--gentle"], repoA);
               await wait(1000);
 
               // Round 4: B confirms convergence
-              await pushwork(["sync"], repoB);
+              await pushwork(["sync", "--gentle"], repoB);
               await wait(1000);
 
               // Round 5: Final convergence check
-              await pushwork(["sync"], repoA);
+              await pushwork(["sync", "--gentle"], repoA);
               await wait(1000);
 
               // Round 6: Extra convergence check (for aggressive fuzzing)
-              await pushwork(["sync"], repoB);
+              await pushwork(["sync", "--gentle"], repoB);
               await wait(5000);
 
               // Verify final state matches

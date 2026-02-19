@@ -50,6 +50,7 @@ export interface CloneOptions extends CommandOptions {
 export interface SyncOptions extends CommandOptions {
   force?: boolean;
   nuclear?: boolean;
+  gentle?: boolean;
   dryRun?: boolean;
 }
 

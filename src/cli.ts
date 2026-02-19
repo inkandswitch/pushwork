@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { StorageId } from "@automerge/automerge-repo";
-import { Command } from "@commander-js/extra-typings";
+import { Command, Option } from "@commander-js/extra-typings";
 import chalk from "chalk";
 import {
   init,
@@ -119,20 +119,22 @@ program
     false
   )
   .option(
-    "-f, --force",
-    "Ignore config files and sync with default settings",
+    "--gentle",
+    "Use config files and only sync changed files (instead of default full resync)",
     false
   )
   .option(
     "--nuclear",
-    "With --force: recreate all Automerge documents from scratch",
+    "Recreate all Automerge documents from scratch",
     false
   )
+  .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
       dryRun: opts.dryRun,
       force: opts.force,
+      gentle: opts.gentle,
       nuclear: opts.nuclear,
       verbose: opts.verbose,
     });
