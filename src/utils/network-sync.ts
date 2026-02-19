@@ -213,8 +213,78 @@ export interface SyncWaitResult {
   failed: DocHandle<unknown>[];
 }
 
+/** Maximum documents to sync concurrently to avoid flooding the server */
+const SYNC_BATCH_SIZE = 10;
+
+/**
+ * Wait for a single document handle to sync to the server.
+ * Resolves with the handle on success, rejects with the handle on timeout.
+ */
+function waitForHandleSync(
+  handle: DocHandle<unknown>,
+  syncServerStorageId: StorageId,
+  timeoutMs: number,
+  startTime: number,
+): Promise<DocHandle<unknown>> {
+  return new Promise<DocHandle<unknown>>((resolve, reject) => {
+    let pollInterval: NodeJS.Timeout;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearInterval(pollInterval);
+      handle.off("remote-heads", onRemoteHeads);
+    };
+
+    const onConverged = () => {
+      debug(`waitForSync: ${handle.url.slice(0, 20)}... converged in ${Date.now() - startTime}ms`);
+      cleanup();
+      resolve(handle);
+    };
+
+    const timeout = setTimeout(() => {
+      debug(`waitForSync: ${handle.url.slice(0, 20)}... timed out after ${timeoutMs}ms`);
+      cleanup();
+      reject(handle);
+    }, timeoutMs);
+
+    const isConverged = () => {
+      const localHeads = handle.heads();
+      const info = handle.getSyncInfo(syncServerStorageId);
+      return A.equals(localHeads, info?.lastHeads);
+    };
+
+    const onRemoteHeads = ({
+      storageId,
+    }: {
+      storageId: StorageId;
+      heads: any;
+    }) => {
+      if (storageId === syncServerStorageId && isConverged()) {
+        onConverged();
+      }
+    };
+
+    // Initial check
+    if (isConverged()) {
+      cleanup();
+      resolve(handle);
+      return;
+    }
+
+    // Start polling and event listening
+    pollInterval = setInterval(() => {
+      if (isConverged()) {
+        onConverged();
+      }
+    }, 100);
+
+    handle.on("remote-heads", onRemoteHeads);
+  });
+}
+
 /**
  * Wait for documents to sync to the remote server.
+ * Processes handles in batches to avoid flooding the server.
  * Returns a result with any failed handles instead of throwing,
  * so callers can attempt recovery (e.g. recreating documents).
  */
@@ -235,106 +305,64 @@ export async function waitForSync(
     return { failed: [] };
   }
 
-  debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms)`);
+  debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms, batchSize=${SYNC_BATCH_SIZE})`);
 
+  // Separate already-synced from needs-sync
+  const needsSync: DocHandle<unknown>[] = [];
   let alreadySynced = 0;
 
-  const promises = handlesToWaitOn.map((handle) => {
-    // Check if already synced
+  for (const handle of handlesToWaitOn) {
     const heads = handle.heads();
     const syncInfo = handle.getSyncInfo(syncServerStorageId);
     const remoteHeads = syncInfo?.lastHeads;
-    const wasAlreadySynced = A.equals(heads, remoteHeads);
-
-    if (wasAlreadySynced) {
+    if (A.equals(heads, remoteHeads)) {
       alreadySynced++;
       debug(`waitForSync: ${handle.url.slice(0, 20)}... already synced`);
-      return Promise.resolve(handle);
+    } else {
+      debug(`waitForSync: ${handle.url.slice(0, 20)}... needs sync (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
+      needsSync.push(handle);
     }
-
-    debug(`waitForSync: ${handle.url.slice(0, 20)}... waiting for convergence (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
-
-    // Wait for convergence
-    return new Promise<DocHandle<unknown>>((resolve, reject) => {
-      let pollInterval: NodeJS.Timeout;
-
-      const cleanup = () => {
-        clearTimeout(timeout);
-        clearInterval(pollInterval);
-        handle.off("remote-heads", onRemoteHeads);
-      };
-
-      const onConverged = () => {
-        debug(`waitForSync: ${handle.url.slice(0, 20)}... converged in ${Date.now() - startTime}ms`);
-        cleanup();
-        resolve(handle);
-      };
-
-      const timeout = setTimeout(() => {
-        debug(`waitForSync: ${handle.url.slice(0, 20)}... timed out after ${timeoutMs}ms`);
-        cleanup();
-        reject(handle);
-      }, timeoutMs);
-
-      const isConverged = () => {
-        const localHeads = handle.heads();
-        const info = handle.getSyncInfo(syncServerStorageId);
-        return A.equals(localHeads, info?.lastHeads);
-      };
-
-      const onRemoteHeads = ({
-        storageId,
-      }: {
-        storageId: StorageId;
-        heads: any;
-      }) => {
-        if (storageId === syncServerStorageId && isConverged()) {
-          onConverged();
-        }
-      };
-
-      const poll = () => {
-        if (isConverged()) {
-          onConverged();
-          return true;
-        }
-        return false;
-      };
-
-      // Initial check
-      if (poll()) {
-        return;
-      }
-
-      // Start polling and event listening
-      pollInterval = setInterval(() => {
-        poll();
-      }, 100);
-
-      handle.on("remote-heads", onRemoteHeads);
-    });
-  });
-
-  const needSync = handlesToWaitOn.length - alreadySynced;
-  if (needSync > 0) {
-    debug(`waitForSync: ${alreadySynced} already synced, waiting for ${needSync} remaining`);
-    out.taskLine(`Uploading: ${alreadySynced}/${handlesToWaitOn.length} already synced, waiting for ${needSync} more`);
-  } else {
-    debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
   }
 
-  const results = await Promise.allSettled(promises);
+  if (needsSync.length > 0) {
+    debug(`waitForSync: ${alreadySynced} already synced, ${needsSync.length} need sync`);
+    out.taskLine(`Uploading: ${alreadySynced}/${handlesToWaitOn.length} already synced, waiting for ${needsSync.length} more`);
+  } else {
+    debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
+    return { failed: [] };
+  }
+
+  // Process in batches to avoid flooding the server
   const failed: DocHandle<unknown>[] = [];
-  for (const result of results) {
-    if (result.status === "rejected") {
-      failed.push(result.reason as DocHandle<unknown>);
+  let synced = alreadySynced;
+
+  for (let i = 0; i < needsSync.length; i += SYNC_BATCH_SIZE) {
+    const batch = needsSync.slice(i, i + SYNC_BATCH_SIZE);
+    const batchNum = Math.floor(i / SYNC_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(needsSync.length / SYNC_BATCH_SIZE);
+
+    if (totalBatches > 1) {
+      debug(`waitForSync: batch ${batchNum}/${totalBatches} (${batch.length} docs)`);
+      out.update(`Uploading batch ${batchNum}/${totalBatches} (${synced}/${handlesToWaitOn.length} done)`);
+    }
+
+    const results = await Promise.allSettled(
+      batch.map(handle => waitForHandleSync(handle, syncServerStorageId, timeoutMs, startTime))
+    );
+
+    for (const result of results) {
+      if (result.status === "rejected") {
+        failed.push(result.reason as DocHandle<unknown>);
+      } else {
+        synced++;
+      }
     }
   }
 
   const elapsed = Date.now() - startTime;
   if (failed.length > 0) {
     debug(`waitForSync: ${failed.length} documents failed after ${elapsed}ms`);
-    out.taskLine(`Upload: ${handlesToWaitOn.length - failed.length} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`, true);
+    out.taskLine(`Upload: ${synced} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`, true);
   } else {
     debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms (${alreadySynced} were already synced)`);
     out.taskLine(`All ${handlesToWaitOn.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`);

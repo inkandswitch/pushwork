@@ -22,7 +22,6 @@ export async function createRepo(
       config.sync_server
     );
     repoConfig.network = [networkAdapter];
-    repoConfig.enableRemoteHeadsGossiping = true;
   }
 
   const repo = new Repo(repoConfig);
