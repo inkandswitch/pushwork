@@ -87,7 +87,6 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
   - `--force` - Use default config, reset snapshot, re-sync every file
   - `--force --nuclear` - Also recreate all Automerge documents from scratch (except root)
 - `pushwork root <url> [path]` - Set root directory URL without full init (creates minimal `.pushwork/snapshot.json`)
-- `pushwork push [path]` - Push local changes to server without pulling remote changes
 - `pushwork commit [path]` - Save to Automerge docs without network sync
 - `pushwork status [path]` - Show sync status
 - `pushwork diff [path]` - Show changes
@@ -117,7 +116,6 @@ Key fields:
   - Tree traversal (`collectHeadsRecursive`) fetches siblings concurrently via `Promise.all`
 - Documents sync level-by-level, deepest first, so children are on the server before their parents
 - `handlesByPath` map tracks which documents changed and need syncing
-- `pushToRemote()` does detect + push + `waitForSync` only (no bidirectional wait, no pull) - used by `push` command
 
 ## Leaf-first ordering
 
