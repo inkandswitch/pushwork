@@ -496,7 +496,14 @@ export class SyncEngine {
 									this.config.sync_server_storage_id
 								)
 								if (retry.failed.length > 0) {
-									result.warnings.push(`${retry.failed.length} documents still failed after recreation`)
+									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
+									debug(`sync: ${msg}`)
+									result.errors.push({
+										path: "sync",
+										operation: "upload",
+										error: new Error(msg),
+										recoverable: true,
+									})
 								}
 							}
 						}
@@ -523,7 +530,12 @@ export class SyncEngine {
 				} catch (error) {
 					debug(`sync: network sync error: ${error}`)
 					out.taskLine(`Network sync failed: ${error}`, true)
-					result.warnings.push(`Network sync failed: ${error}`)
+					result.errors.push({
+						path: "sync",
+						operation: "network-sync",
+						error: error instanceof Error ? error : new Error(String(error)),
+						recoverable: true,
+					})
 				}
 			}
 
