@@ -382,6 +382,36 @@ export class SyncEngine {
 
 			// Wait for initial sync to receive any pending remote changes
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+				debug("sync: waiting for root document to be ready")
+				out.update("Waiting for root document from server")
+
+				// Wait for the root document to be fetched from the network.
+				// repo.find() rejects with "unavailable" if the server doesn't
+				// have the document yet, so we retry with backoff.
+				// This is critical for clone scenarios.
+				const plainRootUrl = getPlainUrl(snapshot.rootDirectoryUrl)
+				const maxAttempts = 6
+				for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+					try {
+						const rootHandle = await this.repo.find<DirectoryDocument>(plainRootUrl)
+						rootHandle.doc() // throws if not ready
+						debug(`sync: root document ready (attempt ${attempt})`)
+						break
+					} catch (error) {
+						const isUnavailable = String(error).includes("unavailable") || String(error).includes("not ready")
+						if (isUnavailable && attempt < maxAttempts) {
+							const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000)
+							debug(`sync: root document not available (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms`)
+							out.update(`Waiting for root document (attempt ${attempt}/${maxAttempts})`)
+							await new Promise(r => setTimeout(r, delay))
+						} else {
+							debug(`sync: root document unavailable after ${maxAttempts} attempts: ${error}`)
+							out.taskLine(`Root document unavailable: ${error}`, true)
+							break
+						}
+					}
+				}
+
 				debug("sync: waiting for initial bidirectional sync")
 				out.update("Waiting for initial sync from server")
 				try {
@@ -390,7 +420,7 @@ export class SyncEngine {
 						snapshot.rootDirectoryUrl,
 						this.config.sync_server_storage_id,
 						{
-							timeoutMs: 3000, // Short timeout for initial sync
+							timeoutMs: 5000, // Increased timeout for initial sync
 							pollIntervalMs: 100,
 							stableChecksRequired: 3,
 						}

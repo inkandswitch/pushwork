@@ -26,26 +26,59 @@ describe("Pushwork Fuzzer", () => {
   });
 
   /**
-   * Helper: Execute pushwork CLI command
+   * Helper: Wait for a short time (useful for allowing sync to complete)
+   */
+  async function wait(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Helper: Execute pushwork CLI command with retry logic for transient errors
    */
   async function pushwork(
     args: string[],
-    cwd: string
+    cwd: string,
+    maxRetries: number = 3
   ): Promise<{ stdout: string; stderr: string }> {
-    try {
-      const result = await execFilePromise("node", [PUSHWORK_CLI, ...args], {
-        cwd,
-        env: { ...process.env, FORCE_COLOR: "0" }, // Disable color codes for cleaner output
-      });
-      return result;
-    } catch (error: any) {
-      // execFile throws on non-zero exit code, but we still want stdout/stderr
-      throw new Error(
-        `pushwork ${args.join(" ")} failed: ${error.message}\nstdout: ${
-          error.stdout
-        }\nstderr: ${error.stderr}`
-      );
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await execFilePromise("node", [PUSHWORK_CLI, ...args], {
+          cwd,
+          env: { ...process.env, FORCE_COLOR: "0" }, // Disable color codes for cleaner output
+        });
+        return result;
+      } catch (error: any) {
+        lastError = error;
+        const errorMessage = error.message + (error.stderr || "");
+
+        // Retry on transient server errors (502, 503, connection refused, unavailable)
+        const isTransient =
+          errorMessage.includes("502") ||
+          errorMessage.includes("503") ||
+          errorMessage.includes("ECONNREFUSED") ||
+          errorMessage.includes("ETIMEDOUT") ||
+          errorMessage.includes("unavailable");
+
+        if (isTransient && attempt < maxRetries) {
+          // Exponential backoff: 1s, 2s, 4s
+          const delay = Math.pow(2, attempt - 1) * 1000;
+          await wait(delay);
+          continue;
+        }
+
+        // Non-transient error or exhausted retries
+        throw new Error(
+          `pushwork ${args.join(" ")} failed: ${error.message}\nstdout: ${
+            error.stdout
+          }\nstderr: ${error.stderr}`
+        );
+      }
     }
+
+    // Should never reach here, but TypeScript needs this
+    throw lastError;
   }
 
   /**
@@ -102,13 +135,6 @@ describe("Pushwork Fuzzer", () => {
     }
 
     return files;
-  }
-
-  /**
-   * Helper: Wait for a short time (useful for allowing sync to complete)
-   */
-  async function wait(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   describe("Basic Setup and Clone", () => {
@@ -681,18 +707,28 @@ describe("Pushwork Fuzzer", () => {
               // Initialize repo A with an initial file
               await fs.writeFile(path.join(repoA, "initial.txt"), "initial");
               await pushwork(["init", "."], repoA);
-              await wait(500);
+              // Give sync server time to store and propagate the document
+              await wait(2000);
 
               // Get root URL and clone to B
               const { stdout: rootUrl } = await pushwork(["url"], repoA);
               const cleanRootUrl = rootUrl.trim();
-              await pushwork(["clone", cleanRootUrl, repoB], testRoot);
-              await wait(500);
+              // Clone with extra retries - document availability can be delayed
+              await pushwork(["clone", cleanRootUrl, repoB], testRoot, 5);
+              await wait(1000);
 
               // Verify initial state matches
+              const filesA = await getAllFiles(repoA);
+              const filesB = await getAllFiles(repoB);
               const hashBeforeOps = await hashDirectory(repoA);
               const hashB1 = await hashDirectory(repoB);
-              expect(hashBeforeOps).toBe(hashB1);
+              if (hashBeforeOps !== hashB1) {
+                throw new Error(
+                  `Initial hash mismatch!\n` +
+                  `  repoA (${repoA}):\n    files: ${JSON.stringify(filesA)}\n    hash: ${hashBeforeOps}\n` +
+                  `  repoB (${repoB}):\n    files: ${JSON.stringify(filesB)}\n    hash: ${hashB1}`
+                );
+              }
 
               // Apply operations to both sides
               await applyOperations(repoA, opsA);
@@ -762,7 +798,7 @@ describe("Pushwork Fuzzer", () => {
         ),
         {
           numRuns: 5, // INTENSE MODE (was 20, then cranked to 50)
-          timeout: 60000, // 1 minute timeout per run
+          timeout: 120000, // 2 minute timeout per run
           verbose: true, // Verbose output
           endOnFailure: true, // Stop on first failure to debug
         }

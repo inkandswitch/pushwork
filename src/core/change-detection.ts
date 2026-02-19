@@ -1,4 +1,4 @@
-import {AutomergeUrl, Repo, UrlHeads} from "@automerge/automerge-repo"
+import {AutomergeUrl, DocHandle, Repo, UrlHeads} from "@automerge/automerge-repo"
 import * as A from "@automerge/automerge"
 import {
 	ChangeType,
@@ -357,16 +357,14 @@ export class ChangeDetector {
 		changes: DetectedChange[]
 	): Promise<void> {
 		try {
-			// Strip heads for current document state
+			// Find and wait for document to be available (retries on "unavailable")
 			const plainUrl = getPlainUrl(directoryUrl)
-			const dirHandle = await this.repo.find<DirectoryDocument>(plainUrl)
+			const result = await this.findDocument<DirectoryDocument>(plainUrl)
 
-			// Wait for document to be available (important during clone when fetching from network)
-			const dirDoc = await this.waitForDocument<DirectoryDocument>(dirHandle)
-
-			if (!dirDoc) {
+			if (!result) {
 				return
 			}
+			const dirDoc = result.doc
 
 			// Process each entry in the directory
 			for (const entry of dirDoc.docs) {
@@ -519,17 +517,12 @@ export class ChangeDetector {
 		url: AutomergeUrl
 	): Promise<string | Uint8Array | null> {
 		try {
-			// Strip heads for current document state
 			const plainUrl = getPlainUrl(url)
-			const handle = await this.repo.find<FileDocument>(plainUrl)
+			const result = await this.findDocument<FileDocument>(plainUrl)
 
-			// Wait for document to be available (important during clone)
-			const doc = await this.waitForDocument<FileDocument>(handle)
+			if (!result) return null
 
-			if (!doc) return null
-
-			const fileDoc = doc
-			const content = fileDoc.content
+			const content = result.doc.content
 			return readDocContent(content)
 		} catch (error) {
 			out.taskLine(`Failed to get remote content: ${error}`, true)
@@ -538,28 +531,30 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Wait for a document to be available, with retry logic.
-	 * This is important during clone when documents are being fetched from the network.
+	 * Find and wait for a document to be available, with retry logic.
+	 * repo.find() rejects with "unavailable" if the server doesn't have the
+	 * document yet, and doc() throws if the handle isn't ready. We retry
+	 * both with backoff since the document may just not have propagated yet.
 	 */
-	private async waitForDocument<T>(
-		handle: {doc: () => Promise<T | undefined>},
+	private async findDocument<T>(
+		url: AutomergeUrl,
 		options: {maxRetries?: number; retryDelayMs?: number} = {}
-	): Promise<T | undefined> {
-		const {maxRetries = 5, retryDelayMs = 100} = options
+	): Promise<{handle: DocHandle<T>; doc: T} | undefined> {
+		const {maxRetries = 5, retryDelayMs = 500} = options
 
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
-			const doc = await handle.doc()
-			if (doc !== undefined) {
-				return doc
-			}
-
-			// Wait before retrying
-			if (attempt < maxRetries - 1) {
-				await new Promise(r => setTimeout(r, retryDelayMs))
+			try {
+				const handle = await this.repo.find<T>(url)
+				const doc = handle.doc()
+				return {handle, doc}
+			} catch {
+				// Document may be unavailable — retry after a delay
+				if (attempt < maxRetries - 1) {
+					await new Promise(r => setTimeout(r, retryDelayMs * (attempt + 1)))
+				}
 			}
 		}
 
-		// Return undefined if document never became available
 		return undefined
 	}
 
@@ -568,12 +563,10 @@ export class ChangeDetector {
 	 */
 	private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
 		try {
-			// Strip heads for current document state
 			const plainUrl = getPlainUrl(url)
-			const handle = await this.repo.find<FileDocument>(plainUrl)
-			const doc = await handle.doc()
-			if (!doc) return [] as unknown as UrlHeads
-			return handle.heads()
+			const result = await this.findDocument<FileDocument>(plainUrl, {maxRetries: 3, retryDelayMs: 200})
+			if (!result) return [] as unknown as UrlHeads
+			return result.handle.heads()
 		} catch {
 			return [] as unknown as UrlHeads
 		}
