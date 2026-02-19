@@ -8,6 +8,7 @@ import {
   clone,
   sync,
   push,
+  root,
   diff,
   status,
   log,
@@ -44,6 +45,24 @@ program
       opts.syncServer
     );
     await init(path, { syncServer, syncServerStorageId });
+  });
+
+// Root command
+program
+  .command("root")
+  .summary("Set root directory URL without full initialization")
+  .argument(
+    "<url>",
+    "AutomergeUrl of root directory (format: automerge:XXXXX)"
+  )
+  .argument(
+    "[path]",
+    "Directory path (default: current directory)",
+    "."
+  )
+  .option("-f, --force", "Overwrite existing pushwork setup", false)
+  .action(async (url, path, opts) => {
+    await root(url, path, { force: opts.force });
   });
 
 // Clone command

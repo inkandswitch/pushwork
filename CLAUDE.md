@@ -86,6 +86,7 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
   - `--dry-run` - Preview only
   - `--force` - Use default config, reset snapshot, re-sync every file
   - `--force --nuclear` - Also recreate all Automerge documents from scratch (except root)
+- `pushwork root <url> [path]` - Set root directory URL without full init (creates minimal `.pushwork/snapshot.json`)
 - `pushwork push [path]` - Push local changes to server without pulling remote changes
 - `pushwork commit [path]` - Save to Automerge docs without network sync
 - `pushwork status [path]` - Show sync status

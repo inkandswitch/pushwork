@@ -1026,6 +1026,54 @@ async function runScript(
 }
 
 /**
+ * Set root directory URL for an existing or new pushwork directory
+ */
+export async function root(
+  rootUrl: string,
+  targetPath: string = ".",
+  options: { force?: boolean } = {}
+): Promise<void> {
+  if (!rootUrl.startsWith("automerge:")) {
+    out.error(
+      `Invalid Automerge URL: ${rootUrl}\n` +
+      `Expected format: automerge:XXXXX`
+    );
+    out.exit(1);
+  }
+
+  const resolvedPath = path.resolve(targetPath);
+  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+
+  if (await pathExists(syncToolDir)) {
+    if (!options.force) {
+      out.error("Directory already initialized for pushwork. Use --force to overwrite");
+      out.exit(1);
+    }
+  }
+
+  await ensureDirectoryExists(syncToolDir);
+  await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
+
+  // Create minimal snapshot with just the root URL
+  const snapshotPath = path.join(syncToolDir, "snapshot.json");
+  const snapshot = {
+    timestamp: Date.now(),
+    rootPath: resolvedPath,
+    rootDirectoryUrl: rootUrl,
+    files: [],
+    directories: [],
+  };
+  await fs.writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf-8");
+
+  // Ensure config exists
+  const configManager = new ConfigManager(resolvedPath);
+  await configManager.initializeWithOverrides({});
+
+  out.successBlock("ROOT SET", rootUrl);
+  process.exit();
+}
+
+/**
  * Push local changes to server without pulling remote changes
  */
 export async function push(
