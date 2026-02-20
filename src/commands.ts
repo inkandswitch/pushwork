@@ -238,8 +238,6 @@ export async function sync(
 
   if (options.nuclear) {
     await syncEngine.nuclearReset();
-  } else if (!options.gentle) {
-    await syncEngine.resetSnapshot();
   }
 
   if (options.dryRun) {
