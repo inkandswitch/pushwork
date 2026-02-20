@@ -228,8 +228,8 @@ export async function sync(
     options.nuclear
       ? "Nuclear syncing"
       : options.gentle
-      ? "Syncing"
-      : "Force syncing"
+      ? "Gentle syncing"
+      : "Syncing"
   );
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
