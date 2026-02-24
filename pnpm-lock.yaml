@@ -6,20 +6,20 @@ settings:
 
 dependencies:
   '@automerge/automerge':
-    specifier: ^3.2.0
-    version: 3.2.0
+    specifier: ^3.2.4
+    version: 3.2.4
   '@automerge/automerge-repo':
-    specifier: ^2.5.0
-    version: 2.5.0
+    specifier: ^2.5.3
+    version: 2.5.3
   '@automerge/automerge-repo-network-websocket':
-    specifier: ^2.5.0
-    version: 2.5.0
+    specifier: ^2.5.3
+    version: 2.5.3
   '@automerge/automerge-repo-storage-indexeddb':
-    specifier: ^2.5.0
-    version: 2.5.0
+    specifier: ^2.5.3
+    version: 2.5.3
   '@automerge/automerge-repo-storage-nodefs':
-    specifier: ^2.5.0
-    version: 2.5.0
+    specifier: ^2.5.3
+    version: 2.5.3
   '@commander-js/extra-typings':
     specifier: ^14.0.0
     version: 14.0.0(commander@14.0.2)
@@ -91,10 +91,10 @@ devDependencies:
 
 packages:
 
-  /@automerge/automerge-repo-network-websocket@2.5.0:
-    resolution: {integrity: sha512-zrwbkW8hk3fWkXdeaH+YDfGG63WaB9WLfWYyinZx2AQv4mr6D6UhIhviIjweMmRxMLen6NlIcdu3toHV33ZuKg==}
+  /@automerge/automerge-repo-network-websocket@2.5.3:
+    resolution: {integrity: sha512-p6K1YLo34cyGxJ6oMWqeBbWX9rGvEPGyPdX2eq8S/iWNDjYf8lbjKSOhOD8DX87uAMZN/y1XOY/RckwS8lPJbQ==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0
+      '@automerge/automerge-repo': 2.5.3
       cbor-x: 1.6.0
       debug: 4.4.1
       eventemitter3: 5.0.1
@@ -106,27 +106,27 @@ packages:
       - utf-8-validate
     dev: false
 
-  /@automerge/automerge-repo-storage-indexeddb@2.5.0:
-    resolution: {integrity: sha512-7MJYJ5S6K7dHlbvs5/u/v9iexqOeprU/qQonup28r2IoVqwzjuN5ezaoVk6JRBMDI/ZxWfU4rNrqVrVlB49yXA==}
+  /@automerge/automerge-repo-storage-indexeddb@2.5.3:
+    resolution: {integrity: sha512-i4tSzY7sC8ZqurHm4Sd9H1lFL2Don9v9yaSoq0FXi4T+4Wg8eus/mtMlUCmS5XwYQL8GX+epbplrlBaBe+fYiw==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0
+      '@automerge/automerge-repo': 2.5.3
     transitivePeerDependencies:
       - supports-color
     dev: false
 
-  /@automerge/automerge-repo-storage-nodefs@2.5.0:
-    resolution: {integrity: sha512-tvqSh7WjatZsR3LZafzmkanbaJ/oANM+nRPoMgNtRcNXVdlNEuLmXz+FU+kGAaymyZaCWz1X6llGuXN3vCwC6w==}
+  /@automerge/automerge-repo-storage-nodefs@2.5.3:
+    resolution: {integrity: sha512-5+dlpoopjw88FXvD/5cpXqsVbmvDhWIWxcm8m7k5nvZ3R32e7HZwrvvh9orRSAPkLgVyZRU3+OZ0y5v2ByGNxg==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.0
+      '@automerge/automerge-repo': 2.5.3
       rimraf: 5.0.10
     transitivePeerDependencies:
       - supports-color
     dev: false
 
-  /@automerge/automerge-repo@2.5.0:
-    resolution: {integrity: sha512-bdxuMuKmxw0ZjwQXecrIX1VrHXf445bYCftNJJ5vqgGWVvINB5ZKFYAbtgPIyu1Y0TXQKvc6eqESaDeL+g8MmA==}
+  /@automerge/automerge-repo@2.5.3:
+    resolution: {integrity: sha512-5ppzsUlzCs6PY+GeFlquaYLnVnYPz/hWzedep37zjb15tqZju1ukPPkBzT7KGEhEAnA99l4vfhfqSVC+1GktJg==}
     dependencies:
-      '@automerge/automerge': 3.2.0
+      '@automerge/automerge': 3.2.4
       bs58check: 3.0.1
       cbor-x: 1.6.0
       debug: 4.4.1
@@ -138,8 +138,8 @@ packages:
       - supports-color
     dev: false
 
-  /@automerge/automerge@3.2.0:
-    resolution: {integrity: sha512-ANav4cdVYn7TrpeN28fAu9vpWxu8GWwpMJM2JjtfxFULTQnbFCK4y0Wmdk3zaiNgvYSGK0pkbYfCOrxVpXic8w==}
+  /@automerge/automerge@3.2.4:
+    resolution: {integrity: sha512-/IAShHSxme5d4ZK0Vs4A0P+tGaR/bSz6KtIJSCIPfwilCxsIqfRHAoNjmsXip6TGouadmbuw3WfLop6cal8pPQ==}
     dev: false
 
   /@babel/code-frame@7.27.1:
