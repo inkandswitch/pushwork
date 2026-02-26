@@ -1,4 +1,4 @@
-import { Repo, StorageId } from "@automerge/automerge-repo";
+import { Repo } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import * as path from "path";
@@ -24,16 +24,5 @@ export async function createRepo(
     repoConfig.network = [networkAdapter];
   }
 
-  const repo = new Repo(repoConfig);
-
-  // Subscribe to the sync server storage for network sync
-  if (
-    config.sync_enabled &&
-    config.sync_server &&
-    config.sync_server_storage_id
-  ) {
-    repo.subscribeToRemotes([config.sync_server_storage_id as StorageId]);
-  }
-
-  return repo;
+  return new Repo(repoConfig);
 }
