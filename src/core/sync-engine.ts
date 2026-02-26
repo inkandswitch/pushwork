@@ -527,6 +527,26 @@ export class SyncEngine {
 							handles: changedHandles.length > 0 ? changedHandles : undefined,
 						}
 					)
+
+					// Touch root directory AFTER all docs are synced and stable.
+					// This signals consumers (e.g. Patchwork) that new content is
+					// available. Because file docs are already on the server,
+					// consumers can immediately fetch them when they see the root change.
+					const hasPhase1Changes =
+						phase1Result.filesChanged > 0 || phase1Result.directoriesChanged > 0
+					if (hasPhase1Changes && snapshot.rootDirectoryUrl) {
+						await this.touchRootDirectory(snapshot)
+						const rootHandle =
+							await this.repo.find<DirectoryDocument>(
+								snapshot.rootDirectoryUrl
+							)
+						debug("sync: syncing root directory touch to server")
+						out.update("Syncing root directory update")
+						await waitForSync(
+							[rootHandle],
+							this.config.sync_server_storage_id
+						)
+					}
 				} catch (error) {
 					debug(`sync: network sync error: ${error}`)
 					out.taskLine(`Network sync failed: ${error}`, true)
@@ -594,13 +614,6 @@ export class SyncEngine {
 				} catch (error) {
 					// Handle might not exist if directory was deleted
 				}
-			}
-
-			// Touch root directory if any changes were made during sync
-			const hasChanges =
-				result.filesChanged > 0 || result.directoriesChanged > 0
-			if (hasChanges) {
-				await this.touchRootDirectory(snapshot)
 			}
 
 			// Save updated snapshot if not dry run
