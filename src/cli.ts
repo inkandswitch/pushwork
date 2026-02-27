@@ -46,9 +46,13 @@ program
     await init(path, { syncServer, syncServerStorageId });
   });
 
-// Root command
+// Track command (set root directory URL without full initialization)
+const trackAction = async (url: string, path: string, opts: { force: boolean }) => {
+  await root(url, path, { force: opts.force });
+};
+
 program
-  .command("root")
+  .command("track")
   .summary("Set root directory URL without full initialization")
   .argument(
     "<url>",
@@ -61,7 +65,17 @@ program
   )
   .option("-f, --force", "Overwrite existing pushwork setup", false)
   .action(async (url, path, opts) => {
-    await root(url, path, { force: opts.force });
+    await trackAction(url, path, opts);
+  });
+
+// Hidden alias for backwards compatibility
+program
+  .command("root", { hidden: true })
+  .argument("<url>")
+  .argument("[path]", "", ".")
+  .option("-f, --force", "", false)
+  .action(async (url: string, path: string, opts: { force: boolean }) => {
+    await trackAction(url, path, opts);
   });
 
 // Clone command

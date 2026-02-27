@@ -87,7 +87,7 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
   - `--gentle` - Use merged config instead of defaults
   - `--nuclear` - Recreate all Automerge documents from scratch (except root)
   - `--force` - Silently accepted for backwards compatibility (does nothing, force is now the default)
-- `pushwork root <url> [path]` - Set root directory URL without full init (creates minimal `.pushwork/snapshot.json`)
+- `pushwork track <url> [path]` - Set root directory URL without full init (creates minimal `.pushwork/snapshot.json`). `root` is a hidden alias.
 - `pushwork commit [path]` - Save to Automerge docs without network sync
 - `pushwork status [path]` - Show sync status
 - `pushwork diff [path]` - Show changes
