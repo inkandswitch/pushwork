@@ -583,9 +583,17 @@ export class SyncEngine {
 			result.warnings.push(...phase2Result.warnings)
 
 			// Update snapshot heads after pulling remote changes
+			// IMPORTANT: Use getPlainUrl() to strip version/heads from URLs.
+			// Artifact entries store versioned URLs (with heads baked in).
+			// repo.find(versionedUrl) returns a view handle whose .heads()
+			// returns the VERSION heads, not the current document heads.
+			// Using the versioned URL here would overwrite correct heads with
+			// stale ones, causing changeAt() to fork from the wrong point
+			// on the next sync (e.g. an empty directory state where deletions
+			// can't find the entries to splice out).
 			for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
 				try {
-					const handle = await this.repo.find(snapshotEntry.url)
+					const handle = await this.repo.find(getPlainUrl(snapshotEntry.url))
 					const currentHeads = handle.heads()
 					if (!A.equals(currentHeads, snapshotEntry.head)) {
 						// Update snapshot with current heads after pulling changes
@@ -602,7 +610,7 @@ export class SyncEngine {
 			// Update directory document heads
 			for (const [dirPath, snapshotEntry] of snapshot.directories.entries()) {
 				try {
-					const handle = await this.repo.find(snapshotEntry.url)
+					const handle = await this.repo.find(getPlainUrl(snapshotEntry.url))
 					const currentHeads = handle.heads()
 					if (!A.equals(currentHeads, snapshotEntry.head)) {
 						// Update snapshot with current heads after pulling changes

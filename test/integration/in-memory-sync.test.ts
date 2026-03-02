@@ -391,6 +391,200 @@ describe("Sync Reliability Tests", () => {
     }, 30000);
   });
 
+  describe("Subdirectory File Deletion - Resurrection Bug", () => {
+    it("deleted file in artifact directory should not resurrect", async () => {
+      // Files in artifact directories (dist/ by default) resurrect after sync.
+      // Phase 1 (push) correctly removes the file entry from the directory doc,
+      // but the Automerge merge with the server's version re-introduces it.
+      // Phase 2 (pull) then sees it as a "new remote document" and re-creates it.
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "dist", "assets"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app.js"), "// build 1");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Delete the file
+      await fs.unlink(path.join(repoA, "dist", "assets", "app.js"));
+
+      // Sync - push deletion then pull
+      await pushwork(["sync"], repoA);
+
+      // File should stay deleted
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app.js"))).toBe(false);
+
+      // Sync again - should NOT come back from server
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app.js"))).toBe(false);
+    }, 60000);
+
+    it("deleted file in depth-1 subdirectory should not resurrect (control)", async () => {
+      // Control: depth-1 subdirectories work correctly
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "subdir"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "subdir", "file.txt"), "content");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      await fs.unlink(path.join(repoA, "subdir", "file.txt"));
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "subdir", "file.txt"))).toBe(false);
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "subdir", "file.txt"))).toBe(false);
+    }, 60000);
+
+    it("deleted build artifacts should not resurrect after rebuild cycle", async () => {
+      // Real-world scenario: build step creates new hashed files and deletes
+      // old ones in dist/assets/. The deleted files come back from the server.
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "dist", "assets"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-ABC123.js"), "// build 1");
+      await fs.writeFile(path.join(repoA, "dist", "assets", "vendor-DEF456.js"), "// vendor 1");
+      await fs.writeFile(path.join(repoA, "dist", "index.js"), "// index 1");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Simulate rebuild: new hashed files replace old ones
+      await fs.unlink(path.join(repoA, "dist", "assets", "app-ABC123.js"));
+      await fs.unlink(path.join(repoA, "dist", "assets", "vendor-DEF456.js"));
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-XYZ789.js"), "// build 2");
+      await fs.writeFile(path.join(repoA, "dist", "assets", "vendor-UVW012.js"), "// vendor 2");
+      await fs.writeFile(path.join(repoA, "dist", "index.js"), "// index 2");
+
+      await pushwork(["sync"], repoA);
+
+      // Old files should be gone, new files should exist
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app-ABC123.js"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "vendor-DEF456.js"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app-XYZ789.js"))).toBe(true);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "vendor-UVW012.js"))).toBe(true);
+
+      // Sync again - old files should NOT come back from server
+      await pushwork(["sync"], repoA);
+
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app-ABC123.js"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "vendor-DEF456.js"))).toBe(false);
+    }, 60000);
+
+    it("deleted artifact files should not resurrect on clone", async () => {
+      // Two repos: A deletes files in an artifact directory, B should not
+      // see the deleted files after syncing.
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.mkdir(path.join(repoA, "dist", "assets"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-ABC123.js"), "// build 1");
+      await fs.writeFile(path.join(repoA, "dist", "assets", "vendor-DEF456.js"), "// vendor 1");
+      await fs.writeFile(path.join(repoA, "dist", "index.js"), "// index 1");
+      await pushwork(["init", "."], repoA);
+
+      // Clone to B and converge
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await syncUntilConverged(repoA, repoB);
+
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-ABC123.js"))).toBe(true);
+
+      // A rebuilds
+      await fs.unlink(path.join(repoA, "dist", "assets", "app-ABC123.js"));
+      await fs.unlink(path.join(repoA, "dist", "assets", "vendor-DEF456.js"));
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-XYZ789.js"), "// build 2");
+      await fs.writeFile(path.join(repoA, "dist", "assets", "vendor-UVW012.js"), "// vendor 2");
+      await fs.writeFile(path.join(repoA, "dist", "index.js"), "// index 2");
+
+      // Sync A then B
+      await pushwork(["sync"], repoA);
+
+      // A should not have resurrected files
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app-ABC123.js"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "dist", "assets", "vendor-DEF456.js"))).toBe(false);
+
+      await pushwork(["sync"], repoB);
+
+      // B should have new files, NOT old files
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-ABC123.js"))).toBe(false);
+      expect(await pathExists(path.join(repoB, "dist", "assets", "vendor-DEF456.js"))).toBe(false);
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-XYZ789.js"))).toBe(true);
+    }, 90000);
+
+    it("deleted file in depth-3 subdirectory should not resurrect", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "a", "b", "c"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "a", "b", "c", "deep.txt"), "deep");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      await fs.unlink(path.join(repoA, "a", "b", "c", "deep.txt"));
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "a", "b", "c", "deep.txt"))).toBe(false);
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "a", "b", "c", "deep.txt"))).toBe(false);
+    }, 60000);
+
+    it("create+delete in same subdirectory should not resurrect deleted files", async () => {
+      // Regression guard: simultaneous create+delete in the same non-artifact
+      // subdirectory should work. This passes today but we don't want it to regress.
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "subdir"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "subdir", "old.txt"), "old content");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Simultaneously create new file and delete old file in same dir
+      await fs.unlink(path.join(repoA, "subdir", "old.txt"));
+      await fs.writeFile(path.join(repoA, "subdir", "new.txt"), "new content");
+
+      await pushwork(["sync"], repoA);
+
+      expect(await pathExists(path.join(repoA, "subdir", "old.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "subdir", "new.txt"))).toBe(true);
+
+      // Sync again - old file should NOT come back
+      await pushwork(["sync"], repoA);
+
+      expect(await pathExists(path.join(repoA, "subdir", "old.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "subdir", "new.txt"))).toBe(true);
+    }, 60000);
+
+    it("deleted file in depth-2 with sibling dirs should not resurrect", async () => {
+      // The depth-3 test has intermediate dirs (a/b/c) with only one child each.
+      // The dist/assets test has dist/ containing both assets/ (subdir) and
+      // index.js (file). Test if having a file sibling alongside the subdir matters.
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "parent", "child"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "parent", "sibling.txt"), "sibling at parent level");
+      await fs.writeFile(path.join(repoA, "parent", "child", "target.txt"), "will be deleted");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      await fs.unlink(path.join(repoA, "parent", "child", "target.txt"));
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "parent", "child", "target.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "parent", "sibling.txt"))).toBe(true);
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "parent", "child", "target.txt"))).toBe(false);
+    }, 60000);
+  });
+
   describe("Move/Rename Detection", () => {
     it("should handle file rename", async () => {
       const repoA = path.join(tmpDir, "repo-a");
