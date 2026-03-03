@@ -1,4 +1,9 @@
-import {AutomergeUrl, DocHandle, Repo, UrlHeads} from "@automerge/automerge-repo"
+import {
+	AutomergeUrl,
+	DocHandle,
+	Repo,
+	UrlHeads,
+} from "@automerge/automerge-repo"
 import * as A from "@automerge/automerge"
 import {
 	ChangeType,
@@ -107,11 +112,12 @@ export class ChangeDetector {
 						if (localChanged || remoteChanged) {
 							changes.push({
 								path: relativePath,
-								changeType: localChanged && remoteChanged
-									? ChangeType.BOTH_CHANGED
-									: localChanged
-										? ChangeType.LOCAL_ONLY
-										: ChangeType.REMOTE_ONLY,
+								changeType:
+									localChanged && remoteChanged
+										? ChangeType.BOTH_CHANGED
+										: localChanged
+											? ChangeType.LOCAL_ONLY
+											: ChangeType.REMOTE_ONLY,
 								fileType: fileInfo.type,
 								localContent: fileInfo.content,
 								remoteContent: null,
@@ -271,9 +277,10 @@ export class ChangeDetector {
 							const localContent = await this.getLocalContent(relativePath)
 							changes.push({
 								path: relativePath,
-								changeType: localContent !== null
-									? ChangeType.BOTH_CHANGED
-									: ChangeType.REMOTE_ONLY,
+								changeType:
+									localContent !== null
+										? ChangeType.BOTH_CHANGED
+										: ChangeType.REMOTE_ONLY,
 								fileType: FileType.TEXT,
 								localContent,
 								remoteContent: null,
@@ -412,7 +419,43 @@ export class ChangeDetector {
 								remoteHead,
 							})
 						}
-						// Only ignore if neither local nor remote content exists (ghost entry)
+					// Only ignore if neither local nor remote content exists (ghost entry)
+				} else if (
+					getPlainUrl(entry.url) !== getPlainUrl(existingEntry.url)
+				) {
+					// HACK: URL replacement detection bolted onto the "discover new docs" walk.
+					//
+					// A peer can replace a document entirely (creating a new URL) rather than mutating
+					// the existing one. This happens in several cases in updateRemoteFile(): artifact
+					// paths are always replaced; non-artifact docs with legacy immutable string content
+					// are also replaced; and recreateFailedDocuments() replaces docs that timed out
+					// during network sync. The two normal remote-change scans both miss this:
+					//   - detectRemoteChanges() is snapshot-centric: it checks the old (now orphaned)
+					//     doc's heads, which haven't changed, so it reports no change.
+					//   - The "new doc" branch above is directory-centric: it skips paths already in
+					//     the snapshot, assuming they're handled by detectRemoteChanges().
+					//
+					// A cleaner fix would be to have detectRemoteChanges() also verify that the
+					// directory still points to the same URL for each snapshot entry, treating a
+					// mismatch as a first-class URL-replacement change rather than a special case here.
+					const localContent = await this.getLocalContent(entryPath)
+						const remoteContent = await this.getCurrentRemoteContent(entry.url)
+						const remoteHead = await this.getCurrentRemoteHead(entry.url)
+
+						if (remoteContent !== null) {
+							changes.push({
+								path: entryPath,
+								changeType:
+									localContent !== null
+										? ChangeType.BOTH_CHANGED
+										: ChangeType.REMOTE_ONLY,
+								fileType: await this.getFileTypeFromContent(remoteContent),
+								localContent: localContent ?? null,
+								remoteContent,
+								remoteHead,
+								remoteUrl: entry.url,
+							})
+						}
 					}
 				} else if (entry.type === "folder") {
 					// Recursively process subdirectory
@@ -456,10 +499,7 @@ export class ChangeDetector {
 					const relativePath = getRelativePath(this.rootPath, entry.path)
 					const content = await readFileContent(entry.path)
 
-					fileMap.set(relativePath, {
-						content,
-						type: entry.type,
-					})
+					fileMap.set(relativePath, {content, type: entry.type})
 				})
 			)
 		} catch (error) {
@@ -564,7 +604,10 @@ export class ChangeDetector {
 	private async getCurrentRemoteHead(url: AutomergeUrl): Promise<UrlHeads> {
 		try {
 			const plainUrl = getPlainUrl(url)
-			const result = await this.findDocument<FileDocument>(plainUrl, {maxRetries: 3, retryDelayMs: 200})
+			const result = await this.findDocument<FileDocument>(plainUrl, {
+				maxRetries: 3,
+				retryDelayMs: 200,
+			})
 			if (!result) return [] as unknown as UrlHeads
 			return result.handle.heads()
 		} catch {
