@@ -241,13 +241,13 @@ export class ChangeDetector {
 		await Promise.all(
 			Array.from(snapshot.files.entries()).map(
 				async ([relativePath, snapshotEntry]) => {
-					// Check if file still exists in remote directory listing
-					const stillExistsInDirectory = await this.fileExistsInRemoteDirectory(
+					// Find the file's current entry in the remote directory hierarchy
+					const remoteEntry = await this.findInRemoteDirectory(
 						snapshot.rootDirectoryUrl,
 						relativePath
 					)
 
-					if (!stillExistsInDirectory) {
+					if (!remoteEntry) {
 						// File was removed from remote directory listing
 						const localContent = await this.getLocalContent(relativePath)
 
@@ -267,11 +267,16 @@ export class ChangeDetector {
 						return
 					}
 
-					const currentRemoteHead = await this.getCurrentRemoteHead(
-						snapshotEntry.url
-					)
+					// Check if the document was replaced entirely (new URL).
+					// This happens when a peer replaces an artifact file, fixes a
+					// legacy immutable string, or recreates a failed document.
+					// The old snapshot URL is now orphaned — read from the new one.
+					const urlReplaced = getPlainUrl(remoteEntry.url) !== getPlainUrl(snapshotEntry.url)
+					const remoteUrl = urlReplaced ? remoteEntry.url : snapshotEntry.url
 
-					if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
+					const currentRemoteHead = await this.getCurrentRemoteHead(remoteUrl)
+
+					if (urlReplaced || !A.equals(currentRemoteHead, snapshotEntry.head)) {
 						if (this.isArtifactPath(relativePath)) {
 							// Artifact: skip content reads, just report head change
 							const localContent = await this.getLocalContent(relativePath)
@@ -286,23 +291,24 @@ export class ChangeDetector {
 								remoteContent: null,
 								localHead: snapshotEntry.head,
 								remoteHead: currentRemoteHead,
+								...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
 							})
 							return
 						}
 
 						// Remote document has changed
-						const currentRemoteContent = await this.getCurrentRemoteContent(
-							snapshotEntry.url
-						)
+						const currentRemoteContent = await this.getCurrentRemoteContent(remoteUrl)
 						const localContent = await this.getLocalContent(relativePath)
-						const lastKnownContent = await this.getContentAtHead(
-							snapshotEntry.url,
-							snapshotEntry.head
-						)
+						const lastKnownContent = urlReplaced
+							? null // Can't diff against old doc when URL changed
+							: await this.getContentAtHead(
+								snapshotEntry.url,
+								snapshotEntry.head
+							)
 
-						const localChanged = localContent
+						const localChanged = localContent && lastKnownContent
 							? !isContentEqual(localContent, lastKnownContent)
-							: false
+							: localContent !== null
 
 						const changeType = localChanged
 							? ChangeType.BOTH_CHANGED
@@ -316,6 +322,7 @@ export class ChangeDetector {
 							remoteContent: currentRemoteContent,
 							localHead: snapshotEntry.head,
 							remoteHead: currentRemoteHead,
+							...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
 						})
 					}
 				}
@@ -673,18 +680,18 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Check if a file exists in the remote directory hierarchy
+	 * Find a file's entry in the remote directory hierarchy.
+	 * Returns the entry (with name, type, url) or null if not found.
 	 */
-	private async fileExistsInRemoteDirectory(
+	private async findInRemoteDirectory(
 		rootDirectoryUrl: AutomergeUrl | undefined,
 		filePath: string
-	): Promise<boolean> {
-		if (!rootDirectoryUrl) return false
-		const entry = await findFileInDirectoryHierarchy(
+	): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
+		if (!rootDirectoryUrl) return null
+		return findFileInDirectoryHierarchy(
 			this.repo,
 			rootDirectoryUrl,
 			filePath
 		)
-		return entry !== null
 	}
 }
