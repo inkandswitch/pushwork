@@ -88,7 +88,7 @@ export async function waitForBidirectionalSync(
         const changedDocs: string[] = [];
         for (const [url, heads] of currentHeads) {
           if (lastSeenHeads.get(url) !== heads) {
-            changedDocs.push(url.slice(0, 20) + "...");
+            changedDocs.push(url);
           }
         }
         const newDocs = currentHeads.size - lastSeenHeads.size;
@@ -236,13 +236,13 @@ function waitForHandleSync(
     };
 
     const onConverged = () => {
-      debug(`waitForSync: ${handle.url.slice(0, 20)}... converged in ${Date.now() - startTime}ms`);
+      debug(`waitForSync: ${handle.url}... converged in ${Date.now() - startTime}ms`);
       cleanup();
       resolve(handle);
     };
 
     const timeout = setTimeout(() => {
-      debug(`waitForSync: ${handle.url.slice(0, 20)}... timed out after ${timeoutMs}ms`);
+      debug(`waitForSync: ${handle.url}... timed out after ${timeoutMs}ms`);
       cleanup();
       reject(handle);
     }, timeoutMs);
@@ -317,9 +317,9 @@ export async function waitForSync(
     const remoteHeads = syncInfo?.lastHeads;
     if (A.equals(heads, remoteHeads)) {
       alreadySynced++;
-      debug(`waitForSync: ${handle.url.slice(0, 20)}... already synced`);
+      debug(`waitForSync: ${handle.url}... already synced`);
     } else {
-      debug(`waitForSync: ${handle.url.slice(0, 20)}... needs sync (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
+      debug(`waitForSync: ${handle.url}... needs sync (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
       needsSync.push(handle);
     }
   }

@@ -583,6 +583,207 @@ describe("Sync Reliability Tests", () => {
       await pushwork(["sync"], repoA);
       expect(await pathExists(path.join(repoA, "parent", "child", "target.txt"))).toBe(false);
     }, 60000);
+
+    it("deleted file in root directory should not resurrect", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.writeFile(path.join(repoA, "root-file.txt"), "root content");
+      await fs.writeFile(path.join(repoA, "keep.txt"), "keep this");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Delete file in root
+      await fs.unlink(path.join(repoA, "root-file.txt"));
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "root-file.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "keep.txt"))).toBe(true);
+
+      // Sync again - should NOT come back
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "root-file.txt"))).toBe(false);
+    }, 60000);
+
+    it("deleted file in non-artifact subdirectory (src/) should not resurrect", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "src"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "src", "index.ts"), "export default 1");
+      await fs.writeFile(path.join(repoA, "src", "helper.ts"), "export function help() {}");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Delete one file in src/
+      await fs.unlink(path.join(repoA, "src", "helper.ts"));
+
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "src", "helper.ts"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "src", "index.ts"))).toBe(true);
+
+      // Sync again - should NOT come back
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "src", "helper.ts"))).toBe(false);
+    }, 60000);
+
+    it("deleted files should not resurrect after multiple sync cycles", async () => {
+      // Simulate real-world usage: multiple syncs over time with deletions
+      const repoA = path.join(tmpDir, "repo-a");
+      await fs.mkdir(repoA);
+
+      await fs.mkdir(path.join(repoA, "src"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "readme.txt"), "readme");
+      await fs.writeFile(path.join(repoA, "src", "app.ts"), "app");
+      await fs.writeFile(path.join(repoA, "src", "old.ts"), "old");
+      await pushwork(["init", "."], repoA);
+      await pushwork(["sync"], repoA);
+
+      // Cycle 1: delete root file
+      await fs.unlink(path.join(repoA, "readme.txt"));
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "readme.txt"))).toBe(false);
+
+      // Cycle 2: delete src file
+      await fs.unlink(path.join(repoA, "src", "old.ts"));
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "src", "old.ts"))).toBe(false);
+
+      // Cycle 3: just sync - nothing should come back
+      await pushwork(["sync"], repoA);
+      expect(await pathExists(path.join(repoA, "readme.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "src", "old.ts"))).toBe(false);
+      expect(await pathExists(path.join(repoA, "src", "app.ts"))).toBe(true);
+    }, 90000);
+
+    it("peer B should not see files deleted by peer A (root)", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.writeFile(path.join(repoA, "keep.txt"), "keep");
+      await fs.writeFile(path.join(repoA, "delete-me.txt"), "gone");
+      await pushwork(["init", "."], repoA);
+
+      // Clone to B and converge
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await syncUntilConverged(repoA, repoB);
+
+      expect(await pathExists(path.join(repoB, "delete-me.txt"))).toBe(true);
+
+      // A deletes a root file
+      await fs.unlink(path.join(repoA, "delete-me.txt"));
+      await pushwork(["sync"], repoA);
+
+      // B syncs - should see the deletion
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "delete-me.txt"))).toBe(false);
+      expect(await pathExists(path.join(repoB, "keep.txt"))).toBe(true);
+
+      // B syncs again - should stay deleted
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "delete-me.txt"))).toBe(false);
+    }, 90000);
+
+    it("peer B should not see files deleted by peer A (src/)", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.mkdir(path.join(repoA, "src"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "src", "index.ts"), "export default 1");
+      await fs.writeFile(path.join(repoA, "src", "old.ts"), "old code");
+      await pushwork(["init", "."], repoA);
+
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await syncUntilConverged(repoA, repoB);
+
+      expect(await pathExists(path.join(repoB, "src", "old.ts"))).toBe(true);
+
+      // A deletes a file in src/
+      await fs.unlink(path.join(repoA, "src", "old.ts"));
+      await pushwork(["sync"], repoA);
+
+      // B syncs - should see the deletion
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "src", "old.ts"))).toBe(false);
+      expect(await pathExists(path.join(repoB, "src", "index.ts"))).toBe(true);
+
+      // B syncs again - should stay deleted
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "src", "old.ts"))).toBe(false);
+    }, 90000);
+
+    it("peer B should not see files deleted by peer A (dist/)", async () => {
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.mkdir(path.join(repoA, "dist", "assets"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "index.js"), "// index");
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-ABC.js"), "// build 1");
+      await pushwork(["init", "."], repoA);
+
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await syncUntilConverged(repoA, repoB);
+
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-ABC.js"))).toBe(true);
+
+      // A rebuilds: delete old artifact, create new one
+      await fs.unlink(path.join(repoA, "dist", "assets", "app-ABC.js"));
+      await fs.writeFile(path.join(repoA, "dist", "assets", "app-XYZ.js"), "// build 2");
+      await pushwork(["sync"], repoA);
+
+      // A should not have resurrected
+      expect(await pathExists(path.join(repoA, "dist", "assets", "app-ABC.js"))).toBe(false);
+
+      // B syncs - should see new file, NOT old file
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-ABC.js"))).toBe(false);
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-XYZ.js"))).toBe(true);
+
+      // B syncs again - old file should stay gone
+      await pushwork(["sync"], repoB);
+      expect(await pathExists(path.join(repoB, "dist", "assets", "app-ABC.js"))).toBe(false);
+    }, 90000);
+
+    it("peer B should see artifact file content update after URL replacement", async () => {
+      // When peer A modifies an artifact file, the document is replaced entirely
+      // (new Automerge doc with a new URL). Peer B's snapshot still points to the
+      // old (now orphaned) URL. detectRemoteChanges sees no head change on the old
+      // doc, and detectNewRemoteDocuments skips paths already in the snapshot.
+      // Without URL replacement detection, B never sees the update.
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.mkdir(path.join(repoA, "dist"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "app.js"), "// version 1");
+      await pushwork(["init", "."], repoA);
+
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+      await syncUntilConverged(repoA, repoB);
+
+      const bContentV1 = await fs.readFile(path.join(repoB, "dist", "app.js"), "utf-8");
+      expect(bContentV1).toBe("// version 1");
+
+      // A modifies the artifact file — this triggers nuclear replacement (new URL)
+      await fs.writeFile(path.join(repoA, "dist", "app.js"), "// version 2");
+      await pushwork(["sync"], repoA);
+
+      // B syncs — should pick up the new content despite the URL change
+      await pushwork(["sync"], repoB);
+      const bContentV2 = await fs.readFile(path.join(repoB, "dist", "app.js"), "utf-8");
+      expect(bContentV2).toBe("// version 2");
+    }, 90000);
   });
 
   describe("Move/Rename Detection", () => {

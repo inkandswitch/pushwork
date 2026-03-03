@@ -41,7 +41,7 @@ export interface FileDocument {
 export enum FileType {
 	TEXT = "text",
 	BINARY = "binary",
-	DIRECTORY = "directory",
+	DIRECTORY = "directory"
 }
 
 /**
@@ -51,7 +51,7 @@ export enum ChangeType {
 	NO_CHANGE = "no_change",
 	LOCAL_ONLY = "local_only",
 	REMOTE_ONLY = "remote_only",
-	BOTH_CHANGED = "both_changed",
+	BOTH_CHANGED = "both_changed"
 }
 
 /**
@@ -86,4 +86,6 @@ export interface DetectedChange {
 	remoteContent: string | Uint8Array | null
 	localHead?: UrlHeads
 	remoteHead?: UrlHeads
+	/** New remote URL when the remote document was replaced (artifact URL change) */
+	remoteUrl?: AutomergeUrl
 }

@@ -266,7 +266,7 @@ export class SyncEngine {
 			const plainUrl = getPlainUrl(entry.url)
 			if (!failedUrls.has(plainUrl)) continue
 
-			debug(`recreate: recreating document for ${filePath} (${plainUrl.slice(0, 20)}...)`)
+			debug(`recreate: recreating document for ${filePath} (${plainUrl})`)
 			out.taskLine(`Recreating document for ${filePath}`)
 
 			try {
@@ -335,7 +335,7 @@ export class SyncEngine {
 				newHandles.push(newHandle)
 				newHandles.push(dirHandle)
 
-				debug(`recreate: created new doc for ${filePath} -> ${newHandle.url.slice(0, 20)}...`)
+				debug(`recreate: created new doc for ${filePath} -> ${newHandle.url}`)
 			} catch (error) {
 				debug(`recreate: failed for ${filePath}: ${error}`)
 				out.taskLine(`Failed to recreate ${filePath}: ${error}`, true)
@@ -378,7 +378,7 @@ export class SyncEngine {
 				(await this.snapshotManager.load()) ||
 				this.snapshotManager.createEmpty()
 
-			debug(`sync: rootDirectoryUrl=${snapshot.rootDirectoryUrl?.slice(0, 30)}..., files=${snapshot.files.size}, dirs=${snapshot.directories.size}`)
+			debug(`sync: rootDirectoryUrl=${snapshot.rootDirectoryUrl}, files=${snapshot.files.size}, dirs=${snapshot.directories.size}`)
 
 			// Wait for initial sync to receive any pending remote changes
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
@@ -805,7 +805,7 @@ export class SyncEngine {
 								}
 							)
 							result.filesChanged++
-							debug(`push: created ${change.path} -> ${handle.url.slice(0, 20)}...`)
+							debug(`push: created ${change.path} -> ${handle.url}`)
 						}
 					} else {
 						// Update existing file
@@ -966,6 +966,11 @@ export class SyncEngine {
 		if (snapshotEntry) {
 			// Update existing entry
 			snapshotEntry.head = change.remoteHead
+			// If the remote document was replaced (new URL), update the snapshot URL
+			if (change.remoteUrl) {
+				const fileHandle = await this.repo.find<FileDocument>(change.remoteUrl)
+				snapshotEntry.url = this.getEntryUrl(fileHandle, change.path)
+			}
 		} else {
 			// Create new snapshot entry for newly discovered remote file
 			// We need to find the remote file's URL from the directory hierarchy
