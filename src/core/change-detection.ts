@@ -25,6 +25,11 @@ import {
 import {isContentEqual, contentHash} from "../utils/content"
 import {out} from "../utils/output"
 
+const isDebug = !!process.env.DEBUG
+function debug(...args: any[]) {
+	if (isDebug) console.error("[pushwork:change-detection]", ...args)
+}
+
 /**
  * Change detection engine
  */
@@ -50,7 +55,7 @@ export class ChangeDetector {
 	/**
 	 * Detect all changes between local filesystem and snapshot
 	 */
-	async detectChanges(snapshot: SyncSnapshot): Promise<DetectedChange[]> {
+	async detectChanges(snapshot: SyncSnapshot, excludePaths?: Set<string>): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
 		// Get current filesystem state
@@ -65,7 +70,7 @@ export class ChangeDetector {
 		changes.push(...remoteChanges)
 
 		// Check for new remote documents not in snapshot (critical for clone scenarios)
-		const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot)
+		const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot, excludePaths)
 		changes.push(...newRemoteDocuments)
 
 		return changes
@@ -337,7 +342,8 @@ export class ChangeDetector {
 	 * This is critical for clone scenarios where local snapshot is empty
 	 */
 	private async detectNewRemoteDocuments(
-		snapshot: SyncSnapshot
+		snapshot: SyncSnapshot,
+		excludePaths?: Set<string>
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -352,7 +358,8 @@ export class ChangeDetector {
 				snapshot.rootDirectoryUrl,
 				"",
 				snapshot,
-				changes
+				changes,
+				excludePaths
 			)
 		} catch (error) {
 			out.taskLine(`Failed to discover remote documents: ${error}`, true)
@@ -368,7 +375,8 @@ export class ChangeDetector {
 		directoryUrl: AutomergeUrl,
 		currentPath: string,
 		snapshot: SyncSnapshot,
-		changes: DetectedChange[]
+		changes: DetectedChange[],
+		excludePaths?: Set<string>
 	): Promise<void> {
 		try {
 			// Find and wait for document to be available (retries on "unavailable")
@@ -387,6 +395,12 @@ export class ChangeDetector {
 					: entry.name
 
 				if (entry.type === "file") {
+					// Skip files that were deliberately deleted during this sync cycle
+					if (excludePaths?.has(entryPath)) {
+						debug(`skipping deleted path during re-detection: ${entryPath}`)
+						continue
+					}
+
 					// Check if this file is already tracked in the snapshot
 					const existingEntry = snapshot.files.get(entryPath)
 
@@ -470,7 +484,8 @@ export class ChangeDetector {
 						entry.url,
 						entryPath,
 						snapshot,
-						changes
+						changes,
+						excludePaths
 					)
 				}
 			}

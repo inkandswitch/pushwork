@@ -433,6 +433,8 @@ export class SyncEngine {
 			// Detect all changes
 			debug("sync: detecting changes")
 			out.update("Detecting local and remote changes")
+			// Capture pre-push snapshot file paths to detect deletions after push
+			const prePushFilePaths = new Set(snapshot.files.keys())
 			const changes = await this.changeDetector.detectChanges(snapshot)
 
 			// Detect moves
@@ -560,8 +562,18 @@ export class SyncEngine {
 			}
 
 			// Re-detect changes after network sync for fresh state
+			// Compute paths deleted during push so they aren't resurrected during pull
+			const deletedPaths = new Set<string>()
+			for (const p of prePushFilePaths) {
+				if (!snapshot.files.has(p)) {
+					deletedPaths.add(p)
+				}
+			}
+			if (deletedPaths.size > 0) {
+				debug(`sync: excluding ${deletedPaths.size} deleted paths from re-detection`)
+			}
 			debug("sync: re-detecting changes after network sync")
-			const freshChanges = await this.changeDetector.detectChanges(snapshot)
+			const freshChanges = await this.changeDetector.detectChanges(snapshot, deletedPaths)
 			const freshRemoteChanges = freshChanges.filter(
 				c =>
 					c.changeType === ChangeType.REMOTE_ONLY ||
