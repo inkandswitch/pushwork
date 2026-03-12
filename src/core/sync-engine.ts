@@ -37,6 +37,7 @@ import {ChangeDetector} from "./change-detection.js"
 import {MoveDetector} from "./move-detection.js"
 import {out} from "../utils/output.js"
 import * as path from "path"
+import {digestOfBase58Id, SedimentreeId} from "@automerge/automerge-subduction"
 
 const isDebug = !!process.env.DEBUG
 function debug(...args: any[]) {
@@ -59,10 +60,16 @@ function changeWithOptionalHeads<T>(
 	}
 }
 
+const BIDIRECTIONAL_SYNC_TIMEOUT_MS = 5000
+
 /**
- * Sync configuration constants
+ * Convert an Automerge document URL to a Subduction SedimentreeId.
  */
-const BIDIRECTIONAL_SYNC_TIMEOUT_MS = 5000 // Timeout for bidirectional sync stability check
+function urlToSedimentreeId(url: AutomergeUrl): SedimentreeId {
+	const {documentId} = parseAutomergeUrl(url)
+	const digest = digestOfBase58Id(documentId)
+	return SedimentreeId.fromBytes(digest.toBytes())
+}
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -79,7 +86,8 @@ export class SyncEngine {
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
-		config: DirectoryConfig
+		config: DirectoryConfig,
+		private subduction: any
 	) {
 		this.config = config
 		this.snapshotManager = new SnapshotManager(rootPath)
@@ -255,116 +263,9 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Recreate documents that failed to sync. Creates new Automerge documents
-	 * with the same content and updates all references (snapshot, parent directory).
-	 * Returns new handles that should be retried for sync.
-	 */
-	private async recreateFailedDocuments(
-		failedHandles: DocHandle<unknown>[],
-		snapshot: SyncSnapshot
-	): Promise<DocHandle<unknown>[]> {
-		const failedUrls = new Set(failedHandles.map(h => getPlainUrl(h.url)))
-		const newHandles: DocHandle<unknown>[] = []
-
-		// Find which paths correspond to the failed handles
-		for (const [filePath, entry] of snapshot.files.entries()) {
-			const plainUrl = getPlainUrl(entry.url)
-			if (!failedUrls.has(plainUrl)) continue
-
-			debug(`recreate: recreating document for ${filePath} (${plainUrl})`)
-			out.taskLine(`Recreating document for ${filePath}`)
-
-			try {
-				// Read the current content from the old handle
-				const oldHandle = await this.repo.find<FileDocument>(plainUrl)
-				const doc = await oldHandle.doc()
-				if (!doc) {
-					debug(`recreate: could not read doc for ${filePath}, skipping`)
-					continue
-				}
-
-				const content = readDocContent(doc.content)
-				if (content === null) {
-					debug(`recreate: null content for ${filePath}, skipping`)
-					continue
-				}
-
-				// Create a fresh document
-				const fakeChange: DetectedChange = {
-					path: filePath,
-					changeType: ChangeType.LOCAL_ONLY,
-					fileType: this.isTextContent(content) ? FileType.TEXT : FileType.BINARY,
-					localContent: content,
-					remoteContent: null,
-				}
-				const newHandle = await this.createRemoteFile(fakeChange)
-				if (!newHandle) continue
-
-				const entryUrl = this.getEntryUrl(newHandle, filePath)
-
-				// Update snapshot entry
-				this.snapshotManager.updateFileEntry(snapshot, filePath, {
-					...entry,
-					url: entryUrl,
-					head: newHandle.heads(),
-					...(this.isArtifactPath(filePath) ? {contentHash: contentHash(content)} : {}),
-				})
-
-				// Update parent directory entry to point to new document
-				const pathParts = filePath.split("/")
-				const fileName = pathParts.pop() || ""
-				const dirPath = pathParts.join("/")
-
-				let dirUrl: AutomergeUrl
-				if (!dirPath || dirPath === "") {
-					dirUrl = snapshot.rootDirectoryUrl!
-				} else {
-					const dirEntry = snapshot.directories.get(dirPath)
-					if (!dirEntry) continue
-					dirUrl = dirEntry.url
-				}
-
-				const dirHandle = await this.repo.find<DirectoryDocument>(getPlainUrl(dirUrl))
-				dirHandle.change((d: DirectoryDocument) => {
-					const idx = d.docs.findIndex(
-						e => e.name === fileName && e.type === "file"
-					)
-					if (idx !== -1) {
-						d.docs[idx].url = entryUrl
-					}
-				})
-
-				// Track new handles
-				this.handlesByPath.set(filePath, newHandle)
-				this.handlesByPath.set(dirPath, dirHandle)
-				newHandles.push(newHandle)
-				newHandles.push(dirHandle)
-
-				debug(`recreate: created new doc for ${filePath} -> ${newHandle.url}`)
-			} catch (error) {
-				debug(`recreate: failed for ${filePath}: ${error}`)
-				out.taskLine(`Failed to recreate ${filePath}: ${error}`, true)
-			}
-		}
-
-		// Also check directory documents
-		for (const [dirPath, entry] of snapshot.directories.entries()) {
-			const plainUrl = getPlainUrl(entry.url)
-			if (!failedUrls.has(plainUrl)) continue
-
-			// Directory docs can't be easily recreated (they reference children).
-			// Just log a warning — the child recreation above should handle most cases.
-			debug(`recreate: directory ${dirPath || "(root)"} failed to sync, cannot recreate`)
-			out.taskLine(`Warning: directory ${dirPath || "(root)"} failed to sync`, true)
-		}
-
-		return newHandles
-	}
-
-	/**
 	 * Run full bidirectional sync
 	 */
-	async sync(): Promise<SyncResult> {
+	async sync(options?: {sub?: boolean}): Promise<SyncResult> {
 		const result: SyncResult = {
 			success: false,
 			filesChanged: 0,
@@ -424,7 +325,7 @@ export class SyncEngine {
 						this.repo,
 						snapshot.rootDirectoryUrl,
 						{
-							timeoutMs: 5000, // Increased timeout for initial sync
+							timeoutMs: 5000,
 							pollIntervalMs: 100,
 							stableChecksRequired: 3,
 						}
@@ -464,74 +365,63 @@ export class SyncEngine {
 
 			debug(`sync: phase 1 complete - ${phase1Result.filesChanged} files, ${phase1Result.directoriesChanged} dirs changed`)
 
-			// Wait for network sync (important for clone scenarios)
+			// Wait for network sync
 			if (this.config.sync_enabled) {
 				try {
-					// Ensure root directory handle is tracked for sync
-					if (snapshot.rootDirectoryUrl) {
-						const rootHandle =
-							await this.repo.find<DirectoryDocument>(
-								snapshot.rootDirectoryUrl
-							)
-						this.handlesByPath.set("", rootHandle)
-					}
-
-					// Single waitForSync with ALL tracked handles at once
-					if (this.handlesByPath.size > 0) {
-						const allHandles = Array.from(
-							this.handlesByPath.values()
-						)
-						const handlePaths = Array.from(this.handlesByPath.keys())
-						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
-						out.update(`Uploading ${allHandles.length} documents to sync server`)
-						const {failed} = await waitForSync(
-							allHandles
-						)
-
-						// Recreate failed documents and retry once
-						if (failed.length > 0) {
-							debug(`sync: ${failed.length} documents failed, recreating`)
-							out.update(`Recreating ${failed.length} failed documents`)
-							const retryHandles = await this.recreateFailedDocuments(failed, snapshot)
-							if (retryHandles.length > 0) {
-								debug(`sync: retrying ${retryHandles.length} recreated handles`)
-								out.update(`Retrying ${retryHandles.length} recreated documents`)
-								const retry = await waitForSync(
-									retryHandles
-								)
-								if (retry.failed.length > 0) {
-									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
-									debug(`sync: ${msg}`)
-									result.errors.push({
-										path: "sync",
-										operation: "upload",
-										error: new Error(msg),
-										recoverable: true,
-									})
-								}
+					if (options?.sub) {
+						// --sub mode: use Subduction syncAll per document
+						const changedUrls = [...new Set(
+							Array.from(this.handlesByPath.values())
+								.map(h => getPlainUrl(h.url))
+						)]
+						if (snapshot.rootDirectoryUrl) {
+							const rootPlain = getPlainUrl(snapshot.rootDirectoryUrl)
+							if (!changedUrls.includes(rootPlain)) {
+								changedUrls.push(rootPlain)
 							}
 						}
-
-						debug("sync: all handles synced to server")
-					}
-
-					// Wait for bidirectional sync to stabilize
-					// Use tracked handles for post-push check (cheaper than full tree scan)
-					const changedHandles = Array.from(this.handlesByPath.values())
-					debug(`sync: waiting for bidirectional sync to stabilize (${changedHandles.length} tracked handles)`)
-					out.update("Waiting for bidirectional sync to stabilize")
-					await waitForBidirectionalSync(
-						this.repo,
-						snapshot.rootDirectoryUrl,
-						{
-							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
-							pollIntervalMs: 100,
-							stableChecksRequired: 3,
-							handles: changedHandles.length > 0 ? changedHandles : undefined,
+						debug(`sync: --sub: syncing ${changedUrls.length} documents via syncAll`)
+						out.update(`Syncing ${changedUrls.length} documents via Subduction`)
+						for (const url of changedUrls) {
+							const sedId = urlToSedimentreeId(url)
+							await this.subduction.syncAll(sedId, true)
 						}
-					)
+						debug("sync: --sub: syncAll complete")
+					} else {
+						// Default: head-stability polling
+						// Ensure root directory handle is tracked for sync
+						if (snapshot.rootDirectoryUrl) {
+							const rootHandle =
+								await this.repo.find<DirectoryDocument>(
+									snapshot.rootDirectoryUrl
+								)
+							this.handlesByPath.set("", rootHandle)
+						}
 
-					// Root directory touch + sync moved to end of sync() so it always runs
+						// Wait for all tracked handles to sync
+						if (this.handlesByPath.size > 0) {
+							const allHandles = Array.from(this.handlesByPath.values())
+							debug(`sync: waiting for ${allHandles.length} handles to sync to server`)
+							out.update(`Uploading ${allHandles.length} documents to sync server`)
+							await waitForSync(allHandles)
+							debug("sync: all handles synced to server")
+						}
+
+						// Wait for bidirectional sync to stabilize
+						const changedHandles = Array.from(this.handlesByPath.values())
+						debug(`sync: waiting for bidirectional sync to stabilize (${changedHandles.length} tracked handles)`)
+						out.update("Waiting for bidirectional sync to stabilize")
+						await waitForBidirectionalSync(
+							this.repo,
+							snapshot.rootDirectoryUrl,
+							{
+								timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
+								pollIntervalMs: 100,
+								stableChecksRequired: 3,
+								handles: changedHandles.length > 0 ? changedHandles : undefined,
+							}
+						)
+					}
 				} catch (error) {
 					debug(`sync: network sync error: ${error}`)
 					out.taskLine(`Network sync failed: ${error}`, true)
@@ -624,30 +514,14 @@ export class SyncEngine {
 			// Always touch root directory after sync completes
 			await this.touchRootDirectory(snapshot)
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
-				const rootHandle =
-					await this.repo.find<DirectoryDocument>(
-						snapshot.rootDirectoryUrl
-					)
-				debug("sync: syncing root directory touch to server")
+				debug("sync: syncing root directory touch to server via syncAll")
 				out.update("Syncing root directory update")
-				await waitForSync(
-					[rootHandle]
-				)
-				// Wait for the touch to fully stabilize on the server
-				debug("sync: waiting for root touch to stabilize")
-				await waitForBidirectionalSync(
-					this.repo,
-					snapshot.rootDirectoryUrl,
-					{
-						timeoutMs: 5000,
-						pollIntervalMs: 100,
-						stableChecksRequired: 3,
-						handles: [rootHandle],
-					}
-				)
+				const rootSedId = urlToSedimentreeId(getPlainUrl(snapshot.rootDirectoryUrl))
+				await this.subduction.syncAll(rootSedId, true)
+				debug("sync: root directory syncAll complete")
 				// Flush repo to ensure everything is persisted
 				await this.repo.flush()
-				// Small grace period to ensure server has flushed
+				// Small grace period
 				await new Promise(r => setTimeout(r, 100))
 			}
 
@@ -1329,6 +1203,7 @@ export class SyncEngine {
 		const snapshotEntry = snapshot.directories.get(directoryPath)
 		const heads = snapshotEntry?.head
 		changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+			if (!doc.docs) doc.docs = []
 			const existingIndex = doc.docs.findIndex(
 				entry => entry.name === fileName && entry.type === "file"
 			)
@@ -1443,6 +1318,7 @@ export class SyncEngine {
 
 		let didChange = false
 		parentHandle.change((doc: DirectoryDocument) => {
+			if (!doc.docs) doc.docs = []
 			// Double-check that entry doesn't exist (race condition protection)
 			const existingIndex = doc.docs.findIndex(
 				(entry: {name: string; type: string; url: AutomergeUrl}) =>
@@ -1519,6 +1395,7 @@ export class SyncEngine {
 			let didChange = false
 
 			changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+				if (!doc.docs) doc.docs = []
 				const indexToRemove = doc.docs.findIndex(
 					entry => entry.name === fileName && entry.type === "file"
 				)
@@ -1575,6 +1452,7 @@ export class SyncEngine {
 		const dirName = dirPath ? dirPath.split("/").pop() || "" : path.basename(this.rootPath)
 
 		changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+			if (!doc.docs) doc.docs = []
 			// Ensure name and title fields are set
 			if (!doc.name) doc.name = dirName
 			if (!doc.title) doc.title = dirName

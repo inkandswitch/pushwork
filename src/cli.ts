@@ -128,16 +128,13 @@ program
     false
   )
   .option(
-    "--gentle",
-    "Use config files and only sync changed files (instead of default full resync)",
-    false
-  )
-  .option(
     "--nuclear",
     "Recreate all Automerge documents from scratch",
     false
   )
-  .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
+  .option("-f, --force", "Use default config, ignoring local config overrides", false)
+  .option("--sub", "Use Subduction syncAll for reliable per-document sync", false)
+  .addOption(new Option("--gentle", "Accepted for backwards compatibility").default(false).hideHelp())
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
@@ -145,6 +142,7 @@ program
       force: opts.force,
       gentle: opts.gentle,
       nuclear: opts.nuclear,
+      sub: opts.sub,
       verbose: opts.verbose,
     });
   });

@@ -58,8 +58,8 @@ async function initializeRepository(
   const config = await configManager.initializeWithOverrides(overrides);
 
   // Create repository and sync engine
-  const repo = await createRepo(resolvedPath, config);
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const { repo, subduction } = await createRepo(resolvedPath, config);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, subduction);
 
   return { config, repo, syncEngine };
 }
@@ -103,10 +103,10 @@ async function setupCommandContext(
   }
 
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config);
+  const { repo, subduction } = await createRepo(resolvedPath, config);
 
   // Create sync engine
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, subduction);
 
   return {
     repo,
@@ -230,13 +230,13 @@ export async function sync(
   out.task(
     options.nuclear
       ? "Nuclear syncing"
-      : options.gentle
-      ? "Gentle syncing"
+      : options.force
+      ? "Force syncing"
       : "Syncing"
   );
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
-    forceDefaults: !options.gentle,
+    forceDefaults: options.force,
   });
 
   if (options.nuclear) {
@@ -289,7 +289,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await syncEngine.sync();
+    const result = await syncEngine.sync({sub: options.sub});
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo);

@@ -21,13 +21,20 @@ function ensureSubductionModuleInit() {
   }
 }
 
+export interface RepoWithSubduction {
+  repo: Repo;
+  subduction: any;
+}
+
 /**
- * Create an Automerge repository with Subduction-based setup
+ * Create an Automerge repository with Subduction-based setup.
+ * Returns both the repo and the raw subduction instance so callers
+ * can use fullSync/syncAll for reliable sync confirmation.
  */
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig
-): Promise<Repo> {
+): Promise<RepoWithSubduction> {
   ensureSubductionModuleInit();
 
   const syncToolDir = path.join(workingDir, ".pushwork");
@@ -45,7 +52,8 @@ export async function createRepo(
     );
   }
 
-  return new Repo({ subduction } as any);
+  const repo = new Repo({ subduction } as any);
+  return { repo, subduction };
 }
 
 /**

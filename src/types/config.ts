@@ -46,6 +46,7 @@ export interface SyncOptions extends CommandOptions {
   nuclear?: boolean;
   gentle?: boolean;
   dryRun?: boolean;
+  sub?: boolean;
 }
 
 /**
