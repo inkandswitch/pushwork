@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { StorageId } from "@automerge/automerge-repo";
 import { Command, Option } from "@commander-js/extra-typings";
 import chalk from "chalk";
 import {
@@ -18,8 +17,11 @@ import {
   ls,
   config,
   watch,
-} from "./commands";
+  read,
+} from "./commands.js";
 
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
 const version = require("../package.json").version;
 const program = new Command()
   .name("pushwork")
@@ -36,14 +38,11 @@ program
     "."
   )
   .option(
-    "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
+    "--sync-server <url>",
+    "Custom sync server URL"
   )
   .action(async (path, opts) => {
-    const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
-    );
-    await init(path, { syncServer, syncServerStorageId });
+    await init(path, { syncServer: opts.syncServer });
   });
 
 // Track command (set root directory URL without full initialization)
@@ -89,19 +88,15 @@ program
   .argument("<path>", "Target directory path")
   .option("-f, --force", "Overwrite existing directory", false)
   .option(
-    "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
+    "--sync-server <url>",
+    "Custom sync server URL"
   )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
-    const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
-    );
     await clone(url, path, {
       force: opts.force,
       verbose: opts.verbose,
-      syncServer,
-      syncServerStorageId,
+      syncServer: opts.syncServer,
     });
   });
 
@@ -302,6 +297,21 @@ program
     });
   });
 
+// Read command
+program
+  .command("read")
+  .summary("Read a file document by its Automerge URL")
+  .argument(
+    "<url>",
+    "AutomergeUrl of file document (format: automerge:XXXXX)"
+  )
+  .option("-r, --remote", "Read from sync server instead of local storage", false)
+  .action(async (url, opts) => {
+    await read(url, {
+      remote: opts.remote,
+    });
+  });
+
 // Completion command (hidden from help)
 program.command("completion", { hidden: true }).action(() => {
   // Generate completion dynamically from registered commands
@@ -383,25 +393,6 @@ compdef _pushwork pushwork
 
   console.log(completionScript);
 });
-
-// Helper to validate and extract sync server options
-function validateSyncServer(
-  syncServerOpt: string[] | undefined
-): [string | undefined, StorageId | undefined] {
-  if (!syncServerOpt) {
-    return [undefined, undefined];
-  }
-
-  if (syncServerOpt.length < 2) {
-    console.error(
-      chalk.red("Error: --sync-server requires both URL and storage ID")
-    );
-    process.exit(1);
-  }
-
-  const [syncServer, syncServerStorageId] = syncServerOpt;
-  return [syncServer, syncServerStorageId as StorageId];
-}
 
 process.on("unhandledRejection", (error) => {
   console.log(chalk.bgRed.white(" ERROR "));

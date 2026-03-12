@@ -103,20 +103,24 @@ Stored in `.pushwork/config.json` (local) and `~/.pushwork/config.json` (global)
 
 Key fields:
 - `sync_enabled: boolean` - Whether to do network sync
-- `sync_server: string` - WebSocket relay URL (default: `wss://sync3.automerge.org`)
-- `sync_server_storage_id: StorageId` - Server identity for sync verification
+- `sync_server: string` - WebSocket relay URL (default: `wss://subduction.sync.inkandswitch.com`)
 - `exclude_patterns: string[]` - Gitignore-style patterns (default: `.git`, `node_modules`, `*.tmp`, `.pushwork`, `.DS_Store`)
 - `sync.move_detection_threshold: number` - Similarity threshold for move detection (0-1, default 0.7)
 
-## Network sync details
+## Network sync details (Subduction)
 
-- Uses `waitForSync()` to verify documents reach the server by comparing local and remote heads
+Pushwork uses Subduction for network sync. Subduction replaces the old `BrowserWebSocketClientAdapter` with a Subduction transport layer that handles sync automatically.
+
+- **Repo setup** (`src/utils/repo-factory.ts`): Creates a `WebCryptoSigner`, wraps `NodeFSStorageAdapter` in `SubductionStorageBridge`, hydrates `Subduction`, and calls `connectDiscover()` to the sync server. The `Repo` receives `{ subduction, storage }` instead of `{ storage, network }`.
+- **Sync verification**: Uses head-stability polling instead of `StorageId`-based `getSyncInfo()`. Both `waitForSync()` and `waitForBidirectionalSync()` poll document heads until they stabilize.
+- Uses `waitForSync()` to verify documents reach the server by polling head stability
 - Uses `waitForBidirectionalSync()` to poll until document heads stabilize (no more incoming changes)
   - Accepts optional `handles` param to check only specific handles instead of full tree traversal (used post-push in `sync()`)
   - Timeout scales dynamically: `max(timeoutMs, 5000 + docCount * 50)` so large trees don't prematurely time out
   - Tree traversal (`collectHeadsRecursive`) fetches siblings concurrently via `Promise.all`
 - Documents sync level-by-level, deepest first, so children are on the server before their parents
 - `handlesByPath` map tracks which documents changed and need syncing
+- Default sync server: `wss://subduction.sync.inkandswitch.com`
 
 ## Leaf-first ordering
 
@@ -132,6 +136,6 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 - **Avoid diffing artifact files.** `diffChars()` is O(n*m) and pointless for artifact directories since they use RawString (immutable snapshots). Artifact files should always be replaced with a fresh document rather than diffed+spliced. This applies to `updateRemoteFile()`, `applyMoveToRemote()`, and change detection. `ChangeDetector` skips `getContentAtHead()` and `getCurrentRemoteContent()` for artifact paths — it uses a SHA-256 `contentHash` stored in the snapshot to detect local changes, and checks heads to detect remote changes. If neither changed, the artifact is skipped entirely. The `contentHash` field on `SnapshotFileEntry` is optional and only populated for artifact files.
 - **Sync timeout recovery.** `waitForSync()` returns `{ failed: DocHandle[] }` instead of throwing. When documents fail to sync (timeout or unavailable), `recreateFailedDocuments()` creates new Automerge docs with the same content, updates snapshot entries and parent directory references, then retries once. If documents still fail after recreation, it's reported as an error (not a warning) so the sync shows as "PARTIAL" rather than "SYNCED".
 - **Document availability during clone.** `repo.find()` rejects with "Document X is unavailable" if the sync server doesn't have the document yet. `DocHandle.doc()` is synchronous and throws if the handle isn't ready. For clone scenarios, `sync()` retries `repo.find()` for the root document with exponential backoff (up to 6 attempts). `ChangeDetector.findDocument()` wraps `repo.find()` + `doc()` with retry logic for all document fetches during change detection.
-- **Server load.** `enableRemoteHeadsGossiping` is disabled — pushwork syncs directly with the server so the gossip protocol is unnecessary overhead. `waitForSync` processes documents in batches of 10 (`SYNC_BATCH_SIZE`) to avoid flooding the server with concurrent sync messages. Without batching, syncing 100+ documents simultaneously can overwhelm the sync server (which is single-threaded with no backpressure).
+- **Server load.** `waitForSync` processes documents in batches of 10 (`SYNC_BATCH_SIZE`) to avoid flooding the server with concurrent sync messages. Without batching, syncing 100+ documents simultaneously can overwhelm the sync server.
 - **`waitForBidirectionalSync` on large trees.** Full tree traversal (`getAllDocumentHeads`) is expensive because it `repo.find()`s every document. For post-push stabilization, pass the `handles` option to only check documents that actually changed. The initial pre-pull call still needs the full scan to discover remote changes. The dynamic timeout adds the first scan's duration on top of the base timeout, since the first scan is just establishing baseline — its duration shouldn't count against stability-wait time.
 - **Versioned URLs and `repo.find()`.** `repo.find(versionedUrl)` returns a view handle whose `.heads()` returns the VERSION heads, not the current document heads. Always use `getPlainUrl()` when you need the current/mutable state. The snapshot head update loop at the end of `sync()` must use `getPlainUrl(snapshotEntry.url)` — without this, artifact directories (which store versioned URLs) get stale heads written to the snapshot, causing `changeAt()` to fork from the wrong point on the next sync. This was the root cause of the artifact deletion resurrection bug: `batchUpdateDirectory` would `changeAt` from an empty directory state where the file entry didn't exist yet, so the splice found nothing to delete.

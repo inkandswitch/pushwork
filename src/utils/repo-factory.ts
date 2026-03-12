@@ -1,28 +1,73 @@
+import "./node-polyfills.js";
 import { Repo } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
-import { BrowserWebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
+import * as subductionModule from "@automerge/automerge-subduction";
+import {
+  initSubductionModule,
+  SubductionStorageBridge,
+} from "@automerge/automerge-repo-subduction-bridge";
 import * as path from "path";
-import { DirectoryConfig } from "../types";
+import * as os from "os";
+import { DirectoryConfig } from "../types/index.js";
+
+const { WebCryptoSigner, Subduction } = subductionModule;
+
+let subductionModuleInitialized = false;
+
+function ensureSubductionModuleInit() {
+  if (!subductionModuleInitialized) {
+    initSubductionModule(subductionModule);
+    subductionModuleInitialized = true;
+  }
+}
 
 /**
- * Create an Automerge repository with configuration-based setup
+ * Create an Automerge repository with Subduction-based setup
  */
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig
 ): Promise<Repo> {
+  ensureSubductionModuleInit();
+
   const syncToolDir = path.join(workingDir, ".pushwork");
-  const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
+  const nodeStorage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
 
-  const repoConfig: any = { storage };
+  const signer = await WebCryptoSigner.setup();
+  const storageBridge = new SubductionStorageBridge(nodeStorage);
+  const subduction = await Subduction.hydrate(signer, storageBridge);
 
-  // Add network adapter only if sync is enabled and server is configured
+  // Connect to sync server if sync is enabled
   if (config.sync_enabled && config.sync_server) {
-    const networkAdapter = new BrowserWebSocketClientAdapter(
-      config.sync_server
+    await subduction.connectDiscover(
+      new URL(config.sync_server),
+      signer
     );
-    repoConfig.network = [networkAdapter];
   }
 
-  return new Repo(repoConfig);
+  return new Repo({ subduction } as any);
+}
+
+/**
+ * Create an ephemeral Automerge repository for remote reads.
+ * Uses a temporary directory for storage.
+ */
+export async function createEphemeralRepo(
+  syncServer: string
+): Promise<Repo> {
+  ensureSubductionModuleInit();
+
+  const tmpDir = path.join(os.tmpdir(), `pushwork-ephemeral-${Date.now()}`);
+  const nodeStorage = new NodeFSStorageAdapter(tmpDir);
+
+  const signer = await WebCryptoSigner.setup();
+  const storageBridge = new SubductionStorageBridge(nodeStorage);
+  const subduction = await Subduction.hydrate(signer, storageBridge);
+
+  await subduction.connectDiscover(
+    new URL(syncServer),
+    signer
+  );
+
+  return new Repo({ subduction } as any);
 }

@@ -17,7 +17,7 @@ import {
 	MoveCandidate,
 	DirectoryConfig,
 	DetectedChange,
-} from "../types"
+} from "../types/index.js"
 import {
 	writeFileContent,
 	removePath,
@@ -29,13 +29,13 @@ import {
 	getPlainUrl,
 	updateTextContent,
 	readDocContent,
-} from "../utils"
-import {isContentEqual, contentHash} from "../utils/content"
-import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
-import {SnapshotManager} from "./snapshot"
-import {ChangeDetector} from "./change-detection"
-import {MoveDetector} from "./move-detection"
-import {out} from "../utils/output"
+} from "../utils/index.js"
+import {isContentEqual, contentHash} from "../utils/content.js"
+import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync.js"
+import {SnapshotManager} from "./snapshot.js"
+import {ChangeDetector} from "./change-detection.js"
+import {MoveDetector} from "./move-detection.js"
+import {out} from "../utils/output.js"
 import * as path from "path"
 
 const isDebug = !!process.env.DEBUG
@@ -418,7 +418,6 @@ export class SyncEngine {
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
-						this.config.sync_server_storage_id,
 						{
 							timeoutMs: 5000, // Increased timeout for initial sync
 							pollIntervalMs: 100,
@@ -481,8 +480,7 @@ export class SyncEngine {
 						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
 						const {failed} = await waitForSync(
-							allHandles,
-							this.config.sync_server_storage_id
+							allHandles
 						)
 
 						// Recreate failed documents and retry once
@@ -494,8 +492,7 @@ export class SyncEngine {
 								debug(`sync: retrying ${retryHandles.length} recreated handles`)
 								out.update(`Retrying ${retryHandles.length} recreated documents`)
 								const retry = await waitForSync(
-									retryHandles,
-									this.config.sync_server_storage_id
+									retryHandles
 								)
 								if (retry.failed.length > 0) {
 									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
@@ -521,7 +518,6 @@ export class SyncEngine {
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
-						this.config.sync_server_storage_id,
 						{
 							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
 							pollIntervalMs: 100,
@@ -545,8 +541,7 @@ export class SyncEngine {
 						debug("sync: syncing root directory touch to server")
 						out.update("Syncing root directory update")
 						await waitForSync(
-							[rootHandle],
-							this.config.sync_server_storage_id
+							[rootHandle]
 						)
 					}
 				} catch (error) {

@@ -5,9 +5,8 @@ import {
   GlobalConfig,
   DirectoryConfig,
   DEFAULT_SYNC_SERVER,
-  DEFAULT_SYNC_SERVER_STORAGE_ID,
-} from "../types";
-import { pathExists, ensureDirectoryExists } from "../utils";
+} from "../types/index.js";
+import { pathExists, ensureDirectoryExists } from "../utils/index.js";
 
 /**
  * Configuration manager for pushwork
@@ -130,7 +129,6 @@ export class ConfigManager {
       ],
       artifact_directories: ["dist"],
       sync_server: DEFAULT_SYNC_SERVER,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -144,7 +142,6 @@ export class ConfigManager {
     return {
       sync_enabled: true,
       sync_server: DEFAULT_SYNC_SERVER,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
       exclude_patterns: [
         ".git",
         "node_modules",
@@ -203,13 +200,6 @@ export class ConfigManager {
 
     if ("sync_server" in override && override.sync_server !== undefined) {
       merged.sync_server = override.sync_server;
-    }
-
-    if (
-      "sync_server_storage_id" in override &&
-      override.sync_server_storage_id !== undefined
-    ) {
-      merged.sync_server_storage_id = override.sync_server_storage_id;
     }
 
     if ("sync_enabled" in override && override.sync_enabled !== undefined) {

@@ -14,16 +14,20 @@ import {
   ConfigOptions,
   StatusOptions,
   WatchOptions,
+  ReadOptions,
   DirectoryConfig,
   DirectoryDocument,
+  FileDocument,
   CommandOptions,
-} from "./types";
-import { SyncEngine } from "./core";
-import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
-import { ConfigManager } from "./core/config";
-import { createRepo } from "./utils/repo-factory";
-import { out } from "./utils/output";
-import { waitForSync } from "./utils/network-sync";
+} from "./types/index.js";
+import { SyncEngine } from "./core/index.js";
+import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils/index.js";
+import { ConfigManager } from "./core/config.js";
+import { createRepo, createEphemeralRepo } from "./utils/repo-factory.js";
+import { out } from "./utils/output.js";
+import { waitForSync } from "./utils/network-sync.js";
+import { readDocContent } from "./utils/text-diff.js";
+import { DEFAULT_SYNC_SERVER } from "./types/config.js";
 import chalk from "chalk";
 
 /**
@@ -172,7 +176,6 @@ export async function init(
   out.update("Setting up repository");
   const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
     sync_server: options.syncServer,
-    sync_server_storage_id: options.syncServerStorageId,
   });
 
   // Create new root directory document
@@ -192,9 +195,9 @@ export async function init(
   // Wait for root document to sync to server if sync is enabled
   // This ensures the document is uploaded before we exit
   // waitForSync() verifies the server has the document by comparing local and remote heads
-  if (config.sync_enabled && config.sync_server_storage_id) {
+  if (config.sync_enabled && config.sync_server) {
     out.update("Syncing to server");
-    const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
+    const { failed } = await waitForSync([rootHandle]);
     if (failed.length > 0) {
       out.taskLine("Root document failed to sync to server", true);
       // Continue anyway - the document is created locally and will sync later
@@ -616,7 +619,6 @@ export async function clone(
     resolvedPath,
     {
       sync_server: options.syncServer,
-      sync_server_storage_id: options.syncServerStorageId,
     }
   );
 
@@ -1063,6 +1065,68 @@ export async function root(
 
   out.successBlock("ROOT SET", rootUrl);
   process.exit();
+}
+
+/**
+ * Read a file document by its Automerge URL and print its content
+ */
+export async function read(
+	docUrl: string,
+	options: ReadOptions = {}
+): Promise<void> {
+	if (!docUrl.startsWith("automerge:")) {
+		out.error(
+			`Invalid Automerge URL: ${docUrl}\n` +
+			`Expected format: automerge:XXXXX`
+		);
+		out.exit(1);
+	}
+
+	let repo: Repo;
+
+	if (options.remote) {
+		// Create an ephemeral repo with Subduction to fetch from sync server
+		repo = await createEphemeralRepo(DEFAULT_SYNC_SERVER);
+	} else {
+		// Read from local pushwork storage
+		const ctx = await setupCommandContext(".", { syncEnabled: false });
+		repo = ctx.repo;
+	}
+
+	try {
+		const handle = await repo.find<FileDocument>(docUrl as AutomergeUrl);
+		const doc = await handle.doc();
+
+		if (!doc) {
+			out.error("Document not found or unavailable");
+			await safeRepoShutdown(repo);
+			out.exit(1);
+			return;
+		}
+
+		const content = readDocContent(doc.content);
+
+		if (content === null) {
+			out.error("Document has no content");
+			await safeRepoShutdown(repo);
+			out.exit(1);
+			return;
+		}
+
+		if (content instanceof Uint8Array) {
+			process.stdout.write(content);
+		} else {
+			process.stdout.write(content);
+		}
+	} catch (error) {
+		out.error(`Failed to read document: ${error}`);
+		await safeRepoShutdown(repo);
+		out.exit(1);
+		return;
+	}
+
+	await safeRepoShutdown(repo);
+	process.exit();
 }
 
 function plural(word: string, count: number): string {

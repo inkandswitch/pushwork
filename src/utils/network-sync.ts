@@ -1,13 +1,11 @@
 import {
   DocHandle,
-  StorageId,
   Repo,
   AutomergeUrl,
 } from "@automerge/automerge-repo";
-import * as A from "@automerge/automerge";
-import { out } from "./output";
-import { DirectoryDocument } from "../types";
-import { getPlainUrl } from "./directory";
+import { out } from "./output.js";
+import { DirectoryDocument } from "../types/index.js";
+import { getPlainUrl } from "./directory.js";
 
 const isDebug = !!process.env.DEBUG;
 function debug(...args: any[]) {
@@ -19,15 +17,16 @@ function debug(...args: any[]) {
  * This function waits until document heads stop changing, indicating that
  * both outgoing and incoming sync has completed.
  *
+ * With Subduction, sync is handled automatically by the transport layer.
+ * We poll heads until they stabilize to confirm sync completion.
+ *
  * @param repo - The Automerge repository
  * @param rootDirectoryUrl - The root directory URL to start traversal from
- * @param syncServerStorageId - The sync server storage ID
  * @param options - Configuration options
  */
 export async function waitForBidirectionalSync(
   repo: Repo,
   rootDirectoryUrl: AutomergeUrl | undefined,
-  syncServerStorageId: StorageId | undefined,
   options: {
     timeoutMs?: number;
     pollIntervalMs?: number;
@@ -42,7 +41,7 @@ export async function waitForBidirectionalSync(
     handles,
   } = options;
 
-  if (!syncServerStorageId || !rootDirectoryUrl) {
+  if (!rootDirectoryUrl) {
     return;
   }
 
@@ -217,88 +216,19 @@ export interface SyncWaitResult {
 const SYNC_BATCH_SIZE = 10;
 
 /**
- * Wait for a single document handle to sync to the server.
- * Resolves with the handle on success, rejects with the handle on timeout.
- */
-function waitForHandleSync(
-  handle: DocHandle<unknown>,
-  syncServerStorageId: StorageId,
-  timeoutMs: number,
-  startTime: number,
-): Promise<DocHandle<unknown>> {
-  return new Promise<DocHandle<unknown>>((resolve, reject) => {
-    let pollInterval: NodeJS.Timeout;
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      clearInterval(pollInterval);
-      handle.off("remote-heads", onRemoteHeads);
-    };
-
-    const onConverged = () => {
-      debug(`waitForSync: ${handle.url}... converged in ${Date.now() - startTime}ms`);
-      cleanup();
-      resolve(handle);
-    };
-
-    const timeout = setTimeout(() => {
-      debug(`waitForSync: ${handle.url}... timed out after ${timeoutMs}ms`);
-      cleanup();
-      reject(handle);
-    }, timeoutMs);
-
-    const isConverged = () => {
-      const localHeads = handle.heads();
-      const info = handle.getSyncInfo(syncServerStorageId);
-      return A.equals(localHeads, info?.lastHeads);
-    };
-
-    const onRemoteHeads = ({
-      storageId,
-    }: {
-      storageId: StorageId;
-      heads: any;
-    }) => {
-      if (storageId === syncServerStorageId && isConverged()) {
-        onConverged();
-      }
-    };
-
-    // Initial check
-    if (isConverged()) {
-      cleanup();
-      resolve(handle);
-      return;
-    }
-
-    // Start polling and event listening
-    pollInterval = setInterval(() => {
-      if (isConverged()) {
-        onConverged();
-      }
-    }, 100);
-
-    handle.on("remote-heads", onRemoteHeads);
-  });
-}
-
-/**
- * Wait for documents to sync to the remote server.
- * Processes handles in batches to avoid flooding the server.
- * Returns a result with any failed handles instead of throwing,
- * so callers can attempt recovery (e.g. recreating documents).
+ * Wait for documents to sync by polling head stability.
+ *
+ * With Subduction, sync is automatic via the transport layer.
+ * We wait for each handle's heads to stabilize (stop changing),
+ * which indicates the sync layer has finished processing.
+ *
+ * Processes handles in batches to avoid overwhelming the system.
  */
 export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
-  syncServerStorageId?: StorageId,
   timeoutMs: number = 60000,
 ): Promise<SyncWaitResult> {
   const startTime = Date.now();
-
-  if (!syncServerStorageId) {
-    debug("waitForSync: no sync server storage ID, skipping");
-    return { failed: [] };
-  }
 
   if (handlesToWaitOn.length === 0) {
     debug("waitForSync: no documents to sync");
@@ -306,40 +236,16 @@ export async function waitForSync(
   }
 
   debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms, batchSize=${SYNC_BATCH_SIZE})`);
-
-  // Separate already-synced from needs-sync
-  const needsSync: DocHandle<unknown>[] = [];
-  let alreadySynced = 0;
-
-  for (const handle of handlesToWaitOn) {
-    const heads = handle.heads();
-    const syncInfo = handle.getSyncInfo(syncServerStorageId);
-    const remoteHeads = syncInfo?.lastHeads;
-    if (A.equals(heads, remoteHeads)) {
-      alreadySynced++;
-      debug(`waitForSync: ${handle.url}... already synced`);
-    } else {
-      debug(`waitForSync: ${handle.url}... needs sync (remoteHeads=${remoteHeads ? 'present' : 'missing'})`);
-      needsSync.push(handle);
-    }
-  }
-
-  if (needsSync.length > 0) {
-    debug(`waitForSync: ${alreadySynced} already synced, ${needsSync.length} need sync`);
-    out.taskLine(`Uploading: ${alreadySynced}/${handlesToWaitOn.length} already synced, waiting for ${needsSync.length} more`);
-  } else {
-    debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
-    return { failed: [] };
-  }
+  out.taskLine(`Uploading: waiting for ${handlesToWaitOn.length} documents to sync`);
 
   // Process in batches to avoid flooding the server
   const failed: DocHandle<unknown>[] = [];
-  let synced = alreadySynced;
+  let synced = 0;
 
-  for (let i = 0; i < needsSync.length; i += SYNC_BATCH_SIZE) {
-    const batch = needsSync.slice(i, i + SYNC_BATCH_SIZE);
+  for (let i = 0; i < handlesToWaitOn.length; i += SYNC_BATCH_SIZE) {
+    const batch = handlesToWaitOn.slice(i, i + SYNC_BATCH_SIZE);
     const batchNum = Math.floor(i / SYNC_BATCH_SIZE) + 1;
-    const totalBatches = Math.ceil(needsSync.length / SYNC_BATCH_SIZE);
+    const totalBatches = Math.ceil(handlesToWaitOn.length / SYNC_BATCH_SIZE);
 
     if (totalBatches > 1) {
       debug(`waitForSync: batch ${batchNum}/${totalBatches} (${batch.length} docs)`);
@@ -347,7 +253,7 @@ export async function waitForSync(
     }
 
     const results = await Promise.allSettled(
-      batch.map(handle => waitForHandleSync(handle, syncServerStorageId, timeoutMs, startTime))
+      batch.map(handle => waitForHandleHeadStability(handle, timeoutMs, startTime))
     );
 
     for (const result of results) {
@@ -364,9 +270,50 @@ export async function waitForSync(
     debug(`waitForSync: ${failed.length} documents failed after ${elapsed}ms`);
     out.taskLine(`Upload: ${synced} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`, true);
   } else {
-    debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms (${alreadySynced} were already synced)`);
+    debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms`);
     out.taskLine(`All ${handlesToWaitOn.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`);
   }
 
   return { failed };
+}
+
+/**
+ * Wait for a single document handle's heads to stabilize.
+ * Polls the handle's heads and waits until they remain unchanged
+ * for several consecutive checks, indicating sync completion.
+ *
+ * Resolves with the handle on success, rejects with the handle on timeout.
+ */
+function waitForHandleHeadStability(
+  handle: DocHandle<unknown>,
+  timeoutMs: number,
+  startTime: number,
+): Promise<DocHandle<unknown>> {
+  return new Promise<DocHandle<unknown>>((resolve, reject) => {
+    let lastHeads = JSON.stringify(handle.heads());
+    let stableCount = 0;
+    const stableRequired = 3;
+
+    const pollInterval = setInterval(() => {
+      const currentHeads = JSON.stringify(handle.heads());
+      if (currentHeads === lastHeads) {
+        stableCount++;
+        if (stableCount >= stableRequired) {
+          clearInterval(pollInterval);
+          clearTimeout(timeout);
+          debug(`waitForSync: ${handle.url}... converged in ${Date.now() - startTime}ms`);
+          resolve(handle);
+        }
+      } else {
+        stableCount = 0;
+        lastHeads = currentHeads;
+      }
+    }, 100);
+
+    const timeout = setTimeout(() => {
+      clearInterval(pollInterval);
+      debug(`waitForSync: ${handle.url}... timed out after ${timeoutMs}ms`);
+      reject(handle);
+    }, timeoutMs);
+  });
 }

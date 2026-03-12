@@ -1,3 +1,3 @@
-export * from "./documents";
-export * from "./snapshot";
-export * from "./config";
+export * from "./documents.js";
+export * from "./snapshot.js";
+export * from "./config.js";

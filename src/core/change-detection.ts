@@ -12,7 +12,7 @@ import {
 	FileDocument,
 	DirectoryDocument,
 	DetectedChange,
-} from "../types"
+} from "../types/index.js"
 import {
 	readFileContent,
 	listDirectory,
@@ -21,9 +21,9 @@ import {
 	joinAndNormalizePath,
 	getPlainUrl,
 	readDocContent,
-} from "../utils"
-import {isContentEqual, contentHash} from "../utils/content"
-import {out} from "../utils/output"
+} from "../utils/index.js"
+import {isContentEqual, contentHash} from "../utils/content.js"
+import {out} from "../utils/output.js"
 
 const isDebug = !!process.env.DEBUG
 function debug(...args: any[]) {

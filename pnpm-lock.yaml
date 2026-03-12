@@ -9,17 +9,17 @@ dependencies:
     specifier: ^3.2.4
     version: 3.2.4
   '@automerge/automerge-repo':
-    specifier: ^2.5.3
-    version: 2.5.3
-  '@automerge/automerge-repo-network-websocket':
-    specifier: ^2.5.3
-    version: 2.5.3
-  '@automerge/automerge-repo-storage-indexeddb':
-    specifier: ^2.5.3
-    version: 2.5.3
+    specifier: 2.6.0-subduction.3
+    version: 2.6.0-subduction.3
   '@automerge/automerge-repo-storage-nodefs':
-    specifier: ^2.5.3
-    version: 2.5.3
+    specifier: 2.6.0-subduction.3
+    version: 2.6.0-subduction.3
+  '@automerge/automerge-repo-subduction-bridge':
+    specifier: 2.6.0-subduction.3
+    version: 2.6.0-subduction.3
+  '@automerge/automerge-subduction':
+    specifier: '*'
+    version: 0.2.2-alpha.1
   '@commander-js/extra-typings':
     specifier: ^14.0.0
     version: 14.0.0(commander@14.0.2)
@@ -32,6 +32,9 @@ dependencies:
   diff:
     specifier: ^8.0.2
     version: 8.0.2
+  fake-indexeddb:
+    specifier: ^6.2.5
+    version: 6.2.5
   glob:
     specifier: ^10.3.0
     version: 10.4.5
@@ -76,9 +79,6 @@ devDependencies:
   jest:
     specifier: ^29.7.0
     version: 29.7.0(@types/node@20.19.8)
-  prettier:
-    specifier: ^3.8.1
-    version: 3.8.1
   tmp:
     specifier: ^0.2.1
     version: 0.2.3
@@ -94,42 +94,30 @@ devDependencies:
 
 packages:
 
-  /@automerge/automerge-repo-network-websocket@2.5.3:
-    resolution: {integrity: sha512-p6K1YLo34cyGxJ6oMWqeBbWX9rGvEPGyPdX2eq8S/iWNDjYf8lbjKSOhOD8DX87uAMZN/y1XOY/RckwS8lPJbQ==}
+  /@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.3:
+    resolution: {integrity: sha512-wTzPn8+KjpfNklvgg1Ya/08tz4dfmDrdi1DNkB7u/dTlgrXWeJC/OjvK5iIlE+hpMARmoenqVe7Vt505X4rd3A==}
     dependencies:
-      '@automerge/automerge-repo': 2.5.3
-      cbor-x: 1.6.0
-      debug: 4.4.1
-      eventemitter3: 5.0.1
-      isomorphic-ws: 5.0.0(ws@8.18.3)
-      ws: 8.18.3
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-    dev: false
-
-  /@automerge/automerge-repo-storage-indexeddb@2.5.3:
-    resolution: {integrity: sha512-i4tSzY7sC8ZqurHm4Sd9H1lFL2Don9v9yaSoq0FXi4T+4Wg8eus/mtMlUCmS5XwYQL8GX+epbplrlBaBe+fYiw==}
-    dependencies:
-      '@automerge/automerge-repo': 2.5.3
-    transitivePeerDependencies:
-      - supports-color
-    dev: false
-
-  /@automerge/automerge-repo-storage-nodefs@2.5.3:
-    resolution: {integrity: sha512-5+dlpoopjw88FXvD/5cpXqsVbmvDhWIWxcm8m7k5nvZ3R32e7HZwrvvh9orRSAPkLgVyZRU3+OZ0y5v2ByGNxg==}
-    dependencies:
-      '@automerge/automerge-repo': 2.5.3
+      '@automerge/automerge-repo': 2.6.0-subduction.3
       rimraf: 5.0.10
     transitivePeerDependencies:
       - supports-color
     dev: false
 
-  /@automerge/automerge-repo@2.5.3:
-    resolution: {integrity: sha512-5ppzsUlzCs6PY+GeFlquaYLnVnYPz/hWzedep37zjb15tqZju1ukPPkBzT7KGEhEAnA99l4vfhfqSVC+1GktJg==}
+  /@automerge/automerge-repo-subduction-bridge@2.6.0-subduction.3:
+    resolution: {integrity: sha512-BDVMVdVDsjx+SDuWn2Q/WL/nTqs4+eYgvci+DhpVA3wGw1Atk8lVjDONQQ8PhRfXhlge2RkT17G/sEFKQtF4AA==}
+    dependencies:
+      '@automerge/automerge-repo': 2.6.0-subduction.3
+      '@automerge/automerge-subduction': 0.2.2-alpha.1
+      debug: 4.4.1
+    transitivePeerDependencies:
+      - supports-color
+    dev: false
+
+  /@automerge/automerge-repo@2.6.0-subduction.3:
+    resolution: {integrity: sha512-y4dCOxqcJ0J6CMMiWoKz4rmxOQdm3KFPcgzrAwRhhJeCnnRU57pK1ezPK+7sj3ZYzvfHiNGS/sIHoaxOI2jWqw==}
     dependencies:
       '@automerge/automerge': 3.2.4
+      '@automerge/automerge-subduction': 0.2.2-alpha.1
       bs58check: 3.0.1
       cbor-x: 1.6.0
       debug: 4.4.1
@@ -139,6 +127,10 @@ packages:
       xstate: 5.20.1
     transitivePeerDependencies:
       - supports-color
+    dev: false
+
+  /@automerge/automerge-subduction@0.2.2-alpha.1:
+    resolution: {integrity: sha512-XrLqoqFsF6t1zHnlNwxWT1a5DSyC+8qwVePoUdQZTYgdRLbDWtWdyf+N8ZSRTRcb11+sUOj9gZG0oqO9BnYzBA==}
     dev: false
 
   /@automerge/automerge@3.2.4:
@@ -2872,6 +2864,11 @@ packages:
       jest-util: 29.7.0
     dev: true
 
+  /fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==}
+    engines: {node: '>=18'}
+    dev: false
+
   /fast-check@4.3.0:
     resolution: {integrity: sha512-JVw/DJSxVKl8uhCb7GrwanT9VWsCIdBkK3WpP37B/Au4pyaspriSjtrY2ApbSFwTg3ViPfniT13n75PhzE7VEQ==}
     engines: {node: '>=12.17.0'}
@@ -3089,14 +3086,6 @@ packages:
 
   /isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
-
-  /isomorphic-ws@5.0.0(ws@8.18.3):
-    resolution: {integrity: sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw==}
-    peerDependencies:
-      ws: '*'
-    dependencies:
-      ws: 8.18.3
-    dev: false
 
   /istanbul-lib-coverage@3.2.2:
     resolution: {integrity: sha512-O8dpsF+r0WV/8MNRKfnmrtCWhuKjxrq2w+jpzBL5UZKTi2LeVWnWOmWRxFlesJONmc+wLAGvKQZEOanko0LFTg==}
@@ -3936,12 +3925,6 @@ packages:
       find-up: 4.1.0
     dev: true
 
-  /prettier@3.8.1:
-    resolution: {integrity: sha512-UOnG6LftzbdaHZcKoPFtOcCKztrQ57WkHDeRD9t/PTQtmT0NHSeWWepj6pS0z/N7+08BHFDQVUrfmfMRcZwbMg==}
-    engines: {node: '>=14'}
-    hasBin: true
-    dev: true
-
   /pretty-format@29.7.0:
     resolution: {integrity: sha512-Pdlw/oPxN+aXdmM9R00JVC9WVFoCLTKJvDVLgmJ+qAffBMxsV85l/Lu7sNx4zSzPyoL2euImuEwHhOXdEgNFZQ==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
@@ -4438,19 +4421,6 @@ packages:
       imurmurhash: 0.1.4
       signal-exit: 4.1.0
     dev: true
-
-  /ws@8.18.3:
-    resolution: {integrity: sha512-PEIGCY5tSlUt50cqyMXfCzX+oOPqN0vuGqWzbcJ2xvnkzkq46oOpz7dQaTDBdfICb4N14+GARUDw2XV2N4tvzg==}
-    engines: {node: '>=10.0.0'}
-    peerDependencies:
-      bufferutil: ^4.0.1
-      utf-8-validate: '>=5.0.2'
-    peerDependenciesMeta:
-      bufferutil:
-        optional: true
-      utf-8-validate:
-        optional: true
-    dev: false
 
   /xstate@5.20.1:
     resolution: {integrity: sha512-i9ZpNnm/XhCOMUxae1suT8PjYNTStZWbhmuKt4xeTPaYG5TS0Fz0i+Ka5yxoNPpaHW3VW6JIowrwFgSTZONxig==}

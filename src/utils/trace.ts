@@ -1,4 +1,4 @@
-import { out } from "./output";
+import { out } from "./output.js";
 
 /**
  * Global tracing state

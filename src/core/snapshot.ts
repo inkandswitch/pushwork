@@ -9,9 +9,9 @@ import {
   SerializableSyncSnapshot,
   SnapshotFileEntry,
   SnapshotDirectoryEntry,
-} from "../types";
-import { pathExists, ensureDirectoryExists } from "../utils";
-import { out } from "../utils/output";
+} from "../types/index.js";
+import { pathExists, ensureDirectoryExists } from "../utils/index.js";
+import { out } from "../utils/output.js";
 
 /**
  * Manages sync snapshots for local state tracking

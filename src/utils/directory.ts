@@ -4,7 +4,7 @@ import {
   parseAutomergeUrl,
   stringifyAutomergeUrl,
 } from "@automerge/automerge-repo";
-import { DirectoryDocument } from "../types";
+import { DirectoryDocument } from "../types/index.js";
 
 /**
  * Get a plain URL (without heads) from any URL.

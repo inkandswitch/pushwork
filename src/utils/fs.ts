@@ -3,9 +3,11 @@ import * as path from "path"
 import * as crypto from "crypto"
 import {glob} from "glob"
 import * as mimeTypes from "mime-types"
-import * as ignore from "ignore"
-import {FileSystemEntry, FileType} from "../types"
-import {isEnhancedTextFile} from "./mime-types"
+import ignoreModule from "ignore"
+// CJS default export compat under nodenext
+const ignore = (ignoreModule as any).default || ignoreModule
+import {FileSystemEntry, FileType} from "../types/index.js"
+import {isEnhancedTextFile} from "./mime-types.js"
 
 /**
  * Check if a path exists
@@ -152,7 +154,7 @@ function isExcluded(
 
 	// Use the ignore library which implements proper .gitignore semantics
 	// This is the same library used by ESLint and other major tools
-	const ig = ignore.default().add(excludePatterns)
+	const ig = ignore().add(excludePatterns)
 
 	return ig.ignores(relativePath)
 }
