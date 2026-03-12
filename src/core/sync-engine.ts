@@ -125,7 +125,7 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Get the appropriate URL for a directory entry.
+	 * Get the appropriate URL for a file's directory entry.
 	 * Artifact paths get versioned URLs (with heads) for exact version fetching.
 	 * Non-artifact paths get plain URLs for collaborative editing.
 	 */
@@ -133,6 +133,15 @@ export class SyncEngine {
 		if (this.isArtifactPath(filePath)) {
 			return this.getVersionedUrl(handle)
 		}
+		return getPlainUrl(handle.url)
+	}
+
+	/**
+	 * Get the appropriate URL for a subdirectory's directory entry.
+	 * Always uses plain URLs — versioned URLs on directories can cause
+	 * issues where consumers see a version without the docs array.
+	 */
+	private getDirEntryUrl(handle: DocHandle<unknown>): AutomergeUrl {
 		return getPlainUrl(handle.url)
 	}
 
@@ -224,12 +233,8 @@ export class SyncEngine {
 			result.errors.push(...commitResult.errors)
 			result.warnings.push(...commitResult.warnings)
 
-			// Touch root directory if any changes were made
-			const hasChanges =
-				result.filesChanged > 0 || result.directoriesChanged > 0
-			if (hasChanges) {
-				await this.touchRootDirectory(snapshot)
-			}
+			// Always touch root directory after commit
+			await this.touchRootDirectory(snapshot)
 
 			// Save updated snapshot
 			await this.snapshotManager.save(snapshot)
@@ -526,24 +531,7 @@ export class SyncEngine {
 						}
 					)
 
-					// Touch root directory AFTER all docs are synced and stable.
-					// This signals consumers (e.g. Patchwork) that new content is
-					// available. Because file docs are already on the server,
-					// consumers can immediately fetch them when they see the root change.
-					const hasPhase1Changes =
-						phase1Result.filesChanged > 0 || phase1Result.directoriesChanged > 0
-					if (hasPhase1Changes && snapshot.rootDirectoryUrl) {
-						await this.touchRootDirectory(snapshot)
-						const rootHandle =
-							await this.repo.find<DirectoryDocument>(
-								snapshot.rootDirectoryUrl
-							)
-						debug("sync: syncing root directory touch to server")
-						out.update("Syncing root directory update")
-						await waitForSync(
-							[rootHandle]
-						)
-					}
+					// Root directory touch + sync moved to end of sync() so it always runs
 				} catch (error) {
 					debug(`sync: network sync error: ${error}`)
 					out.taskLine(`Network sync failed: ${error}`, true)
@@ -631,7 +619,52 @@ export class SyncEngine {
 				}
 			}
 
-			// Save updated snapshot if not dry run
+			// Small pause before touching root to let everything settle
+			await new Promise(r => setTimeout(r, 100))
+			// Always touch root directory after sync completes
+			await this.touchRootDirectory(snapshot)
+			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
+				const rootHandle =
+					await this.repo.find<DirectoryDocument>(
+						snapshot.rootDirectoryUrl
+					)
+				debug("sync: syncing root directory touch to server")
+				out.update("Syncing root directory update")
+				await waitForSync(
+					[rootHandle]
+				)
+				// Wait for the touch to fully stabilize on the server
+				debug("sync: waiting for root touch to stabilize")
+				await waitForBidirectionalSync(
+					this.repo,
+					snapshot.rootDirectoryUrl,
+					{
+						timeoutMs: 5000,
+						pollIntervalMs: 100,
+						stableChecksRequired: 3,
+						handles: [rootHandle],
+					}
+				)
+				// Flush repo to ensure everything is persisted
+				await this.repo.flush()
+				// Small grace period to ensure server has flushed
+				await new Promise(r => setTimeout(r, 100))
+			}
+
+			// Update root directory snapshot heads after touch
+			const rootSnapshotEntry = snapshot.directories.get("")
+			if (rootSnapshotEntry && snapshot.rootDirectoryUrl) {
+				try {
+					const rootHandle = await this.repo.find<DirectoryDocument>(
+						getPlainUrl(snapshot.rootDirectoryUrl)
+					)
+					rootSnapshotEntry.head = rootHandle.heads()
+				} catch (error) {
+					debug(`sync: failed to update root snapshot heads after touch: ${error}`)
+				}
+			}
+
+			// Save updated snapshot
 			await this.snapshotManager.save(snapshot)
 
 			result.success = result.errors.length === 0
@@ -869,7 +902,7 @@ export class SyncEngine {
 							)
 						subdirUpdates.push({
 							name: childName,
-							url: this.getEntryUrl(childHandle, modifiedDir),
+							url: this.getDirEntryUrl(childHandle),
 						})
 					}
 				}
@@ -1369,7 +1402,7 @@ export class SyncEngine {
 						this.handlesByPath.set(directoryPath, childDirHandle)
 
 						// Get appropriate URL for directory entry
-						const entryUrl = this.getEntryUrl(childDirHandle, directoryPath)
+						const entryUrl = this.getDirEntryUrl(childDirHandle)
 
 						// Update snapshot with discovered directory
 						this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
@@ -1400,7 +1433,7 @@ export class SyncEngine {
 		const dirHandle = this.repo.create(dirDoc)
 
 		// Get appropriate URL for directory entry
-		const dirEntryUrl = this.getEntryUrl(dirHandle, directoryPath)
+		const dirEntryUrl = this.getDirEntryUrl(dirHandle)
 
 		// Add this directory to its parent
 		// Use plain URL for mutable handle
@@ -1732,14 +1765,17 @@ export class SyncEngine {
 				snapshot.rootDirectoryUrl
 			)
 
-			const snapshotEntry = snapshot.directories.get("")
-			const heads = snapshotEntry?.head
-
 			const timestamp = Date.now()
 
-			const version = require("../../package.json").version
+			let version: string
+			try {
+				version = require("../../package.json").version
+			} catch {
+				version = "unknown"
+			}
 
-			changeWithOptionalHeads(rootHandle, heads, (doc: DirectoryDocument) => {
+			debug(`touchRootDirectory: setting lastSyncAt=${timestamp} with=pushwork@${version}`)
+			rootHandle.change((doc: DirectoryDocument) => {
 				doc.lastSyncAt = timestamp
 				doc.with = `pushwork@${version}`
 			})
@@ -1747,11 +1783,12 @@ export class SyncEngine {
 			// Track root directory for network sync
 			this.handlesByPath.set("", rootHandle)
 
+			const snapshotEntry = snapshot.directories.get("")
 			if (snapshotEntry) {
 				snapshotEntry.head = rootHandle.heads()
 			}
 		} catch (error) {
-			// Failed to update root directory timestamp
+			debug(`touchRootDirectory: failed: ${error}`)
 		}
 	}
 
