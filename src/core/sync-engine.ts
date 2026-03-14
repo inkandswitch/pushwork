@@ -125,7 +125,7 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Get the appropriate URL for a directory entry.
+	 * Get the appropriate URL for a file's directory entry.
 	 * Artifact paths get versioned URLs (with heads) for exact version fetching.
 	 * Non-artifact paths get plain URLs for collaborative editing.
 	 */
@@ -133,6 +133,15 @@ export class SyncEngine {
 		if (this.isArtifactPath(filePath)) {
 			return this.getVersionedUrl(handle)
 		}
+		return getPlainUrl(handle.url)
+	}
+
+	/**
+	 * Get the appropriate URL for a subdirectory's directory entry.
+	 * Always uses plain URLs — versioned URLs on directories can cause
+	 * issues where consumers see a version without the docs array.
+	 */
+	private getDirEntryUrl(handle: DocHandle<unknown>): AutomergeUrl {
 		return getPlainUrl(handle.url)
 	}
 
@@ -224,12 +233,8 @@ export class SyncEngine {
 			result.errors.push(...commitResult.errors)
 			result.warnings.push(...commitResult.warnings)
 
-			// Touch root directory if any changes were made
-			const hasChanges =
-				result.filesChanged > 0 || result.directoriesChanged > 0
-			if (hasChanges) {
-				await this.touchRootDirectory(snapshot)
-			}
+			// Always touch root directory after commit
+			await this.touchRootDirectory(snapshot)
 
 			// Save updated snapshot
 			await this.snapshotManager.save(snapshot)
@@ -874,7 +879,7 @@ export class SyncEngine {
 							)
 						subdirUpdates.push({
 							name: childName,
-							url: this.getEntryUrl(childHandle, modifiedDir),
+							url: this.getDirEntryUrl(childHandle),
 						})
 					}
 				}
@@ -1374,7 +1379,7 @@ export class SyncEngine {
 						this.handlesByPath.set(directoryPath, childDirHandle)
 
 						// Get appropriate URL for directory entry
-						const entryUrl = this.getEntryUrl(childDirHandle, directoryPath)
+						const entryUrl = this.getDirEntryUrl(childDirHandle)
 
 						// Update snapshot with discovered directory
 						this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
@@ -1405,7 +1410,7 @@ export class SyncEngine {
 		const dirHandle = this.repo.create(dirDoc)
 
 		// Get appropriate URL for directory entry
-		const dirEntryUrl = this.getEntryUrl(dirHandle, directoryPath)
+		const dirEntryUrl = this.getDirEntryUrl(dirHandle)
 
 		// Add this directory to its parent
 		// Use plain URL for mutable handle
