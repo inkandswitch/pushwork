@@ -61,6 +61,64 @@ function changeWithOptionalHeads<T>(
 }
 
 /**
+ * Nuke an artifact directory's docs array and rebuild it from scratch.
+ * Entries must be spread into plain objects — pushing Automerge proxy objects
+ * back after splicing them out throws "Cannot create a reference to an
+ * existing document object".
+ */
+export function nukeAndRebuildDocs(
+	doc: DirectoryDocument,
+	dirPath: string,
+	newEntries: {name: string; url: AutomergeUrl}[],
+	updatedEntries: {name: string; url: AutomergeUrl}[],
+	deletedNames: string[],
+	subdirUpdates: {name: string; url: AutomergeUrl}[],
+): void {
+	const deletedSet = new Set(deletedNames)
+	const updatedMap = new Map(updatedEntries.map(e => [e.name, e.url]))
+	const newMap = new Map(newEntries.map(e => [e.name, e.url]))
+	const subdirMap = new Map(subdirUpdates.map(e => [e.name, e.url]))
+
+	const kept: DirectoryEntry[] = []
+	for (const entry of doc.docs) {
+		if (entry.type === "file" && deletedSet.has(entry.name)) {
+			out.taskLine(
+				`Removed ${entry.name} from ${
+					formatRelativePath(dirPath) || "root"
+				}`
+			)
+			continue
+		}
+		if (entry.type === "file" && updatedMap.has(entry.name)) {
+			kept.push({...entry, url: updatedMap.get(entry.name)!})
+			continue
+		}
+		if (entry.type === "file" && newMap.has(entry.name)) {
+			// Existing entry being re-added (e.g. from immutable string replacement)
+			kept.push({...entry, url: newMap.get(entry.name)!})
+			newMap.delete(entry.name)
+			continue
+		}
+		if (entry.type === "folder" && subdirMap.has(entry.name)) {
+			kept.push({...entry, url: subdirMap.get(entry.name)!})
+			continue
+		}
+		kept.push({...entry})
+	}
+
+	// Add genuinely new file entries
+	for (const [name, url] of newMap) {
+		kept.push({name, type: "file", url})
+	}
+
+	// Nuke and rebuild
+	doc.docs.splice(0, doc.docs.length)
+	for (const entry of kept) {
+		doc.docs.push(entry)
+	}
+}
+
+/**
  * Sync configuration constants
  */
 const BIDIRECTIONAL_SYNC_TIMEOUT_MS = 5000 // Timeout for bidirectional sync stability check
@@ -1555,53 +1613,10 @@ export class SyncEngine {
 		if (this.isArtifactPath(dirPath)) {
 			// Artifact directories are always nuked: rebuild docs array from scratch
 			// using a plain change() to avoid changeAt forking from stale heads.
-			const deletedSet = new Set(deletedNames)
-			const updatedMap = new Map(updatedEntries.map(e => [e.name, e.url]))
-			const newMap = new Map(newEntries.map(e => [e.name, e.url]))
-			const subdirMap = new Map(subdirUpdates.map(e => [e.name, e.url]))
-
 			dirHandle.change((doc: DirectoryDocument) => {
 				if (!doc.name) doc.name = dirName
 				if (!doc.title) doc.title = dirName
-
-				// Collect desired entries from current state + changes
-				const kept: DirectoryEntry[] = []
-				for (const entry of doc.docs) {
-					if (entry.type === "file" && deletedSet.has(entry.name)) {
-						out.taskLine(
-							`Removed ${entry.name} from ${
-								formatRelativePath(dirPath) || "root"
-							}`
-						)
-						continue
-					}
-					if (entry.type === "file" && updatedMap.has(entry.name)) {
-						kept.push({...entry, url: updatedMap.get(entry.name)!})
-						continue
-					}
-					if (entry.type === "file" && newMap.has(entry.name)) {
-						// Existing entry being re-added (e.g. from immutable string replacement)
-						kept.push({...entry, url: newMap.get(entry.name)!})
-						newMap.delete(entry.name)
-						continue
-					}
-					if (entry.type === "folder" && subdirMap.has(entry.name)) {
-						kept.push({...entry, url: subdirMap.get(entry.name)!})
-						continue
-					}
-					kept.push(entry)
-				}
-
-				// Add genuinely new file entries
-				for (const [name, url] of newMap) {
-					kept.push({name, type: "file", url})
-				}
-
-				// Nuke and rebuild
-				doc.docs.splice(0, doc.docs.length)
-				for (const entry of kept) {
-					doc.docs.push(entry)
-				}
+				nukeAndRebuildDocs(doc, dirPath, newEntries, updatedEntries, deletedNames, subdirUpdates)
 			})
 		} else {
 			changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
