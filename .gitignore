@@ -86,3 +86,9 @@ pids/
 # Optional stylelint cache
 .stylelintcache 
 .claude
+
+# Nix
+result
+
+# pnpm store
+.pnpm-store/

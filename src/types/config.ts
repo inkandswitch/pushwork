@@ -6,6 +6,7 @@ import { StorageId } from "@automerge/automerge-repo";
 export const DEFAULT_SYNC_SERVER = "wss://sync3.automerge.org";
 export const DEFAULT_SYNC_SERVER_STORAGE_ID =
   "3760df37-a4c6-4f66-9ecd-732039a9385d" as StorageId;
+export const DEFAULT_SUBDUCTION_SERVER = "wss://subduction.sync.inkandswitch.com";
 
 /**
  * Global configuration options
@@ -42,6 +43,7 @@ export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
   syncServer?: string; // Custom sync server URL
   syncServerStorageId?: StorageId; // Custom sync server storage ID
+  sub?: boolean;
 }
 
 /**
@@ -52,6 +54,7 @@ export interface SyncOptions extends CommandOptions {
   nuclear?: boolean;
   gentle?: boolean;
   dryRun?: boolean;
+  sub?: boolean;
 }
 
 /**
@@ -83,6 +86,7 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
+  sub?: boolean;
 }
 
 /**
@@ -108,4 +112,5 @@ export interface StatusOptions extends CommandOptions {
 export interface WatchOptions extends CommandOptions {
   script?: string; // Script to run before syncing
   watchDir?: string; // Directory to watch (relative to working dir)
+  sub?: boolean;
 }

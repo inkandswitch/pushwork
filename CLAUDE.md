@@ -136,3 +136,38 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 - **Server load.** `enableRemoteHeadsGossiping` is disabled — pushwork syncs directly with the server so the gossip protocol is unnecessary overhead. `waitForSync` processes documents in batches of 10 (`SYNC_BATCH_SIZE`) to avoid flooding the server with concurrent sync messages. Without batching, syncing 100+ documents simultaneously can overwhelm the sync server (which is single-threaded with no backpressure).
 - **`waitForBidirectionalSync` on large trees.** Full tree traversal (`getAllDocumentHeads`) is expensive because it `repo.find()`s every document. For post-push stabilization, pass the `handles` option to only check documents that actually changed. The initial pre-pull call still needs the full scan to discover remote changes. The dynamic timeout adds the first scan's duration on top of the base timeout, since the first scan is just establishing baseline — its duration shouldn't count against stability-wait time.
 - **Versioned URLs and `repo.find()`.** `repo.find(versionedUrl)` returns a view handle whose `.heads()` returns the VERSION heads, not the current document heads. Always use `getPlainUrl()` when you need the current/mutable state. The snapshot head update loop at the end of `sync()` must use `getPlainUrl(snapshotEntry.url)` — without this, artifact directories (which store versioned URLs) get stale heads written to the snapshot, causing `changeAt()` to fork from the wrong point on the next sync. This was the root cause of the artifact deletion resurrection bug: `batchUpdateDirectory` would `changeAt` from an empty directory state where the file entry didn't exist yet, so the splice found nothing to delete.
+
+## Subduction sync backend (`--sub`)
+
+The `--sub` flag switches from the default WebSocket sync adapter to the Subduction backend built into `automerge-repo@2.6.0-subduction.8`. The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
+
+### How it works
+
+- `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. When `sub: true`, passes `subductionWebsocketEndpoints: [syncServer]` and `periodicSyncInterval: 2000` (CLI needs fast sync, not the default 30s). When `sub: false`, uses the traditional WebSocket network adapter instead.
+- Default server: `wss://subduction.sync.inkandswitch.com` (vs `wss://sync3.automerge.org` for WebSocket)
+- `network-sync.ts`: When no `StorageId` is provided (Subduction mode), `waitForSync` falls back to head-stability polling (3 consecutive stable checks at 100ms intervals) instead of `getSyncInfo`-based verification
+- `sync-engine.ts`: In sub mode, skips `recreateFailedDocuments` — SubductionSource has its own heal-sync retry logic
+- Everything else (push/pull phases, artifact handling, `nukeAndRebuildDocs`, change detection) is identical
+
+### Wasm initialization
+
+As of `automerge-repo@2.6.0-subduction.8`, the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the default WebSocket path.
+
+`repo-factory.ts` uses a `new Function("specifier", "return import(specifier)")` wrapper to perform _real_ ESM `import()` calls that Node.js evaluates as ESM. This is necessary because TypeScript with `"module": "commonjs"` compiles `await import("x")` to `require("x")`, which resolves CJS entries. The CJS and ESM module graphs have separate Wasm instances, so initializing via CJS `require()` doesn't help the ESM `/slim` imports inside `automerge-repo`. The `new Function` trick bypasses tsc's transformation and shares the same ESM module graph as the Repo's internal imports.
+
+The Repo class itself is also loaded via this ESM dynamic import (cached after first call) so that `new Repo()` sees the initialized Wasm module.
+
+### Packaging notes
+
+- `automerge-repo@2.6.0-subduction.8` correctly pins `@automerge/automerge-subduction@0.6.4` — no pnpm override needed (unlike subduction.7 which required an override to fix a version mismatch).
+- `RepoConfig` now properly types all Subduction options (`subductionWebsocketEndpoints`, `periodicSyncInterval`, `batchSyncInterval`, `signer`, `subductionPolicy`, `subductionAdapters`) — no `as any` cast needed.
+- The `automerge-repo-network-websocket` adapter's `NetworkAdapter` types are slightly behind the repo's `NetworkAdapterInterface` (missing `state()` method in declarations). The adapter works at runtime; the type mismatch is worked around with `as unknown as NetworkAdapterInterface`.
+- New `"heal-exhausted"` event on Repo fires when self-healing sync gives up after all retry attempts for a document. Not currently used by pushwork but available for better error reporting.
+
+### Adding a new CLI flag pattern
+
+Adding `--sub` to a command requires changes in 4 places:
+1. `src/types/config.ts` — add `sub?: boolean` to the options interface
+2. `src/cli.ts` — add `.option("--sub", "...", false)` and pass through in `.action()`
+3. `src/commands.ts` — extract `options.sub`, pass to `setupCommandContext`/`initializeRepository` and `syncEngine.sync({ sub })`
+4. No sync-engine changes needed (it reads `sub` from the options arg to `sync()`)

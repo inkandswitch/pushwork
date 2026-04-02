@@ -18,6 +18,7 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
+import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
@@ -42,7 +43,8 @@ interface CommandContext {
  */
 async function initializeRepository(
   resolvedPath: string,
-  overrides: Partial<DirectoryConfig>
+  overrides: Partial<DirectoryConfig>,
+  sub: boolean = false
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
   // Create .pushwork directory structure
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
@@ -53,8 +55,13 @@ async function initializeRepository(
   const configManager = new ConfigManager(resolvedPath);
   const config = await configManager.initializeWithOverrides(overrides);
 
+  // Override sync server for Subduction mode
+  if (sub && !overrides.sync_server) {
+    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+  }
+
   // Create repository and sync engine
-  const repo = await createRepo(resolvedPath, config);
+  const repo = await createRepo(resolvedPath, config, sub);
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
   return { config, repo, syncEngine };
@@ -66,9 +73,10 @@ async function initializeRepository(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  options?: { syncEnabled?: boolean; forceDefaults?: boolean }
+  options?: { syncEnabled?: boolean; forceDefaults?: boolean; sub?: boolean }
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
+  const sub = options?.sub ?? false;
 
   // Check if initialized
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
@@ -98,8 +106,13 @@ async function setupCommandContext(
     config = { ...config, sync_enabled: options.syncEnabled };
   }
 
+  // Override sync server for Subduction mode
+  if (sub) {
+    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+  }
+
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config);
+  const repo = await createRepo(resolvedPath, config, sub);
 
   // Create sync engine
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
@@ -170,10 +183,11 @@ export async function init(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
+  const sub = options.sub ?? false;
   const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
     sync_server: options.syncServer,
     sync_server_storage_id: options.syncServerStorageId,
-  });
+  }, sub);
 
   // Create new root directory document
   out.update("Creating root directory");
@@ -190,9 +204,9 @@ export async function init(
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
 
   // Wait for root document to sync to server if sync is enabled
-  // This ensures the document is uploaded before we exit
-  // waitForSync() verifies the server has the document by comparing local and remote heads
-  if (config.sync_enabled && config.sync_server_storage_id) {
+  // With Subduction, we skip StorageId-based sync verification —
+  // the SubductionSource handles sync internally.
+  if (config.sync_enabled && !sub && config.sync_server_storage_id) {
     out.update("Syncing to server");
     const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
     if (failed.length > 0) {
@@ -203,7 +217,7 @@ export async function init(
 
   // Run initial sync to capture existing files
   out.update("Running initial sync");
-  const result = await syncEngine.sync();
+  const result = await syncEngine.sync({ sub });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -232,8 +246,10 @@ export async function sync(
       : "Syncing"
   );
 
+  const sub = options.sub ?? false;
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
     forceDefaults: !options.gentle,
+    sub,
   });
 
   if (options.nuclear) {
@@ -286,7 +302,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await syncEngine.sync();
+    const result = await syncEngine.sync({ sub });
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo);
@@ -612,18 +628,20 @@ export async function clone(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
+  const sub = options.sub ?? false;
   const { config, repo, syncEngine } = await initializeRepository(
     resolvedPath,
     {
       sync_server: options.syncServer,
       sync_server_storage_id: options.syncServerStorageId,
-    }
+    },
+    sub
   );
 
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-  const result = await syncEngine.sync();
+  const result = await syncEngine.sync({ sub });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -838,8 +856,10 @@ export async function watch(
   const script = options.script || "pnpm build";
   const watchDir = options.watchDir || "src"; // Default to watching 'src' directory
   const verbose = options.verbose || false;
+  const sub = options.sub ?? false;
   const { repo, syncEngine, workingDir } = await setupCommandContext(
-    targetPath
+    targetPath,
+    { sub }
   );
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
@@ -894,7 +914,7 @@ export async function watch(
 
       // Run sync
       out.task("Syncing");
-      const result = await syncEngine.sync();
+      const result = await syncEngine.sync({ sub });
 
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {

@@ -423,7 +423,7 @@ export class SyncEngine {
 	/**
 	 * Run full bidirectional sync
 	 */
-	async sync(): Promise<SyncResult> {
+	async sync(options?: {sub?: boolean}): Promise<SyncResult> {
 		const result: SyncResult = {
 			success: false,
 			filesChanged: 0,
@@ -482,7 +482,6 @@ export class SyncEngine {
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
-						this.config.sync_server_storage_id,
 						{
 							timeoutMs: 5000, // Increased timeout for initial sync
 							pollIntervalMs: 100,
@@ -526,6 +525,12 @@ export class SyncEngine {
 
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
+				const sub = options?.sub ?? false
+				// In Subduction mode, pass no StorageId so waitForSync
+				// falls back to head-stability polling. In WebSocket mode,
+				// pass the StorageId for precise getSyncInfo-based verification.
+				const storageId = sub ? undefined : this.config.sync_server_storage_id
+
 				try {
 					// Ensure root directory handle is tracked for sync
 					if (snapshot.rootDirectoryUrl) {
@@ -546,11 +551,13 @@ export class SyncEngine {
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
 						const {failed} = await waitForSync(
 							allHandles,
-							this.config.sync_server_storage_id
+							storageId
 						)
 
-						// Recreate failed documents and retry once
-						if (failed.length > 0) {
+						// Recreate failed documents and retry once.
+						// Skip in Subduction mode — SubductionSource has its
+						// own heal-sync retry logic.
+						if (failed.length > 0 && !sub) {
 							debug(`sync: ${failed.length} documents failed, recreating`)
 							out.update(`Recreating ${failed.length} failed documents`)
 							const retryHandles = await this.recreateFailedDocuments(failed, snapshot)
@@ -559,7 +566,7 @@ export class SyncEngine {
 								out.update(`Retrying ${retryHandles.length} recreated documents`)
 								const retry = await waitForSync(
 									retryHandles,
-									this.config.sync_server_storage_id
+									storageId
 								)
 								if (retry.failed.length > 0) {
 									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
@@ -572,6 +579,9 @@ export class SyncEngine {
 									})
 								}
 							}
+						} else if (failed.length > 0 && sub) {
+							debug(`sync: ${failed.length} documents timed out in sub mode (SubductionSource will retry)`)
+							out.taskLine(`${failed.length} documents still syncing (Subduction will retry)`, true)
 						}
 
 						debug("sync: all handles synced to server")
@@ -585,7 +595,6 @@ export class SyncEngine {
 					await waitForBidirectionalSync(
 						this.repo,
 						snapshot.rootDirectoryUrl,
-						this.config.sync_server_storage_id,
 						{
 							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
 							pollIntervalMs: 100,
@@ -610,7 +619,7 @@ export class SyncEngine {
 						out.update("Syncing root directory update")
 						await waitForSync(
 							[rootHandle],
-							this.config.sync_server_storage_id
+							storageId
 						)
 					}
 				} catch (error) {
