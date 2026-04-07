@@ -23,7 +23,7 @@ const dynamicImport = new Function("specifier", "return import(specifier)") as (
 /**
  * Initialize the Subduction Wasm module and return the Repo constructor.
  *
- * As of automerge-repo 2.6.0-subduction.8, the Repo constructor always
+ * As of automerge-repo 2.6.0-subduction.9, the Repo constructor always
  * creates a SubductionSource internally (even without endpoints), which
  * imports from @automerge/automerge-subduction/slim. The /slim entry does
  * NOT auto-init the Wasm — we must do it before any Repo construction.
