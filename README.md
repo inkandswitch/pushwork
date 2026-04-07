@@ -99,6 +99,16 @@ pushwork url
 
 **`checkout <sync-id> [path]`** - Restore to previous sync _(not yet implemented)_
 
+### Dev Mode
+
+The `--dev` global flag uses `.pushwork/local-dev/` instead of `.pushwork/`, giving you a separate Automerge URL for local development.
+
+```bash
+pushwork --dev init        # Create dev config with a new URL
+pushwork --dev sync        # Sync to the dev URL
+pushwork --dev watch       # Watch, build, and sync to dev URL
+```
+
 ## Configuration
 
 Configuration is stored in `.pushwork/config.json`:

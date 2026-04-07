@@ -18,7 +18,11 @@ export class ConfigManager {
 
   static readonly CONFIG_DIR = ".pushwork";
 
-  constructor(private workingDir?: string) {}
+  readonly configDir: string;
+
+  constructor(private workingDir?: string, configDir: string = ".pushwork") {
+    this.configDir = configDir;
+  }
 
   /**
    * Get global configuration path
@@ -40,7 +44,7 @@ export class ConfigManager {
     }
     return path.join(
       this.workingDir,
-      ConfigManager.CONFIG_DIR,
+      this.configDir,
       ConfigManager.CONFIG_FILENAME
     );
   }

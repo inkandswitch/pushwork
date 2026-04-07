@@ -9,9 +9,10 @@ import { DirectoryConfig } from "../types";
  */
 export async function createRepo(
   workingDir: string,
-  config: DirectoryConfig
+  config: DirectoryConfig,
+  configDir: string = ".pushwork"
 ): Promise<Repo> {
-  const syncToolDir = path.join(workingDir, ".pushwork");
+  const syncToolDir = path.join(workingDir, configDir);
   const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
 
   const repoConfig: any = { storage };

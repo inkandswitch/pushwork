@@ -138,10 +138,11 @@ export class SyncEngine {
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
-		config: DirectoryConfig
+		config: DirectoryConfig,
+		configDir: string = ".pushwork"
 	) {
 		this.config = config
-		this.snapshotManager = new SnapshotManager(rootPath)
+		this.snapshotManager = new SnapshotManager(rootPath, configDir)
 		this.changeDetector = new ChangeDetector(
 			repo,
 			rootPath,

@@ -24,7 +24,13 @@ const version = require("../package.json").version;
 const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(version, "-V, --version", "output the version number");
+  .version(version, "-V, --version", "output the version number")
+  .option("--dev", "Use .pushwork/local-dev directory for development", false);
+
+/** Derive the config directory from the global --dev flag */
+function getConfigDir(): string {
+  return program.opts().dev ? ".pushwork/local-dev" : ".pushwork";
+}
 
 // Init command
 program
@@ -43,12 +49,12 @@ program
     const [syncServer, syncServerStorageId] = validateSyncServer(
       opts.syncServer
     );
-    await init(path, { syncServer, syncServerStorageId });
+    await init(path, { syncServer, syncServerStorageId }, getConfigDir());
   });
 
 // Track command (set root directory URL without full initialization)
 const trackAction = async (url: string, path: string, opts: { force: boolean }) => {
-  await root(url, path, { force: opts.force });
+  await root(url, path, { force: opts.force }, getConfigDir());
 };
 
 program
@@ -102,7 +108,7 @@ program
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
-    });
+    }, getConfigDir());
   });
 
 // Commit command
@@ -115,7 +121,7 @@ program
     "."
   )
   .action(async (path, _opts) => {
-    await commit(path);
+    await commit(path, {}, getConfigDir());
   });
 
 // Sync command
@@ -151,7 +157,7 @@ program
       gentle: opts.gentle,
       nuclear: opts.nuclear,
       verbose: opts.verbose,
-    });
+    }, getConfigDir());
   });
 
 // Diff command
@@ -167,7 +173,7 @@ program
   .action(async (path, opts) => {
     await diff(path, {
       nameOnly: opts.nameOnly,
-    });
+    }, getConfigDir());
   });
 
 // Status command
@@ -183,7 +189,7 @@ program
   .action(async (path, opts) => {
     await status(path, {
       verbose: opts.verbose,
-    });
+    }, getConfigDir());
   });
 
 // Log command
@@ -203,7 +209,7 @@ program
       oneline: opts.oneline,
       since: opts.since,
       limit: parseInt(opts.limit),
-    });
+    }, getConfigDir());
   });
 
 // Checkout command
@@ -224,7 +230,7 @@ program
   .action(async (syncId, path, opts) => {
     await checkout(syncId, path, {
       force: opts.force,
-    });
+    }, getConfigDir());
   });
 
 // URL command
@@ -233,7 +239,7 @@ program
   .summary("Show the Automerge root URL")
   .argument("[path]", "Directory path (default: current directory)", ".")
   .action(async (path) => {
-    await url(path);
+    await url(path, getConfigDir());
   });
 
 // Remove command
@@ -242,7 +248,7 @@ program
   .summary("Remove local pushwork data")
   .argument("[path]", "Directory path (default: current directory)", ".")
   .action(async (path) => {
-    await rm(path);
+    await rm(path, getConfigDir());
   });
 
 // List command
@@ -254,7 +260,7 @@ program
   .action(async (path, opts) => {
     await ls(path, {
       verbose: opts.verbose,
-    });
+    }, getConfigDir());
   });
 
 // Config command
@@ -271,7 +277,7 @@ program
     await config(path, {
       list: opts.list,
       get: opts.get,
-    });
+    }, getConfigDir());
   });
 
 // Watch command
@@ -299,7 +305,7 @@ program
       script: opts.script,
       watchDir: opts.dir,
       verbose: opts.verbose,
-    });
+    }, getConfigDir());
   });
 
 // Completion command (hidden from help)
@@ -361,11 +367,11 @@ program.command("completion", { hidden: true }).action(() => {
 _pushwork() {
   local -a commands
   commands=(${commands})
-  
+
   _arguments -C \\
     '1: :->command' \\
     '*::arg:->args'
-  
+
   case $state in
     command)
       _describe 'command' commands

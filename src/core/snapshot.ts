@@ -18,15 +18,17 @@ import { out } from "../utils/output";
  */
 export class SnapshotManager {
   private static readonly SNAPSHOT_FILENAME = "snapshot.json";
-  private static readonly SYNC_TOOL_DIR = ".pushwork";
+  private readonly syncToolDir: string;
 
-  constructor(private rootPath: string) {}
+  constructor(private rootPath: string, configDir: string = ".pushwork") {
+    this.syncToolDir = configDir;
+  }
 
   /**
    * Get path to sync tool directory
    */
   private getSyncToolDir(): string {
-    return path.join(this.rootPath, SnapshotManager.SYNC_TOOL_DIR);
+    return path.join(this.rootPath, this.syncToolDir);
   }
 
   /**
