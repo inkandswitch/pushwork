@@ -207,6 +207,11 @@ export class SyncEngine {
 	/**
 	 * Set the root directory URL in the snapshot
 	 */
+	async getRootDirectoryUrl(): Promise<AutomergeUrl | undefined> {
+		const snapshot = await this.snapshotManager.load()
+		return snapshot?.rootDirectoryUrl
+	}
+
 	async setRootDirectoryUrl(url: AutomergeUrl): Promise<void> {
 		let snapshot = await this.snapshotManager.load()
 		if (!snapshot) {

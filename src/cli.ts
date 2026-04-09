@@ -146,7 +146,6 @@ program
     false
   )
   .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
-  .option("--sub", "Use Subduction sync backend", false)
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
     await sync(path, {
@@ -154,7 +153,6 @@ program
       force: opts.force,
       gentle: opts.gentle,
       nuclear: opts.nuclear,
-      sub: opts.sub,
       verbose: opts.verbose,
     });
   });
@@ -298,13 +296,11 @@ program
     "Directory to watch for changes (relative to working directory)",
     "src"
   )
-  .option("--sub", "Use Subduction sync backend", false)
   .option("-v, --verbose", "Show build script output", false)
   .action(async (path, opts) => {
     await watch(path, {
       script: opts.script,
       watchDir: opts.dir,
-      sub: opts.sub,
       verbose: opts.verbose,
     });
   });

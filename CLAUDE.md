@@ -164,10 +164,10 @@ The Repo class itself is also loaded via this ESM dynamic import (cached after f
 - The `automerge-repo-network-websocket` adapter's `NetworkAdapter` types are slightly behind the repo's `NetworkAdapterInterface` (missing `state()` method in declarations). The adapter works at runtime; the type mismatch is worked around with `as unknown as NetworkAdapterInterface`.
 - New `"heal-exhausted"` event on Repo fires when self-healing sync gives up after all retry attempts for a document. Not currently used by pushwork but available for better error reporting.
 
-### Adding a new CLI flag pattern
+### Subduction mode persistence
 
-Adding `--sub` to a command requires changes in 4 places:
-1. `src/types/config.ts` — add `sub?: boolean` to the options interface
-2. `src/cli.ts` — add `.option("--sub", "...", false)` and pass through in `.action()`
-3. `src/commands.ts` — extract `options.sub`, pass to `setupCommandContext`/`initializeRepository` and `syncEngine.sync({ sub })`
-4. No sync-engine changes needed (it reads `sub` from the options arg to `sync()`)
+`--sub` is only accepted on `init` and `clone`. It persists `subduction: true` in `.pushwork/config.json`. All subsequent commands (`sync`, `watch`, etc.) read it from config via `config.subduction ?? false`. The force-defaults path in `setupCommandContext` preserves `subduction` alongside `root_directory_url`.
+
+When Subduction mode is active, commands print a banner: "Using Subduction sync backend (from config)".
+
+Every `sync` run prints the root Automerge URL at the end.

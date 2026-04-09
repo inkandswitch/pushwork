@@ -26,6 +26,7 @@ export interface GlobalConfig {
  */
 export interface DirectoryConfig extends GlobalConfig {
   root_directory_url?: string;
+  subduction?: boolean;
   sync_enabled: boolean;
 }
 
@@ -54,7 +55,6 @@ export interface SyncOptions extends CommandOptions {
   nuclear?: boolean;
   gentle?: boolean;
   dryRun?: boolean;
-  sub?: boolean;
 }
 
 /**
@@ -112,5 +112,4 @@ export interface StatusOptions extends CommandOptions {
 export interface WatchOptions extends CommandOptions {
   script?: string; // Script to run before syncing
   watchDir?: string; // Directory to watch (relative to working dir)
-  sub?: boolean;
 }
