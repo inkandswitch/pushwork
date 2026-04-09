@@ -153,6 +153,8 @@ The `--sub` flag switches from the default WebSocket sync adapter to the Subduct
 
 As of `automerge-repo@2.6.0-subduction.9`, the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the default WebSocket path.
 
+`automerge-repo` exports `initSubduction()` which dynamically imports `@automerge/automerge-subduction` (the non-`/slim` entry that auto-inits Wasm). Pushwork calls this via `repoMod.initSubduction()` after loading the Repo module — no direct dependency on `@automerge/automerge-subduction` is needed.
+
 `repo-factory.ts` uses a `new Function("specifier", "return import(specifier)")` wrapper to perform _real_ ESM `import()` calls that Node.js evaluates as ESM. This is necessary because TypeScript with `"module": "commonjs"` compiles `await import("x")` to `require("x")`, which resolves CJS entries. The CJS and ESM module graphs have separate Wasm instances, so initializing via CJS `require()` doesn't help the ESM `/slim` imports inside `automerge-repo`. The `new Function` trick bypasses tsc's transformation and shares the same ESM module graph as the Repo's internal imports.
 
 The Repo class itself is also loaded via this ESM dynamic import (cached after first call) so that `new Repo()` sees the initialized Wasm module.
@@ -171,3 +173,9 @@ The Repo class itself is also loaded via this ESM dynamic import (cached after f
 When Subduction mode is active, commands print a banner: "Using Subduction sync backend (from config)".
 
 Every `sync` run prints the root Automerge URL at the end.
+
+### Corrupt storage recovery
+
+`repo-factory.ts` scans `.pushwork/automerge/` for 0-byte files before creating the Repo. These indicate incomplete writes from a previous run (process exited before storage flushed). If any are found, the entire automerge cache is wiped and recreated — data will re-download from the sync server. The snapshot (`.pushwork/snapshot.json`) is preserved so all document URLs are retained.
+
+This is a safety net for the Subduction `HydrationError: LooseCommit too short` crash. The upstream fix (`Repo.shutdown()` now calls `flush()` and `SubductionSource.shutdown()` awaits pending writes) prevents the corruption from happening in the first place, but edge cases (SIGKILL, OOM, power loss) can still produce 0-byte files.

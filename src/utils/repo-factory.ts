@@ -1,5 +1,6 @@
 import { type Repo, type RepoConfig, type NetworkAdapterInterface } from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
+import * as fs from "fs/promises";
 import * as path from "path";
 import { DirectoryConfig } from "../types";
 
@@ -23,28 +24,56 @@ const dynamicImport = new Function("specifier", "return import(specifier)") as (
 /**
  * Initialize the Subduction Wasm module and return the Repo constructor.
  *
- * As of automerge-repo 2.6.0-subduction.9, the Repo constructor always
- * creates a SubductionSource internally (even without endpoints), which
- * imports from @automerge/automerge-subduction/slim. The /slim entry does
- * NOT auto-init the Wasm — we must do it before any Repo construction.
+ * The Repo constructor calls set_subduction_logger() and new MemorySigner()
+ * from @automerge/automerge-subduction/slim, which require the Wasm module
+ * to be initialized first. automerge-repo exports initSubduction() to
+ * handle this — it dynamically imports the non-/slim entry (which
+ * auto-initializes the Wasm as a side effect).
  *
- * Both the subduction init and the Repo must be loaded via ESM dynamic
- * import() so they share the same module graph.
+ * Both the Repo and initSubduction must be loaded via ESM dynamic import()
+ * so they share the same module graph as the Repo's internal /slim imports.
  */
 let cachedRepoClass: typeof Repo | undefined;
 
 async function getRepoClass(): Promise<typeof Repo> {
   if (cachedRepoClass) return cachedRepoClass;
 
-  // Initialize Subduction Wasm — the ESM node entry calls initSync
-  // on the same Wasm module that /slim re-exports from.
-  await dynamicImport("@automerge/automerge-subduction");
-
-  // Import Repo from the same ESM module graph so its internal /slim
-  // import sees the initialized Wasm.
+  // Import Repo and initialize Subduction Wasm via automerge-repo's
+  // initSubduction() helper. This must happen before new Repo() because
+  // the constructor calls set_subduction_logger() and new MemorySigner()
+  // which require the Wasm module to be ready.
+  //
+  // Both imports use the ESM dynamic import wrapper so they share the
+  // same module graph as the Repo's internal /slim imports.
   const repoMod = await dynamicImport("@automerge/automerge-repo");
+  await repoMod.initSubduction();
   cachedRepoClass = repoMod.Repo as typeof Repo;
   return cachedRepoClass;
+}
+
+/**
+ * Scan a directory tree for 0-byte files, which indicate incomplete writes
+ * from a previous run (process exited before storage flushed). Returns true
+ * if any are found.
+ */
+async function hasCorruptStorage(dir: string): Promise<boolean> {
+  try {
+    await fs.access(dir);
+  } catch {
+    return false;
+  }
+
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (await hasCorruptStorage(fullPath)) return true;
+    } else if (entry.isFile()) {
+      const stat = await fs.stat(fullPath);
+      if (stat.size === 0) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -66,7 +95,18 @@ export async function createRepo(
   const RepoClass = await getRepoClass();
 
   const syncToolDir = path.join(workingDir, ".pushwork");
-  const storage = new NodeFSStorageAdapter(path.join(syncToolDir, "automerge"));
+  const automergeDir = path.join(syncToolDir, "automerge");
+
+  // Detect and recover from corrupt local storage (0-byte files left by
+  // incomplete writes from a previous run). Wipe the cache so the Repo
+  // hydrates cleanly from the sync server.
+  if (await hasCorruptStorage(automergeDir)) {
+    console.warn("[pushwork] Corrupt local storage detected, clearing cache...");
+    await fs.rm(automergeDir, { recursive: true, force: true });
+    await fs.mkdir(automergeDir, { recursive: true });
+  }
+
+  const storage = new NodeFSStorageAdapter(automergeDir);
 
   if (sub) {
     const endpoints: string[] = [];
