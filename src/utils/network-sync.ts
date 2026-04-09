@@ -21,7 +21,6 @@ function debug(...args: any[]) {
  *
  * @param repo - The Automerge repository
  * @param rootDirectoryUrl - The root directory URL to start traversal from
- * @param syncServerStorageId - The sync server storage ID
  * @param options - Configuration options
  */
 export async function waitForBidirectionalSync(
