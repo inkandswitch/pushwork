@@ -42,20 +42,21 @@ interface CommandContext {
  */
 async function initializeRepository(
   resolvedPath: string,
-  overrides: Partial<DirectoryConfig>
+  overrides: Partial<DirectoryConfig>,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
-  // Create .pushwork directory structure
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  // Create config directory structure
+  const syncToolDir = path.join(resolvedPath, configDir);
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
   // Create configuration with overrides
-  const configManager = new ConfigManager(resolvedPath);
+  const configManager = new ConfigManager(resolvedPath, configDir);
   const config = await configManager.initializeWithOverrides(overrides);
 
   // Create repository and sync engine
-  const repo = await createRepo(resolvedPath, config);
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const repo = await createRepo(resolvedPath, config, configDir);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, configDir);
 
   return { config, repo, syncEngine };
 }
@@ -66,20 +67,21 @@ async function initializeRepository(
  */
 async function setupCommandContext(
   workingDir: string = process.cwd(),
-  options?: { syncEnabled?: boolean; forceDefaults?: boolean }
+  options?: { syncEnabled?: boolean; forceDefaults?: boolean; configDir?: string }
 ): Promise<CommandContext> {
   const resolvedPath = path.resolve(workingDir);
+  const configDir = options?.configDir || ConfigManager.CONFIG_DIR;
 
   // Check if initialized
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
   if (!(await pathExists(syncToolDir))) {
     throw new Error(
-      'Directory not initialized for sync. Run "pushwork init" first.'
+      `Directory not initialized for sync. Run "pushwork${configDir !== ConfigManager.CONFIG_DIR ? " --dev" : ""} init" first.`
     );
   }
 
   // Load configuration
-  const configManager = new ConfigManager(resolvedPath);
+  const configManager = new ConfigManager(resolvedPath, configDir);
   let config: DirectoryConfig;
 
   if (options?.forceDefaults) {
@@ -99,10 +101,10 @@ async function setupCommandContext(
   }
 
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config);
+  const repo = await createRepo(resolvedPath, config, configDir);
 
   // Create sync engine
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, configDir);
 
   return {
     repo,
@@ -153,7 +155,8 @@ async function safeRepoShutdown(repo: Repo): Promise<void> {
  */
 export async function init(
   targetPath: string,
-  options: InitOptions = {}
+  options: InitOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
@@ -162,7 +165,7 @@ export async function init(
   await ensureDirectoryExists(resolvedPath);
 
   // Check if already initialized
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
   if (await pathExists(syncToolDir)) {
     out.error("Directory already initialized for sync");
     out.exit(1);
@@ -173,7 +176,7 @@ export async function init(
   const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
     sync_server: options.syncServer,
     sync_server_storage_id: options.syncServerStorageId,
-  });
+  }, configDir);
 
   // Create new root directory document
   out.update("Creating root directory");
@@ -222,7 +225,8 @@ export async function init(
  */
 export async function sync(
   targetPath = ".",
-  options: SyncOptions
+  options: SyncOptions,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   out.task(
     options.nuclear
@@ -234,6 +238,7 @@ export async function sync(
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, {
     forceDefaults: !options.gentle,
+    configDir,
   });
 
   if (options.nuclear) {
@@ -339,11 +344,12 @@ export async function sync(
  */
 export async function diff(
   targetPath = ".",
-  options: DiffOptions
+  options: DiffOptions,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   out.task("Analyzing changes");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false, configDir });
   const preview = await syncEngine.previewChanges();
 
   out.done();
@@ -443,11 +449,12 @@ export async function diff(
  */
 export async function status(
   targetPath: string = ".",
-  options: StatusOptions = {}
+  options: StatusOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   const { repo, syncEngine, config } = await setupCommandContext(
     targetPath,
-    { syncEnabled: false }
+    { syncEnabled: false, configDir }
   );
   const syncStatus = await syncEngine.getStatus();
 
@@ -524,17 +531,18 @@ export async function status(
  */
 export async function log(
   targetPath = ".",
-  _options: LogOptions
+  _options: LogOptions,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   const { repo: logRepo, workingDir } = await setupCommandContext(
     targetPath,
-    { syncEnabled: false }
+    { syncEnabled: false, configDir }
   );
 
   // TODO: Implement history tracking
   const snapshotPath = path.join(
     workingDir,
-    ConfigManager.CONFIG_DIR,
+    configDir,
     "snapshot.json"
   );
   if (await pathExists(snapshotPath)) {
@@ -554,9 +562,10 @@ export async function log(
 export async function checkout(
   syncId: string,
   targetPath = ".",
-  _options: CheckoutOptions
+  _options: CheckoutOptions,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
-  const { workingDir } = await setupCommandContext(targetPath);
+  const { workingDir } = await setupCommandContext(targetPath, { configDir });
 
   // TODO: Implement checkout functionality
   out.warnBlock("NOT IMPLEMENTED", "Checkout not yet implemented");
@@ -572,7 +581,8 @@ export async function checkout(
 export async function clone(
   rootUrl: string,
   targetPath: string,
-  options: CloneOptions
+  options: CloneOptions,
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   // Validate that rootUrl is actually an Automerge URL
   if (!rootUrl.startsWith("automerge:")) {
@@ -601,7 +611,7 @@ export async function clone(
   }
 
   // Check if already initialized
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
       out.error("Directory already initialized. Use --force to overwrite");
@@ -617,7 +627,8 @@ export async function clone(
     {
       sync_server: options.syncServer,
       sync_server_storage_id: options.syncServerStorageId,
-    }
+    },
+    configDir
   );
 
   // Connect to existing root directory and download files
@@ -642,9 +653,9 @@ export async function clone(
 /**
  * Get the root URL for the current pushwork repository
  */
-export async function url(targetPath: string = "."): Promise<void> {
+export async function url(targetPath: string = ".", configDir: string = ConfigManager.CONFIG_DIR): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
@@ -672,9 +683,9 @@ export async function url(targetPath: string = "."): Promise<void> {
 /**
  * Remove local pushwork data and log URL for recovery
  */
-export async function rm(targetPath: string = "."): Promise<void> {
+export async function rm(targetPath: string = ".", configDir: string = ConfigManager.CONFIG_DIR): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
@@ -706,11 +717,12 @@ export async function rm(targetPath: string = "."): Promise<void> {
 
 export async function commit(
   targetPath: string,
-  _options: CommandOptions = {}
+  _options: CommandOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   out.task("Committing local changes");
 
-  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false, configDir });
 
   const result = await syncEngine.commitLocal();
   await safeRepoShutdown(repo);
@@ -740,9 +752,10 @@ export async function commit(
  */
 export async function ls(
   targetPath: string = ".",
-  options: CommandOptions = {}
+  options: CommandOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
-  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
+  const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false, configDir });
   const syncStatus = await syncEngine.getStatus();
 
   if (!syncStatus.snapshot) {
@@ -783,17 +796,18 @@ export async function ls(
  */
 export async function config(
   targetPath: string = ".",
-  options: ConfigOptions = {}
+  options: ConfigOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
 
   if (!(await pathExists(syncToolDir))) {
     out.error("Directory not initialized for sync");
     out.exit(1);
   }
 
-  const configManager = new ConfigManager(resolvedPath);
+  const configManager = new ConfigManager(resolvedPath, configDir);
   const config = await configManager.getMerged();
 
   if (options.list) {
@@ -833,13 +847,15 @@ export async function config(
  */
 export async function watch(
   targetPath: string = ".",
-  options: WatchOptions = {}
+  options: WatchOptions = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   const script = options.script || "pnpm build";
   const watchDir = options.watchDir || "src"; // Default to watching 'src' directory
   const verbose = options.verbose || false;
   const { repo, syncEngine, workingDir } = await setupCommandContext(
-    targetPath
+    targetPath,
+    { configDir }
   );
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
@@ -1023,7 +1039,8 @@ async function runScript(
 export async function root(
   rootUrl: string,
   targetPath: string = ".",
-  options: { force?: boolean } = {}
+  options: { force?: boolean } = {},
+  configDir: string = ConfigManager.CONFIG_DIR
 ): Promise<void> {
   if (!rootUrl.startsWith("automerge:")) {
     out.error(
@@ -1034,7 +1051,7 @@ export async function root(
   }
 
   const resolvedPath = path.resolve(targetPath);
-  const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const syncToolDir = path.join(resolvedPath, configDir);
 
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
@@ -1058,7 +1075,7 @@ export async function root(
   await fs.writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf-8");
 
   // Ensure config exists
-  const configManager = new ConfigManager(resolvedPath);
+  const configManager = new ConfigManager(resolvedPath, configDir);
   await configManager.initializeWithOverrides({});
 
   out.successBlock("ROOT SET", rootUrl);
