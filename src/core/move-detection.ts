@@ -101,7 +101,9 @@ export class MoveDetector {
       typeof content1 === "string" ? content1.length : content1.length;
     const size2 =
       typeof content2 === "string" ? content2.length : content2.length;
-    const sizeDiff = Math.abs(size1 - size2) / Math.max(size1, size2);
+    const maxSize = Math.max(size1, size2);
+    if (maxSize === 0) return 1.0;
+    const sizeDiff = Math.abs(size1 - size2) / maxSize;
     if (sizeDiff > 0.5) return 0.0;
 
     // Binary files: hash mismatch = not a move

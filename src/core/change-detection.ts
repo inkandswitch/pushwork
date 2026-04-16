@@ -410,7 +410,7 @@ export class ChangeDetector {
 						const remoteContent = await this.getCurrentRemoteContent(entry.url)
 						const remoteHead = await this.getCurrentRemoteHead(entry.url)
 
-						if (localContent && remoteContent) {
+						if (localContent !== null && remoteContent !== null) {
 							// File exists both locally and remotely but not in snapshot
 							changes.push({
 								path: entryPath,
@@ -643,7 +643,7 @@ export class ChangeDetector {
 	private async getFileTypeFromContent(
 		content: string | Uint8Array | null
 	): Promise<FileType> {
-		if (!content) return FileType.TEXT
+		if (content === null) return FileType.TEXT
 
 		if (content instanceof Uint8Array) {
 			return FileType.BINARY
