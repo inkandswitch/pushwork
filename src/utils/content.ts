@@ -16,7 +16,7 @@ export function isContentEqual(
   content2: string | Uint8Array | null
 ): boolean {
   if (content1 === content2) return true;
-  if (!content1 || !content2) return false;
+  if (content1 === null || content2 === null) return false;
 
   if (typeof content1 !== typeof content2) return false;
 
