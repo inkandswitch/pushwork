@@ -39,11 +39,12 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
+  .option("--sub", "Use Subduction sync backend", false)
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
       opts.syncServer
     );
-    await init(path, { syncServer, syncServerStorageId });
+    await init(path, { syncServer, syncServerStorageId, sub: opts.sub });
   });
 
 // Track command (set root directory URL without full initialization)
@@ -92,6 +93,7 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
+  .option("--sub", "Use Subduction sync backend", false)
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
@@ -102,6 +104,7 @@ program
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
+      sub: opts.sub,
     });
   });
 

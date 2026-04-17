@@ -212,6 +212,10 @@ export class ConfigManager {
       merged.sync_server_storage_id = override.sync_server_storage_id;
     }
 
+    if ("subduction" in override && override.subduction !== undefined) {
+      merged.subduction = override.subduction;
+    }
+
     if ("sync_enabled" in override && override.sync_enabled !== undefined) {
       merged.sync_enabled = override.sync_enabled;
     }
