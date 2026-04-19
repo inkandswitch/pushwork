@@ -130,12 +130,33 @@ describe("findFileInDirectoryHierarchy tri-state RemoteLookup", () => {
   });
 
   it("returns {kind: 'unavailable'} when an intermediate directory is not ready", async () => {
+    // Need a 3-deep path so 'sub' is truly intermediate (not the final parent).
     const repo = new FakeRepo();
     repo.setDir(
       ROOT,
       mkDir("root", [{ name: "sub", type: "folder", url: SUB }])
     );
-    repo.setDir(SUB, undefined); // not ready
+    repo.setDir(SUB, undefined); // intermediate not ready
+
+    const result = await findFileInDirectoryHierarchy(
+      repo as any,
+      ROOT,
+      "sub/inner/foo.txt"
+    );
+
+    expect(result.kind).toBe("unavailable");
+    if (result.kind === "unavailable") {
+      expect(result.reason).toMatch(/intermediate/i);
+    }
+  });
+
+  it("returns {kind: 'unavailable'} when the parent directory of the target file is not ready", async () => {
+    const repo = new FakeRepo();
+    repo.setDir(
+      ROOT,
+      mkDir("root", [{ name: "sub", type: "folder", url: SUB }])
+    );
+    repo.setDir(SUB, undefined); // parent (final) dir not ready
 
     const result = await findFileInDirectoryHierarchy(
       repo as any,
@@ -145,7 +166,7 @@ describe("findFileInDirectoryHierarchy tri-state RemoteLookup", () => {
 
     expect(result.kind).toBe("unavailable");
     if (result.kind === "unavailable") {
-      expect(result.reason).toMatch(/intermediate/i);
+      expect(result.reason).toMatch(/parent directory/i);
     }
   });
 
