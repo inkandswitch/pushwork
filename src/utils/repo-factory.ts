@@ -77,6 +77,22 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
 }
 
 /**
+ * Result of `createRepo`.
+ *
+ * `recovered` is true when local storage had corrupt (0-byte) files that
+ * were wiped during setup. Callers that perform destructive sync
+ * operations (e.g. deleting local files on the basis of remote state)
+ * MUST treat this as a signal that the in-memory repo is empty and
+ * every document will need to re-fetch from the sync server before
+ * change detection is safe to run. See sync-engine.ts for the
+ * post-recovery rehydrate gate.
+ */
+export interface CreateRepoResult {
+  repo: Repo;
+  recovered: boolean;
+}
+
+/**
  * Create an Automerge repository with configuration-based setup.
  *
  * When `sub` is true, uses the Subduction sync backend built into
@@ -91,7 +107,7 @@ export async function createRepo(
   workingDir: string,
   config: DirectoryConfig,
   sub: boolean = false
-): Promise<Repo> {
+): Promise<CreateRepoResult> {
   const RepoClass = await getRepoClass();
 
   const syncToolDir = path.join(workingDir, ".pushwork");
@@ -100,10 +116,12 @@ export async function createRepo(
   // Detect and recover from corrupt local storage (0-byte files left by
   // incomplete writes from a previous run). Wipe the cache so the Repo
   // hydrates cleanly from the sync server.
+  let recovered = false;
   if (await hasCorruptStorage(automergeDir)) {
     console.warn("[pushwork] Corrupt local storage detected, clearing cache...");
     await fs.rm(automergeDir, { recursive: true, force: true });
     await fs.mkdir(automergeDir, { recursive: true });
+    recovered = true;
   }
 
   const storage = new NodeFSStorageAdapter(automergeDir);
@@ -114,10 +132,11 @@ export async function createRepo(
       endpoints.push(config.sync_server);
     }
 
-    return new RepoClass({
+    const repo = new RepoClass({
       storage,
       subductionWebsocketEndpoints: endpoints,
     });
+    return { repo, recovered };
   }
 
   // Default: WebSocket sync adapter
@@ -138,5 +157,6 @@ export async function createRepo(
     repoConfig.network = [networkAdapter];
   }
 
-  return new RepoClass(repoConfig);
+  const repo = new RepoClass(repoConfig);
+  return { repo, recovered };
 }

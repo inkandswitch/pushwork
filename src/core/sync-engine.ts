@@ -134,13 +134,23 @@ export class SyncEngine {
 	// Path depth determines sync order (deepest first)
 	private handlesByPath: Map<string, DocHandle<unknown>> = new Map()
 	private config: DirectoryConfig
+	/**
+	 * True when the underlying repo was created with a wiped cache
+	 * (torn-write recovery). The first sync after recovery must wait for
+	 * every snapshot-tracked document to rehydrate from the sync server
+	 * before running change detection, otherwise unavailable documents
+	 * can be mistaken for "deleted remotely" and cause local data loss.
+	 */
+	private recoveredFromCorruption: boolean
 
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
-		config: DirectoryConfig
+		config: DirectoryConfig,
+		options: { recoveredFromCorruption?: boolean } = {}
 	) {
 		this.config = config
+		this.recoveredFromCorruption = options.recoveredFromCorruption ?? false
 		this.snapshotManager = new SnapshotManager(rootPath)
 		this.changeDetector = new ChangeDetector(
 			repo,
@@ -316,6 +326,88 @@ export class SyncEngine {
 			result.success = false
 			return result
 		}
+	}
+
+	/**
+	 * Fetch every document referenced by the snapshot and wait for each
+	 * to become ready. Used as a post-recovery gate when the local
+	 * automerge cache was wiped (torn-write recovery) to ensure change
+	 * detection sees a full remote view rather than mistaking unavailable
+	 * documents for deletions.
+	 *
+	 * Retries each document with exponential backoff. Returns `ok: false`
+	 * with the list of still-unavailable paths if any document cannot be
+	 * fetched; callers should abort the sync in that case.
+	 *
+	 * Does NOT verify directory contents or file content validity — only
+	 * that `repo.find(url)` resolves and `doc()` returns a non-nullish
+	 * document. Further validation happens in change detection.
+	 */
+	private async rehydrateTrackedDocuments(
+		snapshot: SyncSnapshot
+	): Promise<{ ok: true } | { ok: false; missing: string[] }> {
+		const maxAttempts = 6
+		const baseDelayMs = 500
+		const maxDelayMs = 5000
+
+		// Collect all URLs to rehydrate: root, tracked directories, tracked files.
+		const targets: { path: string; url: AutomergeUrl }[] = []
+		if (snapshot.rootDirectoryUrl) {
+			targets.push({ path: "", url: getPlainUrl(snapshot.rootDirectoryUrl) })
+		}
+		for (const [dirPath, entry] of snapshot.directories.entries()) {
+			targets.push({ path: dirPath || "(root)", url: getPlainUrl(entry.url) })
+		}
+		for (const [filePath, entry] of snapshot.files.entries()) {
+			targets.push({ path: filePath, url: getPlainUrl(entry.url) })
+		}
+
+		debug(
+			`rehydrate: fetching ${targets.length} documents from sync server`
+		)
+
+		const missing: string[] = []
+		let checked = 0
+		const reportEvery = Math.max(1, Math.floor(targets.length / 10))
+
+		await Promise.all(
+			targets.map(async ({ path: docPath, url }) => {
+				let lastError: unknown
+				for (let attempt = 0; attempt < maxAttempts; attempt++) {
+					try {
+						const handle = await this.repo.find(url)
+						const doc = handle.doc()
+						if (doc != null) {
+							checked++
+							if (checked % reportEvery === 0) {
+								out.taskLine(
+									`Rehydrated ${checked}/${targets.length}`,
+									false
+								)
+							}
+							return
+						}
+						lastError = new Error("doc() returned nullish")
+					} catch (e) {
+						lastError = e
+					}
+					const delay = Math.min(
+						baseDelayMs * Math.pow(2, attempt),
+						maxDelayMs
+					)
+					await new Promise(r => setTimeout(r, delay))
+				}
+				debug(
+					`rehydrate: FAILED ${docPath} after ${maxAttempts} attempts (${lastError})`
+				)
+				missing.push(docPath)
+			})
+		)
+
+		if (missing.length > 0) {
+			return { ok: false, missing }
+		}
+		return { ok: true }
 	}
 
 	/**
@@ -496,6 +588,52 @@ export class SyncEngine {
 				} catch (error) {
 					out.taskLine(`Initial sync: ${error}`, true)
 				}
+			}
+
+			// Phase 3a: rehydrate gate after torn-write recovery.
+			//
+			// If the local automerge cache was wiped due to corrupt storage,
+			// every snapshot-tracked document must be re-fetched from the
+			// sync server before change detection is safe. Running
+			// detectChanges while documents are still in flight causes
+			// change-detection to observe `remoteContent: null` for
+			// unavailable docs, which (absent the Phase 1 guard) would
+			// manifest as spurious local file deletions.
+			//
+			// We abort the sync if rehydration cannot complete within the
+			// retry window. Aborting is safer than proceeding: the user's
+			// local files remain intact and the next sync can try again.
+			if (
+				this.recoveredFromCorruption &&
+				this.config.sync_enabled &&
+				snapshot.rootDirectoryUrl
+			) {
+				out.update("Rehydrating documents after cache recovery")
+				debug(
+					`sync: rehydrate-gate: ${snapshot.files.size} files + ${snapshot.directories.size} directories`
+				)
+				const rehydrated = await this.rehydrateTrackedDocuments(snapshot)
+				if (!rehydrated.ok) {
+					const msg =
+						`Cannot verify remote state after cache recovery: ` +
+						`${rehydrated.missing.length} document(s) unavailable ` +
+						`(${rehydrated.missing.slice(0, 5).join(", ")}` +
+						`${rehydrated.missing.length > 5 ? "..." : ""}). ` +
+						`Sync aborted; local files untouched. Retry later.`
+					debug(`sync: rehydrate-gate ABORT: ${msg}`)
+					out.taskLine(msg, true)
+					result.success = false
+					result.errors.push({
+						path: "sync",
+						operation: "rehydrate",
+						error: new Error(msg),
+						recoverable: true,
+					})
+					return result
+				}
+				debug("sync: rehydrate-gate passed, proceeding to change detection")
+				// One-shot: don't rehydrate on subsequent syncs in the same process.
+				this.recoveredFromCorruption = false
 			}
 
 			// Detect all changes
@@ -1040,16 +1178,77 @@ export class SyncEngine {
 			)
 		}
 
+		// Determine the content to write. Most changes carry it directly
+		// on `change.remoteContent`, but artifact-path changes deliberately
+		// skip content reads in change detection and set `remoteContent`
+		// to null. For those, we must fetch the content here before
+		// deciding what to do.
+		let contentToWrite: string | Uint8Array | null = change.remoteContent
+
+		if (contentToWrite === null && this.isArtifactPath(change.path) && !change.confirmedAbsent) {
+			// Artifact path with no content carried: fetch it live.
+			// "null content" here means "we skipped the read", NOT "delete
+			// the local file".
+			const artifactUrl = change.remoteUrl ?? snapshot.files.get(change.path)?.url
+			if (artifactUrl) {
+				try {
+					const handle = await this.repo.find<FileDocument>(getPlainUrl(artifactUrl))
+					contentToWrite = readDocContent(handle.doc()?.content)
+				} catch (e) {
+					debug(
+						`skip-delete path=${change.path} reason=artifact-fetch-failed: ${e}`
+					)
+					out.taskLine(
+						`Preserved artifact ${change.path}: remote fetch failed (${e})`,
+						true
+					)
+					return
+				}
+			}
+
+			if (contentToWrite === null) {
+				debug(
+					`skip-delete path=${change.path} reason=artifact-content-unavailable`
+				)
+				out.taskLine(
+					`Preserved artifact ${change.path}: remote content unavailable`,
+					true
+				)
+				return
+			}
+		}
+
 		// Check for null (empty string/Uint8Array are valid content)
-		if (change.remoteContent === null) {
-			// File was deleted remotely
+		if (contentToWrite === null) {
+			// A local deletion is only safe when we have positive evidence
+			// that the file is genuinely absent from the authoritative
+			// remote state (e.g. the parent directory document was
+			// successfully read and the file was not in its entries).
+			//
+			// `remoteContent === null` by itself is ambiguous: it can mean
+			// the doc was unavailable, the fetch timed out, the parent
+			// directory had not yet synced, or a parse error occurred.
+			// Treating any of these as a deletion causes data loss during
+			// torn-write recovery and slow-server syncs.
+			if (!change.confirmedAbsent) {
+				out.taskLine(
+					`Preserved ${change.path}: remote content unavailable, deletion not confirmed`,
+					true
+				)
+				debug(
+					`skip-delete path=${change.path} reason=unconfirmed-absent`
+				)
+				return
+			}
+			// File was deleted remotely (confirmed via directory read)
+			debug(`apply-delete path=${change.path} reason=confirmed-absent`)
 			await removePath(localPath)
 			this.snapshotManager.removeFileEntry(snapshot, change.path)
 			return
 		}
 
 		// Create or update local file
-		await writeFileContent(localPath, change.remoteContent)
+		await writeFileContent(localPath, contentToWrite)
 
 		// Update or create snapshot entry for this file
 		const snapshotEntry = snapshot.files.get(change.path)
@@ -1066,14 +1265,14 @@ export class SyncEngine {
 			// We need to find the remote file's URL from the directory hierarchy
 			if (snapshot.rootDirectoryUrl) {
 				try {
-					const fileEntry = await findFileInDirectoryHierarchy(
+					const lookup = await findFileInDirectoryHierarchy(
 						this.repo,
 						snapshot.rootDirectoryUrl,
 						change.path
 					)
 
-					if (fileEntry) {
-						const fileHandle = await this.repo.find<FileDocument>(fileEntry.url)
+					if (lookup.kind === "found") {
+						const fileHandle = await this.repo.find<FileDocument>(lookup.entry.url)
 						const entryUrl = this.getEntryUrl(fileHandle, change.path)
 						this.snapshotManager.updateFileEntry(snapshot, change.path, {
 							path: localPath,

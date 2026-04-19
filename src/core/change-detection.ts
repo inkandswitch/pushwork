@@ -21,6 +21,7 @@ import {
 	joinAndNormalizePath,
 	getPlainUrl,
 	readDocContent,
+	RemoteLookup,
 } from "../utils"
 import {isContentEqual, contentHash} from "../utils/content"
 import {out} from "../utils/output"
@@ -247,13 +248,24 @@ export class ChangeDetector {
 			Array.from(snapshot.files.entries()).map(
 				async ([relativePath, snapshotEntry]) => {
 					// Find the file's current entry in the remote directory hierarchy
-					const remoteEntry = await this.findInRemoteDirectory(
+					const lookup = await this.findInRemoteDirectory(
 						snapshot.rootDirectoryUrl,
 						relativePath
 					)
 
-					if (!remoteEntry) {
-						// File was removed from remote directory listing
+					if (lookup.kind === "unavailable") {
+						// We could not read the authoritative directory for
+						// this path. Do NOT emit a change: we have no basis
+						// to conclude anything about the remote state. The
+						// next sync will try again.
+						debug(
+							`detectRemoteChanges: skipping ${relativePath} — directory unavailable (${lookup.reason})`
+						)
+						return
+					}
+
+					if (lookup.kind === "absent") {
+						// File was confirmed absent from the remote directory listing
 						const localContent = await this.getLocalContent(relativePath)
 
 						// Only report as deleted if local file still exists
@@ -267,10 +279,14 @@ export class ChangeDetector {
 								remoteContent: null, // File deleted remotely
 								localHead: snapshotEntry.head,
 								remoteHead: snapshotEntry.head,
+								confirmedAbsent: true,
 							})
 						}
 						return
 					}
+
+					// lookup.kind === "found"
+					const remoteEntry = lookup.entry
 
 					// Check if the document was replaced entirely (new URL).
 					// This happens when a peer replaces an artifact file, fixes a
@@ -696,13 +712,22 @@ export class ChangeDetector {
 
 	/**
 	 * Find a file's entry in the remote directory hierarchy.
-	 * Returns the entry (with name, type, url) or null if not found.
+	 *
+	 * Returns a tri-state `RemoteLookup` that distinguishes:
+	 * - `found`: the directory doc was read and the file entry exists
+	 * - `absent`: the directory doc was read and the file entry is absent
+	 * - `unavailable`: the directory doc could not be read (transient)
+	 *
+	 * Callers that perform destructive operations MUST check for `absent`
+	 * specifically, not just "not found".
 	 */
 	private async findInRemoteDirectory(
 		rootDirectoryUrl: AutomergeUrl | undefined,
 		filePath: string
-	): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-		if (!rootDirectoryUrl) return null
+	): Promise<RemoteLookup> {
+		if (!rootDirectoryUrl) {
+			return { kind: "unavailable", reason: "no root directory URL" }
+		}
 		return findFileInDirectoryHierarchy(
 			this.repo,
 			rootDirectoryUrl,
