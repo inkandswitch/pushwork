@@ -117,14 +117,6 @@ export async function createRepo(
     return new RepoClass({
       storage,
       subductionWebsocketEndpoints: endpoints,
-      // Disable periodic sync — reactive sync (handle.change → #save →
-      // #recompute → #doSync) handles pushes, and pushwork's polling
-      // handles pulls. The periodic timer would fire 929+ concurrent
-      // requests every N seconds on large trees, overwhelming the server.
-      // Heal-sync retries still work independently via scheduleHealSync.
-      periodicSyncInterval: 0,
-      // Disable the 5-minute batch sync timer — we control the lifecycle.
-      batchSyncInterval: 0,
     });
   }
 

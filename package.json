@@ -39,9 +39,9 @@
   "license": "MIT",
   "dependencies": {
     "@automerge/automerge": "^3.2.5",
-    "@automerge/automerge-repo": "2.6.0-subduction.12",
-    "@automerge/automerge-repo-network-websocket": "2.6.0-subduction.12",
-    "@automerge/automerge-repo-storage-nodefs": "2.6.0-subduction.12",
+    "@automerge/automerge-repo": "2.6.0-subduction.13",
+    "@automerge/automerge-repo-network-websocket": "2.6.0-subduction.13",
+    "@automerge/automerge-repo-storage-nodefs": "2.6.0-subduction.13",
     "@automerge/automerge-subduction": "0.7.0",
     "@commander-js/extra-typings": "^14.0.0",
     "chalk": "^5.3.0",
