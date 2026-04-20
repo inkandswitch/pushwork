@@ -59,6 +59,7 @@ Every file becomes an Automerge document (`FileDocument`) with content stored as
 ### Snapshot
 
 The snapshot (`.pushwork/snapshot.json`) records:
+
 - `rootDirectoryUrl` - the root Automerge document URL
 - `files` - map of relative path -> `{url, head}` for every tracked file
 - `directories` - map of relative path -> `{url, head}` for every tracked directory
@@ -102,6 +103,7 @@ Old Automerge documents may store text content as `RawString` (aka `ImmutableStr
 Stored in `.pushwork/config.json` (local) and `~/.pushwork/config.json` (global). Merged: defaults < global < local.
 
 Key fields:
+
 - `sync_enabled: boolean` - Whether to do network sync
 - `sync_server: string` - WebSocket relay URL (default: `wss://sync3.automerge.org`)
 - `sync_server_storage_id: StorageId` - Server identity for sync verification
@@ -129,7 +131,7 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 ## Performance pitfalls
 
 - **Avoid splicing large text deletions.** Automerge text CRDTs track every character as an individual op. `A.splice(doc, path, 0, largeString.length)` to clear a large file is O(n) in CRDT ops and very slow. This is why `deleteRemoteFile()` no longer clears content — it just lets the document become orphaned when removed from its parent directory.
-- **Avoid diffing artifact files.** `diffChars()` is O(n*m) and pointless for artifact directories since they use RawString (immutable snapshots). Artifact files should always be replaced with a fresh document rather than diffed+spliced. This applies to `updateRemoteFile()`, `applyMoveToRemote()`, and change detection. `ChangeDetector` skips `getContentAtHead()` and `getCurrentRemoteContent()` for artifact paths — it uses a SHA-256 `contentHash` stored in the snapshot to detect local changes, and checks heads to detect remote changes. If neither changed, the artifact is skipped entirely. The `contentHash` field on `SnapshotFileEntry` is optional and only populated for artifact files.
+- **Avoid diffing artifact files.** `diffChars()` is O(n\*m) and pointless for artifact directories since they use RawString (immutable snapshots). Artifact files should always be replaced with a fresh document rather than diffed+spliced. This applies to `updateRemoteFile()`, `applyMoveToRemote()`, and change detection. `ChangeDetector` skips `getContentAtHead()` and `getCurrentRemoteContent()` for artifact paths — it uses a SHA-256 `contentHash` stored in the snapshot to detect local changes, and checks heads to detect remote changes. If neither changed, the artifact is skipped entirely. The `contentHash` field on `SnapshotFileEntry` is optional and only populated for artifact files.
 - **Artifact directories are always nuked.** `batchUpdateDirectory` uses a plain `dirHandle.change()` (not `changeWithOptionalHeads`) for artifact directory paths and rebuilds the entire `docs` array from scratch. This avoids `changeAt` forking from stale heads, which previously caused bugs like deleted entries resurrecting. The rebuild reads the current entries, applies all changes (deletes, updates, additions, subdir URL updates), then splices out the old array and pushes the computed entries.
 - **Sync timeout recovery.** `waitForSync()` returns `{ failed: DocHandle[] }` instead of throwing. When documents fail to sync (timeout or unavailable), `recreateFailedDocuments()` creates new Automerge docs with the same content, updates snapshot entries and parent directory references, then retries once. If documents still fail after recreation, it's reported as an error (not a warning) so the sync shows as "PARTIAL" rather than "SYNCED".
 - **Document availability during clone.** `repo.find()` rejects with "Document X is unavailable" if the sync server doesn't have the document yet. `DocHandle.doc()` is synchronous and throws if the handle isn't ready. For clone scenarios, `sync()` retries `repo.find()` for the root document with exponential backoff (up to 6 attempts). `ChangeDetector.findDocument()` wraps `repo.find()` + `doc()` with retry logic for all document fetches during change detection.
@@ -139,11 +141,11 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 
 ## Subduction sync backend (`--sub`)
 
-The `--sub` flag switches from the default WebSocket sync adapter to the Subduction backend built into `automerge-repo@2.6.0-subduction.9`. The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
+The `--sub` flag switches from the default WebSocket sync adapter to the Subduction backend built into `automerge-repo@2.6.0-subduction.14`. The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
 
 ### How it works
 
-- `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. When `sub: true`, passes `subductionWebsocketEndpoints: [syncServer]` and `periodicSyncInterval: 2000` (CLI needs fast sync, not the default 10s). When `sub: false`, uses the traditional WebSocket network adapter instead.
+- `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. When `sub: true`, passes `subductionWebsocketEndpoints: [syncServer]` and the Repo handles sync cadence internally. When `sub: false`, uses the traditional WebSocket network adapter instead.
 - Default server: `wss://subduction.sync.inkandswitch.com` (vs `wss://sync3.automerge.org` for WebSocket)
 - `network-sync.ts`: When no `StorageId` is provided (Subduction mode), `waitForSync` falls back to head-stability polling (3 consecutive stable checks at 100ms intervals) instead of `getSyncInfo`-based verification
 - `sync-engine.ts`: In sub mode, skips `recreateFailedDocuments` — SubductionSource has its own heal-sync retry logic
@@ -151,7 +153,7 @@ The `--sub` flag switches from the default WebSocket sync adapter to the Subduct
 
 ### Wasm initialization
 
-As of `automerge-repo@2.6.0-subduction.9`, the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the default WebSocket path.
+As of `automerge-repo@2.6.0-subduction.14`, the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the default WebSocket path.
 
 `automerge-repo` exports `initSubduction()` which dynamically imports `@automerge/automerge-subduction` (the non-`/slim` entry that auto-inits Wasm). Pushwork calls this via `repoMod.initSubduction()` after loading the Repo module — no direct dependency on `@automerge/automerge-subduction` is needed.
 
@@ -161,8 +163,8 @@ The Repo class itself is also loaded via this ESM dynamic import (cached after f
 
 ### Packaging notes
 
-- `automerge-repo@2.6.0-subduction.9` correctly pins `@automerge/automerge-subduction@0.7.0` — no pnpm override needed (unlike subduction.7 which required an override to fix a version mismatch).
-- `RepoConfig` now properly types all Subduction options (`subductionWebsocketEndpoints`, `periodicSyncInterval`, `batchSyncInterval`, `signer`, `subductionPolicy`, `subductionAdapters`) — no `as any` cast needed.
+- `automerge-repo@2.6.0-subduction.14` correctly pins `@automerge/automerge-subduction@0.7.0` — no pnpm override needed (unlike subduction.7 which required an override to fix a version mismatch).
+- `RepoConfig` properly types the Subduction options pushwork uses (`subductionWebsocketEndpoints`, `signer`, `subductionPolicy`, `subductionAdapters`) — no `as any` cast needed.
 - The `automerge-repo-network-websocket` adapter's `NetworkAdapter` types are slightly behind the repo's `NetworkAdapterInterface` (missing `state()` method in declarations). The adapter works at runtime; the type mismatch is worked around with `as unknown as NetworkAdapterInterface`.
 - New `"heal-exhausted"` event on Repo fires when self-healing sync gives up after all retry attempts for a document. Not currently used by pushwork but available for better error reporting.
 
