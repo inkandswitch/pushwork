@@ -545,48 +545,52 @@ export async function status(
 
   // Show verbose details if requested
   if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
-    const rootHandle = await repo.find<DirectoryDocument>(
-      syncStatus.snapshot.rootDirectoryUrl
-    );
-    const rootDoc = await rootHandle.doc();
+    try {
+      const rootHandle = await repo.find<DirectoryDocument>(
+        syncStatus.snapshot.rootDirectoryUrl
+      );
+      const rootDoc = await rootHandle.doc();
 
-    if (rootDoc) {
-      out.infoBlock("HEADS");
-      out.arr(rootHandle.heads());
+      if (rootDoc) {
+        out.infoBlock("HEADS");
+        out.arr(rootHandle.heads());
 
-      if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
-        out.infoBlock("TRACKED FILES");
-        const filesObj: Record<string, string> = {};
-        syncStatus.snapshot.files.forEach((entry, filePath) => {
-          filesObj[filePath] = entry.url;
-        });
-        out.obj(filesObj);
-      }
-
-      // Chronic-unavailable section: paths whose consecutive-unavailable
-      // counter is non-zero. These are files pushwork has repeatedly
-      // declined to reconcile because their remote state could not be
-      // confirmed. Surface them so the user can decide whether to
-      // `rm-tracked` or `resync` each one.
-      if (syncStatus.snapshot) {
-        const chronic: Array<{ path: string; count: number }> = [];
-        syncStatus.snapshot.files.forEach((entry, filePath) => {
-          const n = entry.consecutiveUnavailableCount ?? 0;
-          if (n > 0) chronic.push({ path: filePath, count: n });
-        });
-        if (chronic.length > 0) {
-          chronic.sort((a, b) => b.count - a.count);
-          out.infoBlock("CHRONICALLY UNAVAILABLE");
-          const obj: Record<string, string> = {};
-          for (const { path: p, count } of chronic) {
-            obj[p] = `${count} consecutive sync(s) unavailable`;
-          }
-          out.obj(obj);
-          out.info(
-            "Resolve with: pushwork rm-tracked <path> or pushwork resync <path>"
-          );
+        if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
+          out.infoBlock("TRACKED FILES");
+          const filesObj: Record<string, string> = {};
+          syncStatus.snapshot.files.forEach((entry, filePath) => {
+            filesObj[filePath] = entry.url;
+          });
+          out.obj(filesObj);
         }
       }
+    } catch (error) {
+      out.warn(`Warning: Could not load root document details: ${error}`);
+    }
+  }
+
+  // Chronic-unavailable section: paths whose consecutive-unavailable
+  // counter is non-zero. These are files pushwork has repeatedly
+  // declined to reconcile because their remote state could not be
+  // confirmed. Always shown in verbose mode, independent of root-doc
+  // availability, because the counter is a pure snapshot property.
+  if (options.verbose && syncStatus.snapshot) {
+    const chronic: Array<{ path: string; count: number }> = [];
+    syncStatus.snapshot.files.forEach((entry, filePath) => {
+      const n = entry.consecutiveUnavailableCount ?? 0;
+      if (n > 0) chronic.push({ path: filePath, count: n });
+    });
+    if (chronic.length > 0) {
+      chronic.sort((a, b) => b.count - a.count);
+      out.infoBlock("CHRONICALLY UNAVAILABLE");
+      const obj: Record<string, string> = {};
+      for (const { path: p, count } of chronic) {
+        obj[p] = `${count} consecutive sync(s) unavailable`;
+      }
+      out.obj(obj);
+      out.info(
+        "Resolve with: pushwork rm-tracked <path> or pushwork resync <path>"
+      );
     }
   }
 
