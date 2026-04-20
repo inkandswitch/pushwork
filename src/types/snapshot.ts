@@ -10,6 +10,18 @@ export interface SnapshotFileEntry {
   extension: string; // File extension
   mimeType: string; // MIME type
   contentHash?: string; // SHA-256 of content at last sync (used by artifact files to skip remote reads)
+  /**
+   * Number of consecutive syncs for which this path could not be
+   * looked up on the remote (RemoteLookup returned `unavailable`).
+   *
+   * Reset to 0 on any successful `found` or `absent` lookup AND after
+   * a successful pull that wrote this file's content locally.
+   *
+   * At 5, pushwork prints a prominent warning with recovery hints.
+   * At 20, the sync is blocked with a hard error until the user
+   * resolves via `pushwork rm-tracked <path>` or `pushwork resync <path>`.
+   */
+  consecutiveUnavailableCount?: number;
 }
 
 /**

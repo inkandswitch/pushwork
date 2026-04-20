@@ -66,9 +66,14 @@ async function initializeRepository(
   }
 
   // Create repository and sync engine
-  const { repo, recovered } = await createRepo(resolvedPath, config, sub);
+  const { repo, requiresRehydrate, recoveryReason } = await createRepo(
+    resolvedPath,
+    config,
+    sub
+  );
   const syncEngine = new SyncEngine(repo, resolvedPath, config, {
-    recoveredFromCorruption: recovered,
+    requiresRehydrate,
+    recoveryReason,
   });
 
   return { config, repo, syncEngine };
@@ -124,11 +129,16 @@ async function setupCommandContext(
   }
 
   // Create repo with config
-  const { repo, recovered } = await createRepo(resolvedPath, config, sub);
+  const { repo, requiresRehydrate, recoveryReason } = await createRepo(
+    resolvedPath,
+    config,
+    sub
+  );
 
   // Create sync engine
   const syncEngine = new SyncEngine(repo, resolvedPath, config, {
-    recoveredFromCorruption: recovered,
+    requiresRehydrate,
+    recoveryReason,
   });
 
   return {

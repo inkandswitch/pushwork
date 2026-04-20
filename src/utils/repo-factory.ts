@@ -3,6 +3,7 @@ import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { DirectoryConfig } from "../types";
+import { readSyncLock, isStaleSyncLock, clearSyncLock } from "./sync-lock";
 
 /**
  * Perform a real ESM dynamic import that tsc won't rewrite to require().
@@ -77,19 +78,33 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
 }
 
 /**
+ * Reason the next sync needs to rehydrate / catch up before running
+ * normal change detection.
+ *
+ * - `torn-write`: 0-byte file(s) detected in .pushwork/automerge/,
+ *   the cache was wiped. Every document must be re-fetched from the
+ *   sync server before change detection is safe.
+ * - `incomplete-sync`: a `.pushwork/sync.lock` marker was present at
+ *   startup, indicating the previous sync did not exit cleanly
+ *   (Ctrl-C, crash, SIGKILL, etc.). A catch-up pull is required
+ *   before ordinary sync to avoid overwriting remote changes that
+ *   arrived during the interrupted run.
+ * - `null`: no recovery needed; previous sync (if any) completed cleanly.
+ */
+export type RecoveryReason = "torn-write" | "incomplete-sync" | null;
+
+/**
  * Result of `createRepo`.
  *
- * `recovered` is true when local storage had corrupt (0-byte) files that
- * were wiped during setup. Callers that perform destructive sync
- * operations (e.g. deleting local files on the basis of remote state)
- * MUST treat this as a signal that the in-memory repo is empty and
- * every document will need to re-fetch from the sync server before
- * change detection is safe to run. See sync-engine.ts for the
- * post-recovery rehydrate gate.
+ * `requiresRehydrate` is true when the next sync must perform extra
+ * steps before running ordinary change detection — either a full
+ * rehydrate from the server (torn write) or a catch-up pull of remote
+ * changes (incomplete previous sync). See `sync-engine.ts`.
  */
 export interface CreateRepoResult {
   repo: Repo;
-  recovered: boolean;
+  requiresRehydrate: boolean;
+  recoveryReason: RecoveryReason;
 }
 
 /**
@@ -116,12 +131,26 @@ export async function createRepo(
   // Detect and recover from corrupt local storage (0-byte files left by
   // incomplete writes from a previous run). Wipe the cache so the Repo
   // hydrates cleanly from the sync server.
-  let recovered = false;
+  let recoveryReason: RecoveryReason = null;
   if (await hasCorruptStorage(automergeDir)) {
     console.warn("[pushwork] Corrupt local storage detected, clearing cache...");
     await fs.rm(automergeDir, { recursive: true, force: true });
     await fs.mkdir(automergeDir, { recursive: true });
-    recovered = true;
+    recoveryReason = "torn-write";
+  } else {
+    // Check for a stale sync.lock left over from an unclean exit. A
+    // live lock (e.g. a second pushwork process running concurrently)
+    // is NOT treated as incomplete-sync — only stale locks are.
+    const lock = await readSyncLock(syncToolDir);
+    if (lock !== null && isStaleSyncLock(lock)) {
+      console.warn(
+        `[pushwork] Previous sync did not complete cleanly (pid=${lock.pid}, age=${Math.round(
+          (Date.now() - lock.startedAt) / 1000
+        )}s). Will run catch-up pull before normal sync.`
+      );
+      await clearSyncLock(syncToolDir);
+      recoveryReason = "incomplete-sync";
+    }
   }
 
   const storage = new NodeFSStorageAdapter(automergeDir);
@@ -136,7 +165,11 @@ export async function createRepo(
       storage,
       subductionWebsocketEndpoints: endpoints,
     });
-    return { repo, recovered };
+    return {
+      repo,
+      requiresRehydrate: recoveryReason !== null,
+      recoveryReason,
+    };
   }
 
   // Default: WebSocket sync adapter
@@ -158,5 +191,9 @@ export async function createRepo(
   }
 
   const repo = new RepoClass(repoConfig);
-  return { repo, recovered };
+  return {
+    repo,
+    requiresRehydrate: recoveryReason !== null,
+    recoveryReason,
+  };
 }

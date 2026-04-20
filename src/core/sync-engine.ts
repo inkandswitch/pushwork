@@ -30,7 +30,10 @@ import {
 	getPlainUrl,
 	updateTextContent,
 	readDocContent,
+	writeSyncLock,
+	clearSyncLock,
 } from "../utils"
+import type {RecoveryReason} from "../utils/repo-factory"
 import {isContentEqual, contentHash} from "../utils/content"
 import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
 import {SnapshotManager} from "./snapshot"
@@ -135,22 +138,27 @@ export class SyncEngine {
 	private handlesByPath: Map<string, DocHandle<unknown>> = new Map()
 	private config: DirectoryConfig
 	/**
-	 * True when the underlying repo was created with a wiped cache
-	 * (torn-write recovery). The first sync after recovery must wait for
-	 * every snapshot-tracked document to rehydrate from the sync server
-	 * before running change detection, otherwise unavailable documents
-	 * can be mistaken for "deleted remotely" and cause local data loss.
+	 * True when the next sync must rehydrate or catch up before running
+	 * ordinary change detection. Set when the repo was created from a
+	 * wiped cache (torn-write) or when the previous sync's lock file
+	 * was still present (incomplete previous sync). The gate in sync()
+	 * interprets this together with `recoveryReason`.
 	 */
-	private recoveredFromCorruption: boolean
+	private requiresRehydrate: boolean
+	private recoveryReason: RecoveryReason
 
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
 		config: DirectoryConfig,
-		options: { recoveredFromCorruption?: boolean } = {}
+		options: {
+			requiresRehydrate?: boolean
+			recoveryReason?: RecoveryReason
+		} = {}
 	) {
 		this.config = config
-		this.recoveredFromCorruption = options.recoveredFromCorruption ?? false
+		this.requiresRehydrate = options.requiresRehydrate ?? false
+		this.recoveryReason = options.recoveryReason ?? null
 		this.snapshotManager = new SnapshotManager(rootPath)
 		this.changeDetector = new ChangeDetector(
 			repo,
@@ -411,6 +419,47 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Catch-up pull for incomplete-sync recovery.
+	 *
+	 * Used when a sync.lock was left from an unclean previous exit. We
+	 * can't assume the local filesystem reflects all the remote changes
+	 * that arrived during (or after) the interrupted run — so before
+	 * ordinary change detection we pull any outstanding remote changes.
+	 *
+	 * This is idempotent: running it when there are no remote changes is
+	 * a no-op. If the process dies again during catch-up, the sync.lock
+	 * (still present from sync() startup) stays in place and the next
+	 * run repeats the catch-up.
+	 *
+	 * We deliberately run only REMOTE_ONLY changes here — not
+	 * BOTH_CHANGED, which is handled by the full sync's merge path.
+	 * Applying BOTH_CHANGED in the catch-up phase risks overwriting a
+	 * legitimate local edit with stale remote content in cases where
+	 * change-detection misattributes.
+	 */
+	private async catchUpRemoteChanges(
+		snapshot: SyncSnapshot
+	): Promise<SyncResult> {
+		const changes = await this.changeDetector.detectChanges(snapshot)
+		const remoteOnly = changes.filter(
+			c => c.changeType === ChangeType.REMOTE_ONLY
+		)
+		debug(
+			`catch-up: ${changes.length} changes detected, ${remoteOnly.length} remote-only to apply`
+		)
+		if (remoteOnly.length === 0) {
+			return {
+				success: true,
+				filesChanged: 0,
+				directoriesChanged: 0,
+				errors: [],
+				warnings: [],
+			}
+		}
+		return this.pullRemoteChanges(remoteOnly, snapshot)
+	}
+
+	/**
 	 * Recreate documents that failed to sync. Creates new Automerge documents
 	 * with the same content and updates all references (snapshot, parent directory).
 	 * Returns new handles that should be retried for sync.
@@ -533,6 +582,19 @@ export class SyncEngine {
 		// Reset tracked handles for sync
 		this.handlesByPath = new Map()
 
+		// Write the sync-in-progress marker. If this sync does NOT exit
+		// cleanly (Ctrl-C, crash, SIGKILL), the marker persists and the
+		// next startup will treat this as an incomplete-sync recovery and
+		// run a catch-up pull before ordinary change detection.
+		const pushworkDir = path.join(this.rootPath, ".pushwork")
+		try {
+			await writeSyncLock(pushworkDir)
+		} catch (e) {
+			debug(`sync: failed to write sync.lock: ${e}`)
+			// Non-fatal: proceed anyway. Worst case we lose the recovery
+			// signal if this sync dies uncleanly.
+		}
+
 		try {
 			// Load current snapshot
 			const snapshot =
@@ -604,36 +666,74 @@ export class SyncEngine {
 			// retry window. Aborting is safer than proceeding: the user's
 			// local files remain intact and the next sync can try again.
 			if (
-				this.recoveredFromCorruption &&
+				this.requiresRehydrate &&
 				this.config.sync_enabled &&
 				snapshot.rootDirectoryUrl
 			) {
-				out.update("Rehydrating documents after cache recovery")
-				debug(
-					`sync: rehydrate-gate: ${snapshot.files.size} files + ${snapshot.directories.size} directories`
-				)
-				const rehydrated = await this.rehydrateTrackedDocuments(snapshot)
-				if (!rehydrated.ok) {
-					const msg =
-						`Cannot verify remote state after cache recovery: ` +
-						`${rehydrated.missing.length} document(s) unavailable ` +
-						`(${rehydrated.missing.slice(0, 5).join(", ")}` +
-						`${rehydrated.missing.length > 5 ? "..." : ""}). ` +
-						`Sync aborted; local files untouched. Retry later.`
-					debug(`sync: rehydrate-gate ABORT: ${msg}`)
-					out.taskLine(msg, true)
-					result.success = false
-					result.errors.push({
-						path: "sync",
-						operation: "rehydrate",
-						error: new Error(msg),
-						recoverable: true,
-					})
-					return result
+				if (this.recoveryReason === "torn-write") {
+					out.update("Rehydrating documents after cache recovery")
+					debug(
+						`sync: rehydrate-gate (torn-write): ${snapshot.files.size} files + ${snapshot.directories.size} directories`
+					)
+					const rehydrated = await this.rehydrateTrackedDocuments(snapshot)
+					if (!rehydrated.ok) {
+						const msg =
+							`Cannot verify remote state after cache recovery: ` +
+							`${rehydrated.missing.length} document(s) unavailable ` +
+							`(${rehydrated.missing.slice(0, 5).join(", ")}` +
+							`${rehydrated.missing.length > 5 ? "..." : ""}). ` +
+							`Sync aborted; local files untouched. Retry later.`
+						debug(`sync: rehydrate-gate ABORT: ${msg}`)
+						out.taskLine(msg, true)
+						result.success = false
+						result.errors.push({
+							path: "sync",
+							operation: "rehydrate",
+							error: new Error(msg),
+							recoverable: true,
+						})
+						return result
+					}
+					debug("sync: rehydrate-gate passed, proceeding to change detection")
+				} else if (this.recoveryReason === "incomplete-sync") {
+					// Previous sync exited uncleanly (Ctrl-C, crash, SIGKILL).
+					// Before running ordinary change detection, pull any
+					// remote changes that arrived during or after the
+					// interrupted run. Otherwise local-change detection
+					// may see stale local content (pre-interrupted-pull)
+					// and push it back over newer remote state.
+					out.update("Catching up on remote changes after incomplete sync")
+					debug(
+						`sync: catch-up pull (incomplete-sync): ${snapshot.files.size} files + ${snapshot.directories.size} directories`
+					)
+					try {
+						const caughtUp = await this.catchUpRemoteChanges(snapshot)
+						debug(
+							`sync: catch-up complete: ${caughtUp.filesChanged} file(s) pulled, ${caughtUp.errors.length} errors`
+						)
+						if (caughtUp.errors.length > 0) {
+							// Non-fatal: log and proceed. If critical docs are
+							// truly unavailable the normal pull phase will also
+							// fail cleanly and Phase 1/2 guards will prevent
+							// destructive actions.
+							result.warnings.push(
+								...caughtUp.errors.map(
+									e => `catch-up pull for ${e.path}: ${e.error.message}`
+								)
+							)
+						}
+					} catch (e) {
+						debug(`sync: catch-up pull threw: ${e}`)
+						out.taskLine(
+							`Catch-up pull failed: ${e instanceof Error ? e.message : e}. Proceeding with normal sync.`,
+							true
+						)
+					}
 				}
-				debug("sync: rehydrate-gate passed, proceeding to change detection")
-				// One-shot: don't rehydrate on subsequent syncs in the same process.
-				this.recoveredFromCorruption = false
+				// One-shot: don't re-run the gate on subsequent syncs in
+				// the same process.
+				this.requiresRehydrate = false
+				this.recoveryReason = null
 			}
 
 			// Detect all changes
@@ -865,6 +965,17 @@ export class SyncEngine {
 				recoverable: false,
 			})
 			return result
+		} finally {
+			// Clear the sync-in-progress marker. We reach this block on
+			// ALL normal termination paths (success, caught error, explicit
+			// return). If the process dies without running this (SIGKILL,
+			// crash, power loss), the marker persists and next startup
+			// treats that as an incomplete-sync recovery.
+			try {
+				await clearSyncLock(pushworkDir)
+			} catch (e) {
+				debug(`sync: failed to clear sync.lock: ${e}`)
+			}
 		}
 	}
 

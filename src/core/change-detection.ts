@@ -35,12 +35,46 @@ function debug(...args: any[]) {
  * Change detection engine
  */
 export class ChangeDetector {
+	/**
+	 * Paths (snapshot-tracked files) for which `detectRemoteChanges`
+	 * observed a `RemoteLookup` of kind `unavailable` during the most
+	 * recent `detectChanges` call. These paths were deliberately not
+	 * emitted as deletions (Phase 1/2) because we cannot confirm their
+	 * absence on the remote. Callers may use this to maintain a
+	 * consecutive-unavailable counter per path — see `SnapshotFileEntry`.
+	 */
+	private _lastSkippedUnavailablePaths: Set<string> = new Set()
+
+	/**
+	 * Paths for which `detectRemoteChanges` observed a successful lookup
+	 * (kind `found` or `absent`) during the most recent `detectChanges`
+	 * call. Callers should reset the per-path counter for these paths.
+	 */
+	private _lastConfirmedPaths: Set<string> = new Set()
+
 	constructor(
 		private repo: Repo,
 		private rootPath: string,
 		private excludePatterns: string[] = [],
 		private artifactDirectories: string[] = []
 	) {}
+
+	/**
+	 * Paths whose remote state could not be determined during the last
+	 * `detectChanges` call. See `SnapshotFileEntry.consecutiveUnavailableCount`.
+	 */
+	getLastSkippedUnavailablePaths(): ReadonlySet<string> {
+		return this._lastSkippedUnavailablePaths
+	}
+
+	/**
+	 * Paths whose remote state was confirmed (present or absent) during
+	 * the last `detectChanges` call. The per-path unavailable counter
+	 * should be reset to 0 for these paths.
+	 */
+	getLastConfirmedPaths(): ReadonlySet<string> {
+		return this._lastConfirmedPaths
+	}
 
 	/**
 	 * Check if a file path is inside an artifact directory.
@@ -58,6 +92,8 @@ export class ChangeDetector {
 	 */
 	async detectChanges(snapshot: SyncSnapshot, excludePaths?: Set<string>): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
+		this._lastSkippedUnavailablePaths = new Set()
+		this._lastConfirmedPaths = new Set()
 
 		// Get current filesystem state
 		const currentFiles = await this.getCurrentFilesystemState()
@@ -257,12 +293,20 @@ export class ChangeDetector {
 						// We could not read the authoritative directory for
 						// this path. Do NOT emit a change: we have no basis
 						// to conclude anything about the remote state. The
-						// next sync will try again.
+						// next sync will try again. Record the skip so the
+						// caller can maintain a consecutive-unavailable
+						// counter — chronic unavailability requires user
+						// intervention.
+						this._lastSkippedUnavailablePaths.add(relativePath)
 						debug(
 							`detectRemoteChanges: skipping ${relativePath} — directory unavailable (${lookup.reason})`
 						)
 						return
 					}
+
+					// Any kind of successful lookup (found or absent) counts
+					// as confirmed for the chronic-unavailability tracker.
+					this._lastConfirmedPaths.add(relativePath)
 
 					if (lookup.kind === "absent") {
 						// File was confirmed absent from the remote directory listing
