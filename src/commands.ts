@@ -763,6 +763,76 @@ export async function rm(targetPath: string = "."): Promise<void> {
   process.exit();
 }
 
+/**
+ * Remove a tracked path from the snapshot. Used to give up on a file
+ * that has been chronically unavailable on the remote.
+ */
+export async function rmTracked(
+  targetPath: string,
+  relativePath: string,
+  options: { keepLocal?: boolean } = {}
+): Promise<void> {
+  const { syncEngine, repo } = await setupCommandContext(targetPath, {
+    syncEnabled: false,
+  });
+
+  const deleteLocal = !options.keepLocal;
+  out.task(
+    `Removing ${relativePath} from snapshot${deleteLocal ? " and local disk" : ""}`
+  );
+  try {
+    const removed = await syncEngine.removeTrackedPath(relativePath, {
+      deleteLocal,
+    });
+    if (!removed) {
+      out.done();
+      out.warn(`Path not tracked: ${relativePath}`);
+      await safeRepoShutdown(repo);
+      out.exit(1);
+      return;
+    }
+    out.done();
+    out.success(`Removed ${relativePath}`);
+  } catch (error) {
+    out.crash(error);
+  } finally {
+    await safeRepoShutdown(repo);
+  }
+}
+
+/**
+ * Force-recreate the remote document for a tracked path from current
+ * local content. Used to recover a file whose Automerge document has
+ * become chronically unavailable — mints a fresh doc and updates the
+ * parent directory entry to point at it.
+ */
+export async function resync(
+  targetPath: string,
+  relativePath: string
+): Promise<void> {
+  const { syncEngine, repo } = await setupCommandContext(targetPath);
+
+  out.task(`Re-syncing ${relativePath}`);
+  try {
+    const ok = await syncEngine.resyncPath(relativePath);
+    if (!ok) {
+      out.done();
+      out.warn(
+        `Could not re-sync ${relativePath} (not tracked or local file missing)`
+      );
+      await safeRepoShutdown(repo);
+      out.exit(1);
+      return;
+    }
+    out.done();
+    out.success(`Re-synced ${relativePath} to a fresh document`);
+  } catch (error) {
+    out.crash(error);
+  } finally {
+    await safeRepoShutdown(repo);
+  }
+}
+
 export async function commit(
   targetPath: string,
   _options: CommandOptions = {}
