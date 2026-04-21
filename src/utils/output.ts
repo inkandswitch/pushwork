@@ -345,7 +345,7 @@ export class Output {
       this.taskOriginalMessage = null;
       this.taskCurrentMessage = null;
     }
-    console.log(
+    console.error(
       chalk.red(
         message instanceof Error
           ? message.message
@@ -367,7 +367,7 @@ export class Output {
       this.taskOriginalMessage = null;
       this.taskCurrentMessage = null;
     }
-    console.log(
+    console.error(
       `\n${chalk.bgRed.white(` ${label} `)}${message && ` ${message}`}`
     );
   }
@@ -400,19 +400,19 @@ export class Output {
 
     if (error instanceof Error) {
       // Error type and message
-      console.log(chalk.red(`${error.name}: ${error.message}`));
+      console.error(chalk.red(`${error.name}: ${error.message}`));
 
       // Stack trace
       if (error.stack) {
-        console.log("");
-        console.log(chalk.dim("Stack trace:"));
+        console.error("");
+        console.error(chalk.dim("Stack trace:"));
         const stackLines = error.stack.split("\n").slice(1); // Skip first line (error message)
         stackLines.forEach((line) =>
-          console.log(chalk.dim(`  ${line.trim()}`))
+          console.error(chalk.dim(`  ${line.trim()}`))
         );
       }
     } else {
-      console.log(chalk.red(String(error)));
+      console.error(chalk.red(String(error)));
     }
 
     process.exit(exitCode);
