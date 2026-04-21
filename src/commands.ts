@@ -138,6 +138,18 @@ async function setupCommandContext(
  * Safely shutdown a repository with proper error handling
  */
 async function safeRepoShutdown(repo: Repo): Promise<void> {
+  // TEMPORARY WORKAROUND: pushwork's Subduction sync-verification only
+  // watches local head stability, which doesn't actually confirm the
+  // server received anything. Give any in-flight `syncWithAllPeers`
+  // calls a chance to finish (and the scheduler time to heal transient
+  // failures) before we tear the repo down. Remove once awaitSynced()
+  // (or equivalent) lands in @automerge/automerge-repo@subduction.
+  const graceMsEnv = process.env.PUSHWORK_SYNC_GRACE_MS;
+  const graceMs = graceMsEnv !== undefined ? Number(graceMsEnv) : 3000;
+  if (Number.isFinite(graceMs) && graceMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, graceMs));
+  }
+
   // Handle uncaught WebSocket errors that occur during shutdown
   const uncaughtErrorHandler = (err: Error) => {
     if (err.message.includes("WebSocket")) {
