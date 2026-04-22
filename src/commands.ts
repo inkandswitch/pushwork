@@ -18,7 +18,7 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
-import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
+import { DEFAULT_SUBDUCTION_SERVER, DEFAULT_SYNC_SERVER } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
@@ -51,19 +51,21 @@ async function initializeRepository(
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-  // Persist Subduction mode in config so subsequent commands pick it up
+  // Persist Subduction mode + server in config so subsequent commands pick
+  // them up. Without persisting sync_server here, `.pushwork/config.json`
+  // would retain the default WebSocket server even in --sub mode, and
+  // `pushwork config` / `status` would misreport the endpoint.
   if (sub) {
-    overrides = { ...overrides, subduction: true };
+    overrides = {
+      ...overrides,
+      subduction: true,
+      sync_server: overrides.sync_server ?? DEFAULT_SUBDUCTION_SERVER,
+    };
   }
 
   // Create configuration with overrides
   const configManager = new ConfigManager(resolvedPath);
   const config = await configManager.initializeWithOverrides(overrides);
-
-  // Override sync server for Subduction mode
-  if (sub && !overrides.sync_server) {
-    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
-  }
 
   // Create repository and sync engine
   const repo = await createRepo(resolvedPath, config, sub);
@@ -103,6 +105,7 @@ async function setupCommandContext(
     }
     if (localConfig?.subduction) {
       config.subduction = localConfig.subduction;
+      config.sync_server = localConfig.sync_server ?? DEFAULT_SUBDUCTION_SERVER;
     }
   } else {
     config = await configManager.getMerged();
