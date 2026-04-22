@@ -18,7 +18,7 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
-import { DEFAULT_SUBDUCTION_SERVER, DEFAULT_SYNC_SERVER } from "./types/config";
+import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
@@ -55,10 +55,6 @@ async function initializeRepository(
   // them up. Without persisting sync_server here, `.pushwork/config.json`
   // would retain the default WebSocket server even in --sub mode, and
   // `pushwork config` / `status` would misreport the endpoint.
-  //
-  // sync_server_storage_id is a WebSocket-mode concept (used for
-  // getSyncInfo-based verification). In Subduction mode it's meaningless,
-  // so we strip it from the overrides to avoid persisting dead baggage.
   if (sub) {
     const { sync_server_storage_id: _discarded, ...rest } = overrides;
     overrides = {
@@ -72,9 +68,6 @@ async function initializeRepository(
   const configManager = new ConfigManager(resolvedPath);
   let config = await configManager.initializeWithOverrides(overrides);
 
-  // The merge layer inherits sync_server_storage_id from defaults even
-  // though we stripped it from overrides. Clear it post-merge and re-save
-  // so the persisted config doesn't advertise a dead storage id.
   if (sub && config.sync_server_storage_id !== undefined) {
     config = { ...config, sync_server_storage_id: undefined };
     await configManager.save(config);
@@ -146,14 +139,8 @@ async function setupCommandContext(
     config = { ...config, sync_enabled: options.syncEnabled };
   }
 
-  // Read Subduction mode from persisted config
   const sub = config.subduction ?? false;
-
-  // Back-compat: older installs (before init --sub persisted sync_server)
-  // have subduction=true but sync_server still pointing at the default
-  // WebSocket endpoint. Rewrite only in that specific case so we don't
-  // clobber users who chose a custom Subduction endpoint.
-  if (sub && config.sync_server === DEFAULT_SYNC_SERVER) {
+  if (sub) {
     config.sync_server = DEFAULT_SUBDUCTION_SERVER;
   }
 
