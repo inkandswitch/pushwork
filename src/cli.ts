@@ -48,8 +48,12 @@ program
   });
 
 // Track command (set root directory URL without full initialization)
-const trackAction = async (url: string, path: string, opts: { force: boolean }) => {
-  await root(url, path, { force: opts.force });
+const trackAction = async (
+  url: string,
+  path: string,
+  opts: { force: boolean; sub: boolean }
+) => {
+  await root(url, path, { force: opts.force, sub: opts.sub });
 };
 
 program
@@ -65,6 +69,7 @@ program
     "."
   )
   .option("-f, --force", "Overwrite existing pushwork setup", false)
+  .option("--sub", "Use Subduction sync backend", false)
   .action(async (url, path, opts) => {
     await trackAction(url, path, opts);
   });
@@ -75,7 +80,8 @@ program
   .argument("<url>")
   .argument("[path]", "", ".")
   .option("-f, --force", "", false)
-  .action(async (url: string, path: string, opts: { force: boolean }) => {
+  .option("--sub", "", false)
+  .action(async (url: string, path: string, opts: { force: boolean; sub: boolean }) => {
     await trackAction(url, path, opts);
   });
 

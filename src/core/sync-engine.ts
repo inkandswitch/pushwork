@@ -585,8 +585,15 @@ export class SyncEngine {
 								}
 							}
 						} else if (failed.length > 0 && sub) {
-							debug(`sync: ${failed.length} documents timed out in sub mode (SubductionSource will retry)`)
-							out.taskLine(`${failed.length} documents still syncing (Subduction will retry)`, true)
+							// In sub mode we don't actively recreate — SubductionSource
+							// has its own heal-sync retry. Surface the incomplete
+							// state as a warning so the user knows to re-run sync
+							// to confirm convergence. (Stays a warning, not an
+							// error, because the background retry usually succeeds.)
+							const msg = `${failed.length} document${failed.length === 1 ? '' : 's'} did not converge during sync (Subduction will retry in the background; re-run sync to confirm)`
+							debug(`sync: ${msg}`)
+							out.taskLine(msg, true)
+							result.warnings.push(msg)
 						}
 
 						debug("sync: all handles synced to server")
@@ -622,10 +629,19 @@ export class SyncEngine {
 							)
 						debug("sync: syncing root directory touch to server")
 						out.update("Syncing root directory update")
-						await waitForSync(
+						const rootSync = await waitForSync(
 							[rootHandle],
 							storageId
 						)
+						if (rootSync.failed.length > 0) {
+							// Root touch failing means consumers (e.g. Patchwork)
+							// may not notice new content even though file docs
+							// synced. Surface as a warning so the user knows to
+							// re-run sync.
+							const msg = "Root directory update did not converge to server; consumers may not see recent changes until next sync"
+							debug(`sync: ${msg}`)
+							result.warnings.push(msg)
+						}
 					}
 				} catch (error) {
 					debug(`sync: network sync error: ${error}`)

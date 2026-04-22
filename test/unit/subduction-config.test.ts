@@ -46,15 +46,13 @@ describe("Subduction configuration", () => {
   });
 
   describe("sub flag option types", () => {
-    // These tests verify that the option interfaces accept `sub`.
+    // These tests verify that the option interfaces accept `sub` on the
+    // commands that actually have a --sub flag (init and clone). The flag
+    // is NOT on SyncOptions or WatchOptions because sync/watch read the
+    // backend choice from persisted config (see `setupCommandContext`).
     // If the type definitions are wrong, these will fail at compile time.
     it("should accept sub on InitOptions", () => {
       const opts: import("../../src/types/config").InitOptions = { sub: true };
-      expect(opts.sub).toBe(true);
-    });
-
-    it("should accept sub on SyncOptions", () => {
-      const opts: import("../../src/types/config").SyncOptions = { sub: true };
       expect(opts.sub).toBe(true);
     });
 
@@ -63,13 +61,8 @@ describe("Subduction configuration", () => {
       expect(opts.sub).toBe(true);
     });
 
-    it("should accept sub on WatchOptions", () => {
-      const opts: import("../../src/types/config").WatchOptions = { sub: true };
-      expect(opts.sub).toBe(true);
-    });
-
-    it("should default sub to undefined (not required)", () => {
-      const opts: import("../../src/types/config").SyncOptions = {};
+    it("should default sub to undefined (not required) on InitOptions", () => {
+      const opts: import("../../src/types/config").InitOptions = {};
       expect(opts.sub).toBeUndefined();
     });
   });
