@@ -20,11 +20,49 @@ import {
   watch,
 } from "./commands";
 
-const version = require("../package.json").version;
+const pkg = require("../package.json");
+const version = pkg.version;
+
+// Resolve dependency versions from installed package.json files. These
+// are the actual runtime versions, which is what users care about when
+// reporting bugs (they may differ from package.json ranges after a
+// `pnpm install` that satisfied a range with a newer patch).
+//
+// Some packages (like @automerge/automerge-repo) have an `exports` field
+// that blocks `require("pkg/package.json")`, so we resolve the package
+// entry point with `require.resolve` and walk up to find package.json.
+function depVersion(pkgName: string): string {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    let dir = path.dirname(require.resolve(pkgName));
+    while (dir !== path.dirname(dir)) {
+      const candidate = path.join(dir, "package.json");
+      if (fs.existsSync(candidate)) {
+        const data = JSON.parse(fs.readFileSync(candidate, "utf8"));
+        if (data.name === pkgName) {
+          return data.version;
+        }
+      }
+      dir = path.dirname(dir);
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+const versionString = [
+  `pushwork ${version}`,
+  `  @automerge/automerge               ${depVersion("@automerge/automerge")}`,
+  `  @automerge/automerge-repo          ${depVersion("@automerge/automerge-repo")}`,
+  `  @automerge/automerge-subduction    ${depVersion("@automerge/automerge-subduction")}`,
+].join("\n");
+
 const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(version, "-V, --version", "output the version number");
+  .version(versionString, "-V, --version", "output the version number");
 
 // Init command
 program
