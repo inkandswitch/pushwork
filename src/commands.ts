@@ -18,7 +18,7 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
-import { DEFAULT_SUBDUCTION_SERVER, DEFAULT_SYNC_SERVER } from "./types/config";
+import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
