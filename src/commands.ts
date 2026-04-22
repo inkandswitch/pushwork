@@ -141,7 +141,16 @@ async function setupCommandContext(
 
   const sub = config.subduction ?? false;
   if (sub) {
-    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+    // Default to the Subduction endpoint only if the user hasn't
+    // configured one. Respect any explicit sync_server value (including
+    // custom Subduction endpoints set via `init --sub --sync-server ...`).
+    if (!config.sync_server) {
+      config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+    }
+    // sync_server_storage_id is a WebSocket-mode concept; clear it so
+    // the in-memory config reflects what waitForSync actually uses
+    // (head-stability polling, not getSyncInfo verification).
+    config.sync_server_storage_id = undefined;
   }
 
   // Create repo with config
