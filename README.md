@@ -45,15 +45,15 @@ pushwork url
 
 **`init [path]`** - Initialize sync in a directory
 
-- `--sync-server <url>` - Custom sync server URL
-- `--sync-server-storage-id <id>` - Custom storage ID
+- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
+- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
 - `--debug` - Export performance flame graphs
 
 **`clone <url> <path>`** - Clone an existing synced directory
 
 - `--force` - Overwrite existing directory
-- `--sync-server <url>` - Custom sync server URL
-- `--sync-server-storage-id <id>` - Custom storage ID
+- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
+- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
 
 **`sync [path]`** - Run bidirectional synchronization
 
@@ -123,6 +123,20 @@ Configuration is stored in `.pushwork/config.json`:
   }
 }
 ```
+
+### Sync Backends
+
+Pushwork supports two sync backends:
+
+- **WebSocket (default)** — talks to `wss://sync3.automerge.org` via the
+  standard Automerge sync protocol. Uses `sync_server_storage_id` to
+  verify delivery via `getSyncInfo`.
+- **Subduction (opt-in)** — pass `--sub` on `init` or `clone` to select
+  the Subduction backend (default endpoint:
+  `wss://subduction.sync.inkandswitch.com`). The Subduction choice is
+  persisted in `.pushwork/config.json` as `"subduction": true`, so
+  subsequent `sync` / `watch` commands pick it up automatically.
+  `sync_server_storage_id` is not used in this mode.
 
 ## How It Works
 

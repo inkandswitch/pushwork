@@ -92,8 +92,10 @@ describe("createRepo with --sub", () => {
     // Add a new file
     await fs.writeFile(path.join(tmpDir, "added.txt"), "second");
 
-    // Sync should not throw
-    execSync(`node "${cliPath}" sync --sub "${tmpDir}"`, {
+    // Sync should not throw. The `sync` command has no --sub flag — it
+    // reads the backend choice from .pushwork/config.json (persisted by
+    // the init --sub above).
+    execSync(`node "${cliPath}" sync "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });

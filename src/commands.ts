@@ -51,18 +51,26 @@ async function initializeRepository(
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-  // Persist Subduction mode in config so subsequent commands pick it up
+  // Persist Subduction mode + server in config so subsequent commands pick
+  // them up. Without persisting sync_server here, `.pushwork/config.json`
+  // would retain the default WebSocket server even in --sub mode, and
+  // `pushwork config` / `status` would misreport the endpoint.
   if (sub) {
-    overrides = { ...overrides, subduction: true };
+    const { sync_server_storage_id: _discarded, ...rest } = overrides;
+    overrides = {
+      ...rest,
+      subduction: true,
+      sync_server: rest.sync_server ?? DEFAULT_SUBDUCTION_SERVER,
+    };
   }
 
   // Create configuration with overrides
   const configManager = new ConfigManager(resolvedPath);
-  const config = await configManager.initializeWithOverrides(overrides);
+  let config = await configManager.initializeWithOverrides(overrides);
 
-  // Override sync server for Subduction mode
-  if (sub && !overrides.sync_server) {
-    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+  if (sub && config.sync_server_storage_id !== undefined) {
+    config = { ...config, sync_server_storage_id: undefined };
+    await configManager.save(config);
   }
 
   // Create repository and sync engine
@@ -95,7 +103,10 @@ async function setupCommandContext(
   let config: DirectoryConfig;
 
   if (options?.forceDefaults) {
-    // Force mode: use defaults, only preserving root_directory_url and subduction from local config
+    // Force mode: use defaults, only preserving backend-selection keys from
+    // local config (root_directory_url, subduction flag, and the sync
+    // endpoint the user originally chose). Everything else (exclude
+    // patterns, artifact dirs, move threshold, etc.) is reset to defaults.
     const localConfig = await configManager.load();
     config = configManager.getDefaultDirectoryConfig();
     if (localConfig?.root_directory_url) {
@@ -103,6 +114,21 @@ async function setupCommandContext(
     }
     if (localConfig?.subduction) {
       config.subduction = localConfig.subduction;
+      config.sync_server = localConfig.sync_server ?? DEFAULT_SUBDUCTION_SERVER;
+      // sync_server_storage_id is meaningless in Subduction mode; drop it
+      // so the in-memory config reflects reality.
+      config.sync_server_storage_id = undefined;
+    } else {
+      // WebSocket mode: preserve the user's custom server + storage id
+      // if they configured one. Without this, `pushwork sync` (default
+      // force mode) would silently reset a custom --sync-server back to
+      // DEFAULT_SYNC_SERVER on every run.
+      if (localConfig?.sync_server) {
+        config.sync_server = localConfig.sync_server;
+      }
+      if (localConfig?.sync_server_storage_id) {
+        config.sync_server_storage_id = localConfig.sync_server_storage_id;
+      }
     }
   } else {
     config = await configManager.getMerged();
@@ -113,12 +139,18 @@ async function setupCommandContext(
     config = { ...config, sync_enabled: options.syncEnabled };
   }
 
-  // Read Subduction mode from persisted config
   const sub = config.subduction ?? false;
-
-  // Override sync server for Subduction mode
   if (sub) {
-    config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+    // Default to the Subduction endpoint only if the user hasn't
+    // configured one. Respect any explicit sync_server value (including
+    // custom Subduction endpoints set via `init --sub --sync-server ...`).
+    if (!config.sync_server) {
+      config.sync_server = DEFAULT_SUBDUCTION_SERVER;
+    }
+    // sync_server_storage_id is a WebSocket-mode concept; clear it so
+    // the in-memory config reflects what waitForSync actually uses
+    // (head-stability polling, not getSyncInfo verification).
+    config.sync_server_storage_id = undefined;
   }
 
   // Create repo with config
@@ -229,15 +261,25 @@ export async function init(
   // Set root directory URL in snapshot
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
 
-  // Wait for root document to sync to server if sync is enabled
+  // Wait for root document to sync to server if sync is enabled.
   // With Subduction, we skip StorageId-based sync verification —
   // the SubductionSource handles sync internally.
-  if (config.sync_enabled && !sub && config.sync_server_storage_id) {
-    out.update("Syncing to server");
-    const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
-    if (failed.length > 0) {
-      out.taskLine("Root document failed to sync to server", true);
-      // Continue anyway - the document is created locally and will sync later
+  if (config.sync_enabled && !sub) {
+    if (config.sync_server_storage_id) {
+      out.update("Syncing to server");
+      const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
+      if (failed.length > 0) {
+        out.taskLine("Root document failed to sync to server", true);
+        // Continue anyway - the document is created locally and will sync later
+      }
+    } else {
+      // WebSocket mode without a storage id can't verify delivery via
+      // getSyncInfo. Warn loudly so users don't silently end up with
+      // data that never reached the server.
+      out.taskLine(
+        "Warning: sync_server_storage_id is not set; skipping post-init sync verification",
+        true
+      );
     }
   }
 
@@ -511,6 +553,7 @@ export async function status(
   statusInfo["Files"] = syncStatus.snapshot
     ? `${fileCount} tracked`
     : undefined;
+  statusInfo["Backend"] = config?.subduction ? "subduction" : "websocket";
   statusInfo["Sync"] = config?.sync_server;
 
   // Add more detailed info in verbose mode
@@ -690,6 +733,7 @@ export async function clone(
   out.obj({
     Path: resolvedPath,
     Files: `${result.filesChanged} downloaded`,
+    Backend: config.subduction ? "subduction" : "websocket",
     Sync: config.sync_server,
   });
   out.successBlock("CLONED", rootUrl);
@@ -876,6 +920,7 @@ export async function config(
     // Show basic config info
     out.infoBlock("CONFIGURATION");
     out.obj({
+      Backend: config.subduction ? "subduction" : "websocket",
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
       Exclusions: config.exclude_patterns?.length,
@@ -1085,7 +1130,7 @@ async function runScript(
 export async function root(
   rootUrl: string,
   targetPath: string = ".",
-  options: { force?: boolean } = {}
+  options: { force?: boolean; sub?: boolean } = {}
 ): Promise<void> {
   if (!rootUrl.startsWith("automerge:")) {
     out.error(
@@ -1097,6 +1142,7 @@ export async function root(
 
   const resolvedPath = path.resolve(targetPath);
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
+  const sub = options.sub ?? false;
 
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
@@ -1119,11 +1165,27 @@ export async function root(
   };
   await fs.writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf-8");
 
-  // Ensure config exists
+  // Ensure config exists. In Subduction mode, persist the backend choice
+  // and the correct server so subsequent `sync` runs use the right endpoint.
   const configManager = new ConfigManager(resolvedPath);
-  await configManager.initializeWithOverrides({});
+  if (sub) {
+    let cfg = await configManager.initializeWithOverrides({
+      subduction: true,
+      sync_server: DEFAULT_SUBDUCTION_SERVER,
+    });
+    // Strip dead-baggage storage_id that getDefaultDirectoryConfig seeded.
+    if (cfg.sync_server_storage_id !== undefined) {
+      cfg = { ...cfg, sync_server_storage_id: undefined };
+      await configManager.save(cfg);
+    }
+  } else {
+    await configManager.initializeWithOverrides({});
+  }
 
   out.successBlock("ROOT SET", rootUrl);
+  if (sub) {
+    out.info("Using Subduction sync backend");
+  }
   process.exit();
 }
 
