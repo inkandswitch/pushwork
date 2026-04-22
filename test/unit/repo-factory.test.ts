@@ -1,12 +1,11 @@
 /**
- * Tests for repo-factory.ts Subduction configuration.
+ * Tests for repo-factory.ts backend selection.
  *
  * The actual Repo construction requires Wasm initialization via real ESM
  * dynamic imports. We test by invoking the CLI as a subprocess (which runs
  * in a real Node.js context) and inspecting the results.
  *
- * Non-sub (WebSocket) init is tested elsewhere (init-sync.test.ts).
- * These tests focus on the --sub path.
+ * Covers both the default Subduction backend and the `--legacy` path.
  */
 
 import * as path from "path";
@@ -14,13 +13,16 @@ import * as fs from "fs/promises";
 import * as tmp from "tmp";
 import { execSync } from "child_process";
 
-describe("createRepo with --sub", () => {
+describe("createRepo (default Subduction)", () => {
   let tmpDir: string;
   let cleanup: () => void;
   const cliPath = path.join(__dirname, "../../dist/cli.js");
 
   beforeAll(() => {
-    execSync("pnpm build", { cwd: path.join(__dirname, "../.."), stdio: "pipe" });
+    execSync("pnpm build", {
+      cwd: path.join(__dirname, "../.."),
+      stdio: "pipe",
+    });
   });
 
   beforeEach(async () => {
@@ -33,10 +35,10 @@ describe("createRepo with --sub", () => {
     cleanup();
   });
 
-  it("should create a working repo with --sub flag", async () => {
+  it("creates a working repo with default (Subduction) backend", async () => {
     await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -46,10 +48,10 @@ describe("createRepo with --sub", () => {
     expect(stat.isFile()).toBe(true);
   });
 
-  it("should produce a valid automerge URL", async () => {
+  it("produces a valid automerge URL", async () => {
     await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -62,12 +64,12 @@ describe("createRepo with --sub", () => {
     expect(url).toMatch(/^automerge:/);
   });
 
-  it("should track files in the snapshot", async () => {
+  it("tracks files in the snapshot", async () => {
     await fs.writeFile(path.join(tmpDir, "a.txt"), "aaa");
     await fs.mkdir(path.join(tmpDir, "sub"), { recursive: true });
     await fs.writeFile(path.join(tmpDir, "sub", "b.txt"), "bbb");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -81,20 +83,17 @@ describe("createRepo with --sub", () => {
     expect(ls).toContain("b.txt");
   });
 
-  it("should be able to sync after init", async () => {
+  it("can sync after init (persisted Subduction config)", async () => {
     await fs.writeFile(path.join(tmpDir, "initial.txt"), "first");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
 
-    // Add a new file
     await fs.writeFile(path.join(tmpDir, "added.txt"), "second");
 
-    // Sync should not throw. The `sync` command has no --sub flag — it
-    // reads the backend choice from .pushwork/config.json (persisted by
-    // the init --sub above).
+    // Sync reads the backend from .pushwork/config.json.
     execSync(`node "${cliPath}" sync "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
@@ -108,4 +107,65 @@ describe("createRepo with --sub", () => {
     expect(ls).toContain("initial.txt");
     expect(ls).toContain("added.txt");
   });
+});
+
+describe("createRepo with --legacy", () => {
+  let tmpDir: string;
+  let cleanup: () => void;
+  const cliPath = path.join(__dirname, "../../dist/cli.js");
+
+  beforeEach(async () => {
+    const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+    tmpDir = tmpObj.name;
+    cleanup = tmpObj.removeCallback;
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /**
+   * Run `pushwork init --legacy` and tolerate network timeouts.
+   *
+   * `init --legacy` calls `waitForSync` against the classic WebSocket
+   * server to verify root delivery. In CI/sandboxes without outbound
+   * network access, this hangs until the 60s timeout. We only care
+   * that the config and snapshot were written before the network call,
+   * so we invoke with a short SIGKILL timeout and ignore the exit code.
+   */
+  function initLegacy(dir: string): void {
+    try {
+      execSync(`node "${cliPath}" init --legacy "${dir}"`, {
+        stdio: "pipe",
+        timeout: 10000,
+        killSignal: "SIGKILL",
+      });
+    } catch {
+      // Timeouts, non-zero exits, etc. are fine — we assert on disk
+      // state, which is written before the blocking network call.
+    }
+  }
+
+  it("creates a working repo with --legacy flag", async () => {
+    await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
+    initLegacy(tmpDir);
+
+    const snapshotPath = path.join(tmpDir, ".pushwork", "snapshot.json");
+    const stat = await fs.stat(snapshotPath);
+    expect(stat.isFile()).toBe(true);
+  }, 30000);
+
+  it("persists protocol: 'legacy' in config", async () => {
+    await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
+    initLegacy(tmpDir);
+
+    const cfgRaw = await fs.readFile(
+      path.join(tmpDir, ".pushwork", "config.json"),
+      "utf8"
+    );
+    const cfg = JSON.parse(cfgRaw);
+    expect(cfg.protocol).toBe("legacy");
+    expect(cfg.config_version).toBe(1);
+    expect(cfg.sync_server_storage_id).toBeDefined();
+  }, 30000);
 });
