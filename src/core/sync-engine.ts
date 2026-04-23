@@ -197,10 +197,14 @@ export class SyncEngine {
 
 	/**
 	 * Get the appropriate URL for a subdirectory's directory entry.
-	 * Always uses plain URLs — versioned URLs on directories can cause
-	 * issues where consumers see a version without the docs array.
+	 * Artifact directories get versioned URLs (with heads) so consumers can
+	 * fetch the exact snapshotted version, matching how artifact files work.
+	 * Non-artifact directories get plain URLs for collaborative editing.
 	 */
-	private getDirEntryUrl(handle: DocHandle<unknown>): AutomergeUrl {
+	private getDirEntryUrl(handle: DocHandle<unknown>, dirPath: string): AutomergeUrl {
+		if (this.isArtifactPath(dirPath)) {
+			return this.getVersionedUrl(handle)
+		}
 		return getPlainUrl(handle.url)
 	}
 
@@ -959,7 +963,7 @@ export class SyncEngine {
 							)
 						subdirUpdates.push({
 							name: childName,
-							url: this.getDirEntryUrl(childHandle),
+							url: this.getDirEntryUrl(childHandle, modifiedDir),
 						})
 					}
 				}
@@ -1459,7 +1463,7 @@ export class SyncEngine {
 						this.handlesByPath.set(directoryPath, childDirHandle)
 
 						// Get appropriate URL for directory entry
-						const entryUrl = this.getDirEntryUrl(childDirHandle)
+						const entryUrl = this.getDirEntryUrl(childDirHandle, directoryPath)
 
 						// Update snapshot with discovered directory
 						this.snapshotManager.updateDirectoryEntry(snapshot, directoryPath, {
@@ -1490,7 +1494,7 @@ export class SyncEngine {
 		const dirHandle = this.repo.create(dirDoc)
 
 		// Get appropriate URL for directory entry
-		const dirEntryUrl = this.getDirEntryUrl(dirHandle)
+		const dirEntryUrl = this.getDirEntryUrl(dirHandle, directoryPath)
 
 		// Add this directory to its parent
 		// Use plain URL for mutable handle
