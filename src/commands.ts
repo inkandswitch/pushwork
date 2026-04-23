@@ -68,9 +68,7 @@ async function initializeRepository(
   const configManager = new ConfigManager(resolvedPath);
   const config = await configManager.initializeWithOverrides(effectiveOverrides);
 
-  // The Subduction backend takes a boolean in repo-factory today.
-  const sub = protocol === "subduction";
-  const repo = await createRepo(resolvedPath, config, sub);
+  const repo = await createRepo(resolvedPath, config, protocol);
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
   return { config, repo, syncEngine };
@@ -89,8 +87,13 @@ async function migrateConfigIfNeeded(
   try {
     result = await configManager.migrateIfNeeded();
   } catch (error) {
-    out.error(`Config migration failed: ${error}`);
-    out.exit(1);
+    // Migration is a convenience — `resolveProtocol` handles v0 configs
+    // transparently in memory on every command, so a failed migration
+    // (disk full, read-only filesystem, permission denied, etc.) is
+    // non-fatal. Warn loudly and carry on with in-memory v0 handling.
+    out.warn(
+      `Config migration failed (continuing with in-memory v0 handling): ${error}`
+    );
     return;
   }
   if (result.migrated) {
@@ -163,10 +166,8 @@ async function setupCommandContext(
     }
   }
 
-  const sub = protocol === "subduction";
-
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config, sub);
+  const repo = await createRepo(resolvedPath, config, protocol);
 
   // Create sync engine
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
@@ -263,8 +264,6 @@ export async function init(
     protocol
   );
 
-  const sub = protocol === "subduction";
-
   // Create new root directory document
   out.update("Creating root directory");
   const dirName = path.basename(resolvedPath);
@@ -282,7 +281,7 @@ export async function init(
   // Wait for root document to sync to server if sync is enabled.
   // With Subduction, we skip StorageId-based sync verification —
   // the SubductionSource handles sync internally.
-  if (config.sync_enabled && !sub) {
+  if (config.sync_enabled && protocol === "legacy") {
     if (config.sync_server_storage_id) {
       out.update("Syncing to server");
       const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
@@ -291,8 +290,8 @@ export async function init(
         // Continue anyway - the document is created locally and will sync later
       }
     } else {
-      // WebSocket mode without a storage id can't verify delivery via
-      // getSyncInfo. Warn loudly so users don't silently end up with
+      // Legacy WebSocket mode without a storage id can't verify delivery
+      // via getSyncInfo. Warn loudly so users don't silently end up with
       // data that never reached the server.
       out.taskLine(
         "Warning: sync_server_storage_id is not set; skipping post-init sync verification",
@@ -303,7 +302,7 @@ export async function init(
 
   // Run initial sync to capture existing files
   out.update("Running initial sync");
-  const result = await syncEngine.sync({ sub });
+  const result = await syncEngine.sync({ protocol });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -341,7 +340,6 @@ export async function sync(
     forceDefaults: !options.gentle,
   });
 
-  const sub = config.protocol === "subduction";
   if (config.protocol === "legacy") {
     out.taskLine("Using legacy WebSocket sync backend (from config)", true);
   }
@@ -396,7 +394,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await syncEngine.sync({ sub });
+    const result = await syncEngine.sync({ protocol: config.protocol });
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo);
@@ -743,12 +741,10 @@ export async function clone(
     protocol
   );
 
-  const sub = protocol === "subduction";
-
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-  const result = await syncEngine.sync({ sub });
+  const result = await syncEngine.sync({ protocol });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -945,10 +941,16 @@ export async function config(
       out.exit(1);
     }
   } else {
-    // Show basic config info
+    // Show basic config info. For the schema version display we read
+    // the *raw* local config so users can see whether their on-disk
+    // config has been migrated yet. `config.config_version` comes from
+    // `getMerged()`, which layers defaults (always v1) over the local
+    // file — so it would always report "1" even for an unmigrated v0
+    // file on disk.
+    const rawLocal = await configManager.load();
     out.infoBlock("CONFIGURATION");
     out.obj({
-      "Config version": config.config_version ?? "0 (pre-migration)",
+      "Config version": rawLocal?.config_version ?? "0 (pre-migration)",
       Backend: config.protocol ?? "subduction",
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
@@ -977,8 +979,6 @@ export async function watch(
   const { repo, syncEngine, config, workingDir } = await setupCommandContext(
     targetPath,
   );
-
-  const sub = config.protocol === "subduction";
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
 
@@ -1035,7 +1035,7 @@ export async function watch(
 
       // Run sync
       out.task("Syncing");
-      const result = await syncEngine.sync({ sub });
+      const result = await syncEngine.sync({ protocol: config.protocol });
 
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {

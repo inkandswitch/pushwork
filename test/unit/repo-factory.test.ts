@@ -132,6 +132,14 @@ describe("createRepo with --legacy", () => {
    * network access, this hangs until the 60s timeout. We only care
    * that the config and snapshot were written before the network call,
    * so we invoke with a short SIGKILL timeout and ignore the exit code.
+   *
+   * CONTRACT: this test depends on `init` in `src/commands.ts` writing
+   *   (1) `.pushwork/config.json` via `initializeRepository`, and
+   *   (2) `.pushwork/snapshot.json` via `setRootDirectoryUrl`
+   * BEFORE it calls `waitForSync` (the blocking network step). If that
+   * ordering ever changes — e.g. sync moves earlier in init — this
+   * test becomes a false positive and will need updating (ideally by
+   * stubbing the network adapter in `repo-factory.ts`).
    */
   function initLegacy(dir: string): void {
     try {
