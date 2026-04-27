@@ -77,21 +77,21 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
       opts.syncServer
     );
-    await init(path, { syncServer, syncServerStorageId, sub: opts.sub });
+    await init(path, { syncServer, syncServerStorageId, legacy: opts.legacy });
   });
 
 // Track command (set root directory URL without full initialization)
 const trackAction = async (
   url: string,
   path: string,
-  opts: { force: boolean; sub: boolean }
+  opts: { force: boolean; legacy: boolean }
 ) => {
-  await root(url, path, { force: opts.force, sub: opts.sub });
+  await root(url, path, { force: opts.force, legacy: opts.legacy });
 };
 
 program
@@ -107,7 +107,7 @@ program
     "."
   )
   .option("-f, --force", "Overwrite existing pushwork setup", false)
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .action(async (url, path, opts) => {
     await trackAction(url, path, opts);
   });
@@ -118,8 +118,8 @@ program
   .argument("<url>")
   .argument("[path]", "", ".")
   .option("-f, --force", "", false)
-  .option("--sub", "", false)
-  .action(async (url: string, path: string, opts: { force: boolean; sub: boolean }) => {
+  .option("--legacy", "", false)
+  .action(async (url: string, path: string, opts: { force: boolean; legacy: boolean }) => {
     await trackAction(url, path, opts);
   });
 
@@ -137,7 +137,7 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
@@ -148,7 +148,7 @@ program
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
-      sub: opts.sub,
+      legacy: opts.legacy,
     });
   });
 

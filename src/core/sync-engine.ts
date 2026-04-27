@@ -18,6 +18,7 @@ import {
 	MoveCandidate,
 	DirectoryConfig,
 	DetectedChange,
+	SyncProtocol,
 } from "../types"
 import {
 	writeFileContent,
@@ -430,9 +431,17 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Run full bidirectional sync
+	 * Run full bidirectional sync.
+	 *
+	 * `protocol` selects which sync-verification strategy to use after
+	 * push. In "subduction" mode (default), `waitForSync` falls back to
+	 * head-stability polling. In "legacy" mode, it uses `getSyncInfo`
+	 * against the configured `sync_server_storage_id`.
+	 *
+	 * Typically derived from `this.config.protocol` by the caller and
+	 * passed through so Repo backend and sync-verification agree.
 	 */
-	async sync(options?: {sub?: boolean}): Promise<SyncResult> {
+	async sync(options?: { protocol?: SyncProtocol }): Promise<SyncResult> {
 		const result: SyncResult = {
 			success: false,
 			filesChanged: 0,
@@ -534,7 +543,9 @@ export class SyncEngine {
 
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
-				const sub = options?.sub ?? false
+				const protocol: SyncProtocol =
+					options?.protocol ?? this.config.protocol ?? "subduction"
+				const sub = protocol === "subduction"
 				// In Subduction mode, pass no StorageId so waitForSync
 				// falls back to head-stability polling. In WebSocket mode,
 				// pass the StorageId for precise getSyncInfo-based verification.

@@ -45,15 +45,15 @@ pushwork url
 
 **`init [path]`** - Initialize sync in a directory
 
-- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
-- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
+- `--sync-server <url> <storage-id...>` - Custom sync server URL and storage ID
+- `--legacy` - Use the legacy WebSocket sync backend (Subduction is default)
 - `--debug` - Export performance flame graphs
 
 **`clone <url> <path>`** - Clone an existing synced directory
 
 - `--force` - Overwrite existing directory
-- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
-- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
+- `--sync-server <url> <storage-id...>` - Custom sync server URL and storage ID
+- `--legacy` - Use the legacy WebSocket sync backend (Subduction is default)
 
 **`sync [path]`** - Run bidirectional synchronization
 
@@ -105,38 +105,63 @@ Configuration is stored in `.pushwork/config.json`:
 
 ```json
 {
+  "config_version": 1,
+  "protocol": "subduction",
+  "sync_server": "wss://subduction.sync.inkandswitch.com",
+  "sync_enabled": true,
+  "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
+  "artifact_directories": ["dist"],
+  "sync": {
+    "move_detection_threshold": 0.7
+  }
+}
+```
+
+A legacy-backend config looks like:
+
+```json
+{
+  "config_version": 1,
+  "protocol": "legacy",
   "sync_server": "wss://sync3.automerge.org",
   "sync_server_storage_id": "3760df37-a4c6-4f66-9ecd-732039a9385d",
   "sync_enabled": true,
-  "defaults": {
-    "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
-    "large_file_threshold": "100MB"
-  },
-  "diff": {
-    "show_binary": false
-  },
+  "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
+  "artifact_directories": ["dist"],
   "sync": {
-    "move_detection_threshold": 0.8,
-    "prompt_threshold": 0.5,
-    "auto_sync": false,
-    "parallel_operations": 4
+    "move_detection_threshold": 0.7
   }
 }
 ```
 
 ### Sync Backends
 
-Pushwork supports two sync backends:
+Pushwork supports two sync backends. Subduction is the default.
 
-- **WebSocket (default)** — talks to `wss://sync3.automerge.org` via the
-  standard Automerge sync protocol. Uses `sync_server_storage_id` to
-  verify delivery via `getSyncInfo`.
-- **Subduction (opt-in)** — pass `--sub` on `init` or `clone` to select
-  the Subduction backend (default endpoint:
-  `wss://subduction.sync.inkandswitch.com`). The Subduction choice is
-  persisted in `.pushwork/config.json` as `"subduction": true`, so
-  subsequent `sync` / `watch` commands pick it up automatically.
-  `sync_server_storage_id` is not used in this mode.
+- **Subduction (default)** — `wss://subduction.sync.inkandswitch.com`.
+  The backend is selected at `init` / `clone` time and persisted in
+  `.pushwork/config.json` as `"protocol": "subduction"`. Subsequent
+  `sync` / `watch` runs read the choice from config.
+- **Legacy WebSocket** — opt in via `--legacy` on `init` or `clone` to
+  use `wss://sync3.automerge.org` with `sync_server_storage_id` for
+  delivery verification. Persisted as `"protocol": "legacy"`.
+
+### Config schema version
+
+Configs written by current pushwork include `"config_version": 1`.
+Older configs (without this field) are automatically migrated on the
+next write-ish command (`sync`, `watch`, `commit`, `init`, `clone`,
+`track`). The original v0 file is saved as `config.json.bak` (or
+`config.json.bak.1`, `.bak.2`, ... if earlier backups exist) and a
+notice is printed.
+
+Migration inference:
+
+- v0 config with `"subduction": true`  → `"protocol": "subduction"`
+- v0 config with `"subduction": false` → `"protocol": "legacy"`
+- v0 config with no `subduction` key   → `"protocol": "legacy"` (this
+  matches pre-Subduction installs that were already using the
+  WebSocket relay)
 
 ## How It Works
 
