@@ -88,4 +88,18 @@ export interface DetectedChange {
 	remoteHead?: UrlHeads
 	/** New remote URL when the remote document was replaced (artifact URL change) */
 	remoteUrl?: AutomergeUrl
+	/**
+	 * True if this change was emitted on the basis of a successful read of
+	 * the authoritative remote state (e.g. the parent directory document
+	 * was read and the file was observed to be absent from its entries).
+	 *
+	 * False or undefined means the change was inferred from a failed read,
+	 * timeout, or missing document — which can happen transiently during
+	 * torn-write recovery, slow-server syncs, or propagation delays.
+	 *
+	 * Consumers that perform destructive operations (e.g. deleting a local
+	 * file on the basis of `remoteContent === null`) MUST check this flag
+	 * and refuse to act on unconfirmed absences.
+	 */
+	confirmedAbsent?: boolean
 }

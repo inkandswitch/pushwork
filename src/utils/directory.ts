@@ -4,7 +4,7 @@ import {
   parseAutomergeUrl,
   stringifyAutomergeUrl,
 } from "@automerge/automerge-repo";
-import { DirectoryDocument } from "../types";
+import { DirectoryDocument, DirectoryEntry } from "../types";
 
 /**
  * Get a plain URL (without heads) from any URL.
@@ -17,6 +17,27 @@ export function getPlainUrl(url: AutomergeUrl): AutomergeUrl {
 }
 
 /**
+ * Result of a remote directory lookup. Distinguishes three cases that
+ * callers must handle differently:
+ *
+ * - `found`: the authoritative directory document was read and the target
+ *   file entry was present in it.
+ * - `absent`: the authoritative directory document was read and the target
+ *   file entry was NOT present in it. This is positive evidence that the
+ *   file was removed from the remote directory.
+ * - `unavailable`: the lookup could not be completed (document not yet
+ *   synced, fetch timed out, parse error, etc.). The caller does NOT know
+ *   whether the file is present or absent remotely.
+ *
+ * Destructive operations (e.g. deleting a local file) must only act on
+ * `absent`, never on `unavailable`.
+ */
+export type RemoteLookup =
+  | { kind: "found"; entry: DirectoryEntry }
+  | { kind: "absent" }
+  | { kind: "unavailable"; reason: string };
+
+/**
  * Find a file in the directory hierarchy by path.
  *
  * IMPORTANT: This function strips heads from all URLs before navigation.
@@ -26,48 +47,97 @@ export function getPlainUrl(url: AutomergeUrl): AutomergeUrl {
  * 2. These URLs may have been captured when the subdirectory was empty
  * 3. Using versioned URLs would make files appear to not exist
  * 4. This would trigger false "remote deletion" detection
+ *
+ * Returns a tri-state `RemoteLookup`:
+ * - `found` when the directory doc was read and the file entry exists
+ * - `absent` when the directory doc was read and the file entry does NOT exist
+ * - `unavailable` when any directory doc along the path could not be read
+ *
+ * Never conflates "not in directory" with "could not read directory".
  */
 export async function findFileInDirectoryHierarchy(
   repo: Repo,
   directoryUrl: AutomergeUrl,
   filePath: string
-): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-  try {
-    const pathParts = filePath.split("/");
-    let currentDirUrl = getPlainUrl(directoryUrl);
+): Promise<RemoteLookup> {
+  const pathParts = filePath.split("/");
+  let currentDirUrl = getPlainUrl(directoryUrl);
 
-    // Navigate through directories to find the parent directory
-    for (let i = 0; i < pathParts.length - 1; i++) {
-      const dirName = pathParts[i];
+  // Navigate through directories to find the parent directory
+  for (let i = 0; i < pathParts.length - 1; i++) {
+    const dirName = pathParts[i];
+    let dirDoc: DirectoryDocument | undefined;
+
+    try {
       const dirHandle = await repo.find<DirectoryDocument>(currentDirUrl);
-      const dirDoc = await dirHandle.doc();
-
-      if (!dirDoc) return null;
-
-      const subDirEntry = dirDoc.docs.find(
-        (entry: { name: string; type: string; url: AutomergeUrl }) =>
-          entry.name === dirName && entry.type === "folder"
-      );
-
-      if (!subDirEntry) return null;
-      currentDirUrl = getPlainUrl(subDirEntry.url);
+      dirDoc = dirHandle.doc();
+    } catch (error) {
+      return {
+        kind: "unavailable",
+        reason: `failed to fetch intermediate directory at ${pathParts.slice(0, i + 1).join("/")}: ${error}`,
+      };
     }
 
-    // Now look for the file in the final directory
-    const fileName = pathParts[pathParts.length - 1];
-    const finalDirHandle = await repo.find<DirectoryDocument>(currentDirUrl);
-    const finalDirDoc = await finalDirHandle.doc();
+    if (!dirDoc) {
+      return {
+        kind: "unavailable",
+        reason: `intermediate directory not ready at ${pathParts.slice(0, i + 1).join("/")}`,
+      };
+    }
 
-    if (!finalDirDoc) return null;
-
-    const fileEntry = finalDirDoc.docs.find(
+    const subDirEntry = dirDoc.docs.find(
       (entry: { name: string; type: string; url: AutomergeUrl }) =>
-        entry.name === fileName && entry.type === "file"
+        entry.name === dirName && entry.type === "folder"
     );
 
-    return fileEntry || null;
-  } catch (error) {
-    // Failed to find file in hierarchy
-    return null;
+    // The directory was read successfully but the intermediate folder is
+    // not in its listing. From the caller's perspective this means the
+    // target path is absent from the remote hierarchy — whoever was
+    // holding it removed the whole parent folder.
+    if (!subDirEntry) {
+      return { kind: "absent" };
+    }
+    currentDirUrl = getPlainUrl(subDirEntry.url);
   }
+
+  // Now look for the file in the final directory
+  const fileName = pathParts[pathParts.length - 1];
+  let finalDirDoc: DirectoryDocument | undefined;
+
+  try {
+    const finalDirHandle = await repo.find<DirectoryDocument>(currentDirUrl);
+    finalDirDoc = finalDirHandle.doc();
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      reason: `failed to fetch parent directory of ${filePath}: ${error}`,
+    };
+  }
+
+  if (!finalDirDoc) {
+    return {
+      kind: "unavailable",
+      reason: `parent directory not ready for ${filePath}`,
+    };
+  }
+
+  const fileEntry = finalDirDoc.docs.find(
+    (entry: { name: string; type: string; url: AutomergeUrl }) =>
+      entry.name === fileName && entry.type === "file"
+  );
+
+  if (!fileEntry) {
+    return { kind: "absent" };
+  }
+
+  // Spread into a plain object so callers never hold onto an Automerge
+  // proxy past the dirDoc.docs iteration.
+  return {
+    kind: "found",
+    entry: {
+      name: fileEntry.name,
+      type: fileEntry.type as "file" | "folder",
+      url: fileEntry.url,
+    },
+  };
 }

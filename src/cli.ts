@@ -15,6 +15,8 @@ import {
   commit,
   url,
   rm,
+  rmTracked,
+  resync,
   ls,
   config,
   watch,
@@ -290,6 +292,39 @@ program
   .argument("[path]", "Directory path (default: current directory)", ".")
   .action(async (path) => {
     await rm(path);
+  });
+
+// Rm-tracked command — remove a specific path from the snapshot
+program
+  .command("rm-tracked")
+  .summary("Give up tracking a chronically unavailable path")
+  .description(
+    "Remove a file from the pushwork snapshot (and by default from the local filesystem). " +
+      "Use this when a tracked file has been unavailable on the remote for so many syncs " +
+      "that you want pushwork to stop trying to reconcile it."
+  )
+  .argument("<file>", "Relative path of the tracked file")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .option("--keep-local", "Keep the local file; only remove it from the snapshot", false)
+  .action(async (file, pathArg, opts) => {
+    await rmTracked(pathArg, file, {
+      keepLocal: opts.keepLocal,
+    });
+  });
+
+// Resync command — re-push a tracked file as a fresh document
+program
+  .command("resync")
+  .summary("Re-push a tracked file as a fresh Automerge document")
+  .description(
+    "Create a new Automerge document from the current local content and update " +
+      "the parent directory entry to point at it. Useful when the existing document " +
+      "has become chronically unavailable or corrupted on the remote."
+  )
+  .argument("<file>", "Relative path of the tracked file")
+  .argument("[path]", "Directory path (default: current directory)", ".")
+  .action(async (file, pathArg) => {
+    await resync(pathArg, file);
   });
 
 // List command

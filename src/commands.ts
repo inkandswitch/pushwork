@@ -74,8 +74,15 @@ async function initializeRepository(
   }
 
   // Create repository and sync engine
-  const repo = await createRepo(resolvedPath, config, sub);
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const { repo, requiresRehydrate, recoveryReason } = await createRepo(
+    resolvedPath,
+    config,
+    sub
+  );
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, {
+    requiresRehydrate,
+    recoveryReason,
+  });
 
   return { config, repo, syncEngine };
 }
@@ -154,10 +161,17 @@ async function setupCommandContext(
   }
 
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config, sub);
+  const { repo, requiresRehydrate, recoveryReason } = await createRepo(
+    resolvedPath,
+    config,
+    sub
+  );
 
   // Create sync engine
-  const syncEngine = new SyncEngine(repo, resolvedPath, config);
+  const syncEngine = new SyncEngine(repo, resolvedPath, config, {
+    requiresRehydrate,
+    recoveryReason,
+  });
 
   return {
     repo,
@@ -586,23 +600,52 @@ export async function status(
 
   // Show verbose details if requested
   if (options.verbose && syncStatus.snapshot?.rootDirectoryUrl) {
-    const rootHandle = await repo.find<DirectoryDocument>(
-      syncStatus.snapshot.rootDirectoryUrl
-    );
-    const rootDoc = await rootHandle.doc();
+    try {
+      const rootHandle = await repo.find<DirectoryDocument>(
+        syncStatus.snapshot.rootDirectoryUrl
+      );
+      const rootDoc = await rootHandle.doc();
 
-    if (rootDoc) {
-      out.infoBlock("HEADS");
-      out.arr(rootHandle.heads());
+      if (rootDoc) {
+        out.infoBlock("HEADS");
+        out.arr(rootHandle.heads());
 
-      if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
-        out.infoBlock("TRACKED FILES");
-        const filesObj: Record<string, string> = {};
-        syncStatus.snapshot.files.forEach((entry, filePath) => {
-          filesObj[filePath] = entry.url;
-        });
-        out.obj(filesObj);
+        if (syncStatus.snapshot && syncStatus.snapshot.files.size > 0) {
+          out.infoBlock("TRACKED FILES");
+          const filesObj: Record<string, string> = {};
+          syncStatus.snapshot.files.forEach((entry, filePath) => {
+            filesObj[filePath] = entry.url;
+          });
+          out.obj(filesObj);
+        }
       }
+    } catch (error) {
+      out.warn(`Warning: Could not load root document details: ${error}`);
+    }
+  }
+
+  // Chronic-unavailable section: paths whose consecutive-unavailable
+  // counter is non-zero. These are files pushwork has repeatedly
+  // declined to reconcile because their remote state could not be
+  // confirmed. Always shown in verbose mode, independent of root-doc
+  // availability, because the counter is a pure snapshot property.
+  if (options.verbose && syncStatus.snapshot) {
+    const chronic: Array<{ path: string; count: number }> = [];
+    syncStatus.snapshot.files.forEach((entry, filePath) => {
+      const n = entry.consecutiveUnavailableCount ?? 0;
+      if (n > 0) chronic.push({ path: filePath, count: n });
+    });
+    if (chronic.length > 0) {
+      chronic.sort((a, b) => b.count - a.count);
+      out.infoBlock("CHRONICALLY UNAVAILABLE");
+      const obj: Record<string, string> = {};
+      for (const { path: p, count } of chronic) {
+        obj[p] = `${count} consecutive sync(s) unavailable`;
+      }
+      out.obj(obj);
+      out.info(
+        "Resolve with: pushwork rm-tracked <path> or pushwork resync <path>"
+      );
     }
   }
 
@@ -803,6 +846,76 @@ export async function rm(targetPath: string = "."): Promise<void> {
 
   out.warnBlock("REMOVED", recoveryUrl);
   process.exit();
+}
+
+/**
+ * Remove a tracked path from the snapshot. Used to give up on a file
+ * that has been chronically unavailable on the remote.
+ */
+export async function rmTracked(
+  targetPath: string,
+  relativePath: string,
+  options: { keepLocal?: boolean } = {}
+): Promise<void> {
+  const { syncEngine, repo } = await setupCommandContext(targetPath, {
+    syncEnabled: false,
+  });
+
+  const deleteLocal = !options.keepLocal;
+  out.task(
+    `Removing ${relativePath} from snapshot${deleteLocal ? " and local disk" : ""}`
+  );
+  try {
+    const removed = await syncEngine.removeTrackedPath(relativePath, {
+      deleteLocal,
+    });
+    if (!removed) {
+      out.done();
+      out.warn(`Path not tracked: ${relativePath}`);
+      await safeRepoShutdown(repo);
+      out.exit(1);
+      return;
+    }
+    out.done();
+    out.success(`Removed ${relativePath}`);
+  } catch (error) {
+    out.crash(error);
+  } finally {
+    await safeRepoShutdown(repo);
+  }
+}
+
+/**
+ * Force-recreate the remote document for a tracked path from current
+ * local content. Used to recover a file whose Automerge document has
+ * become chronically unavailable — mints a fresh doc and updates the
+ * parent directory entry to point at it.
+ */
+export async function resync(
+  targetPath: string,
+  relativePath: string
+): Promise<void> {
+  const { syncEngine, repo } = await setupCommandContext(targetPath);
+
+  out.task(`Re-syncing ${relativePath}`);
+  try {
+    const ok = await syncEngine.resyncPath(relativePath);
+    if (!ok) {
+      out.done();
+      out.warn(
+        `Could not re-sync ${relativePath} (not tracked or local file missing)`
+      );
+      await safeRepoShutdown(repo);
+      out.exit(1);
+      return;
+    }
+    out.done();
+    out.success(`Re-synced ${relativePath} to a fresh document`);
+  } catch (error) {
+    out.crash(error);
+  } finally {
+    await safeRepoShutdown(repo);
+  }
 }
 
 export async function commit(
