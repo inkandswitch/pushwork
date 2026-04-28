@@ -209,6 +209,61 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Find artifact directories whose live heads don't match the heads
+	 * encoded in their parent's stored URL entry. This drift happens when
+	 * remote changes land via bidirectional sync — the directory advances
+	 * locally but no file-level change is detected, so leaf-first
+	 * propagation never kicks in. Returning these here lets pushLocalChanges
+	 * treat them as modified and refresh parent URLs all the way to the root.
+	 */
+	private async findStaleArtifactDirs(snapshot: SyncSnapshot): Promise<string[]> {
+		if (!snapshot.rootDirectoryUrl) return []
+
+		const stale: string[] = []
+		for (const [dirPath, entry] of snapshot.directories.entries()) {
+			if (!dirPath) continue
+			if (!this.isArtifactPath(dirPath)) continue
+
+			const parts = dirPath.split("/")
+			const dirName = parts.pop()!
+			const parentPath = parts.join("/")
+			const parentUrl = !parentPath
+				? snapshot.rootDirectoryUrl
+				: snapshot.directories.get(parentPath)?.url
+			if (!parentUrl) continue
+
+			try {
+				const parentHandle = await this.repo.find<DirectoryDocument>(
+					getPlainUrl(parentUrl)
+				)
+				const parentDoc = parentHandle.doc()
+				if (!parentDoc) continue
+
+				const entryInParent = parentDoc.docs.find(
+					(e: DirectoryEntry) => e.name === dirName && e.type === "folder"
+				)
+				if (!entryInParent) continue
+
+				const dirHandle = await this.repo.find<DirectoryDocument>(
+					getPlainUrl(entry.url)
+				)
+				const liveHeads = dirHandle.heads()
+				const urlHeadsInParent = parseAutomergeUrl(entryInParent.url).heads
+
+				if (
+					!urlHeadsInParent ||
+					!A.equals(urlHeadsInParent as unknown as UrlHeads, liveHeads)
+				) {
+					stale.push(dirPath)
+				}
+			} catch (err) {
+				debug(`findStaleArtifactDirs: ${dirPath}: ${err}`)
+			}
+		}
+		return stale
+	}
+
+	/**
 	 * Set the root directory URL in the snapshot
 	 */
 	async getRootDirectoryUrl(): Promise<AutomergeUrl | undefined> {
@@ -792,9 +847,19 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
-		if (localChanges.length === 0) {
+		// Detect artifact directories whose heads have drifted from what's
+		// encoded in their parent's URL (typically from remote merges during
+		// bidirectional sync). Treat them as modified so the existing
+		// leaf-first propagation refreshes parent URLs all the way up.
+		const staleArtifactDirs = await this.findStaleArtifactDirs(snapshot)
+
+		if (localChanges.length === 0 && staleArtifactDirs.length === 0) {
 			debug("push: no local changes to push")
 			return result
+		}
+
+		if (staleArtifactDirs.length > 0) {
+			debug(`push: ${staleArtifactDirs.length} stale artifact dirs need parent URL refresh: ${staleArtifactDirs.join(", ")}`)
 		}
 
 		const newFiles = localChanges.filter(c => !snapshot.files.has(c.path) && c.localContent !== null)
@@ -816,9 +881,9 @@ export class SyncEngine {
 		}
 
 		// Collect all directory paths that need processing:
-		// directories with file changes + all ancestors up to root
+		// directories with file changes + stale artifact dirs + all ancestors
 		const allDirsToProcess = new Set<string>()
-		for (const dirPath of changesByDir.keys()) {
+		const addWithAncestors = (dirPath: string) => {
 			allDirsToProcess.add(dirPath)
 			// Add ancestors so subdirectory URL updates propagate to root
 			let current = dirPath
@@ -829,6 +894,8 @@ export class SyncEngine {
 				allDirsToProcess.add(current)
 			}
 		}
+		for (const dirPath of changesByDir.keys()) addWithAncestors(dirPath)
+		for (const dirPath of staleArtifactDirs) addWithAncestors(dirPath)
 
 		// Sort deepest-first
 		const sortedDirPaths = Array.from(allDirsToProcess).sort((a, b) => {
@@ -839,8 +906,10 @@ export class SyncEngine {
 
 		debug(`push: processing ${sortedDirPaths.length} directories (deepest first)`)
 
-		// Track which directories were modified (for subdirectory URL propagation)
-		const modifiedDirs = new Set<string>()
+		// Track which directories were modified (for subdirectory URL propagation).
+		// Pre-populate with stale artifact dirs so their parents emit a
+		// subdirUpdate even if no local file change touches them.
+		const modifiedDirs = new Set<string>(staleArtifactDirs)
 		let filesProcessed = 0
 		const totalFiles = localChanges.length
 

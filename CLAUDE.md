@@ -124,6 +124,8 @@ Key fields:
 
 `pushLocalChanges()` processes directories deepest-first via `batchUpdateDirectory()`, propagating subdirectory URL updates as it walks up toward the root. This ensures directory entries always point to the latest version of their children.
 
+**Invariant: any change to dist's heads must update parents recursively, leaf-first.** Local file changes are caught by the loop above. Heads can also drift from remote merges that land during `waitForBidirectionalSync` — the artifact directory advances locally but no file-level change is detected, so leaf-first propagation never kicks in and the parent's versioned URL goes stale. `findStaleArtifactDirs()` scans every artifact dir in the snapshot, compares its live `handle.heads()` against the heads encoded in its parent's stored URL entry, and returns paths that have drifted. `pushLocalChanges()` then folds these into `allDirsToProcess` and pre-populates `modifiedDirs` so the existing leaf-first machinery emits a `subdirUpdates` entry for each stale dir's parent. This is self-healing — even if drift happens after a sync exits, the next sync catches it.
+
 ## The `changeWithOptionalHeads` helper
 
 Used throughout sync-engine: if heads are available, calls `handle.changeAt(heads, cb)` to branch from a known version; otherwise falls back to `handle.change(cb)`. This is important for conflict-free merging when multiple peers are editing.
