@@ -90,18 +90,18 @@ describe("--sub flag integration", () => {
     }, 60000);
   });
 
-  describe("sync --sub", () => {
+  describe("sync (after init --sub)", () => {
+    // `--sub` is only accepted on init/clone; subsequent `sync` calls read
+    // the subduction flag from .pushwork/config.json.
     it("should sync after init --sub", async () => {
       await fs.writeFile(path.join(tmpDir, "file1.txt"), "initial content");
 
-      // Init with --sub
       await pushwork(["init", "--sub", tmpDir]);
 
       // Add a new file
       await fs.writeFile(path.join(tmpDir, "file2.txt"), "new file");
 
-      // Sync with --sub
-      await pushwork(["sync", "--sub", tmpDir]);
+      await pushwork(["sync", tmpDir]);
 
       // Verify the new file is now tracked
       const snapshotManager = new SnapshotManager(tmpDir);
@@ -111,7 +111,7 @@ describe("--sub flag integration", () => {
       expect(snapshot!.files.has("file2.txt")).toBe(true);
     }, 60000);
 
-    it("should detect file modifications on sync --sub", async () => {
+    it("should detect file modifications on sync", async () => {
       await fs.writeFile(path.join(tmpDir, "mutable.txt"), "version 1");
 
       await pushwork(["init", "--sub", tmpDir]);
@@ -124,8 +124,7 @@ describe("--sub flag integration", () => {
       // Modify the file
       await fs.writeFile(path.join(tmpDir, "mutable.txt"), "version 2");
 
-      // Sync
-      await pushwork(["sync", "--sub", tmpDir]);
+      await pushwork(["sync", tmpDir]);
 
       // Heads should have changed
       const snapshot2 = await snapshotManager.load();
@@ -133,7 +132,7 @@ describe("--sub flag integration", () => {
       expect(updatedHead).not.toEqual(initialHead);
     }, 60000);
 
-    it("should handle file deletions on sync --sub", async () => {
+    it("should handle file deletions on sync", async () => {
       await fs.writeFile(path.join(tmpDir, "ephemeral.txt"), "delete me");
       await fs.writeFile(path.join(tmpDir, "keeper.txt"), "keep me");
 
@@ -142,8 +141,7 @@ describe("--sub flag integration", () => {
       // Delete a file
       await fs.unlink(path.join(tmpDir, "ephemeral.txt"));
 
-      // Sync
-      await pushwork(["sync", "--sub", tmpDir]);
+      await pushwork(["sync", tmpDir]);
 
       // Deleted file should be gone from snapshot
       const snapshotManager = new SnapshotManager(tmpDir);

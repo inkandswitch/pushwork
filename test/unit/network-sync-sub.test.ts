@@ -1,144 +1,128 @@
 import { waitForSync } from "../../src/utils/network-sync";
-import { DocHandle, StorageId } from "@automerge/automerge-repo";
+import { DocHandle } from "@automerge/automerge-repo";
+import { EventEmitter } from "events";
 
 /**
- * Create a mock DocHandle with controllable heads.
+ * waitForSync resolves when EITHER:
+ * - a `remote-heads` event reports heads matching the handle's local heads
+ *   (strict signal — works in WS mode), OR
+ * - the handle's local heads remain unchanged for 3 consecutive polls
+ *   (stability fallback — used when the strict signal isn't available, e.g.
+ *   Subduction direct-peer connections).
  *
- * @param headSequence - An array of head values the handle returns on
- *   successive calls to heads(). Once exhausted, the last value repeats.
- *   This lets us simulate heads that change (sync in progress) and then
- *   stabilize (sync complete).
+ * Polls happen at 100ms intervals, so stability resolves at ~300ms.
  */
-function mockHandle(headSequence: string[][]): DocHandle<unknown> {
-  let callCount = 0;
 
-  return {
-    url: `automerge:mock-${Math.random().toString(36).slice(2)}`,
-    heads: () => {
-      const idx = Math.min(callCount++, headSequence.length - 1);
-      return headSequence[idx];
-    },
-    // getSyncInfo is only called in the StorageId path, not the head-stability path
-    getSyncInfo: jest.fn(),
-    on: jest.fn(),
-    off: jest.fn(),
-  } as unknown as DocHandle<unknown>;
+interface FakeHandle extends DocHandle<unknown> {
+	setHeads(h: string[]): void;
+	emitRemote(h: string[], storageId?: string): void;
 }
 
-describe("waitForSync (Subduction / head-stability mode)", () => {
-  // When syncServerStorageId is undefined, waitForSync should use the
-  // head-stability polling path instead of the getSyncInfo-based path.
+function mockHandle(initialHeads: string[]): FakeHandle {
+	const ee = new EventEmitter();
+	let current = initialHeads;
+	const handle = {
+		url: `automerge:mock-${Math.random().toString(36).slice(2)}`,
+		heads: () => current,
+		on: ee.on.bind(ee),
+		off: ee.off.bind(ee),
+		setHeads: (h: string[]) => {
+			current = h;
+		},
+		emitRemote: (h: string[], storageId = "test-storage-id") => {
+			ee.emit("remote-heads", { storageId, heads: h, timestamp: Date.now() });
+		},
+	};
+	return handle as unknown as FakeHandle;
+}
 
-  it("should return immediately for empty handle list", async () => {
-    const result = await waitForSync([], undefined);
-    expect(result.failed).toHaveLength(0);
-  });
+describe("waitForSync", () => {
+	it("returns immediately for empty handle list", async () => {
+		const result = await waitForSync([]);
+		expect(result.failed).toHaveLength(0);
+	});
 
-  it("should resolve when handle heads are already stable", async () => {
-    // Heads never change — stable from the start
-    const handle = mockHandle([["head-a", "head-b"]]);
-    const result = await waitForSync([handle], undefined, 5000);
+	it("resolves quickly when a remote-heads event reports matching heads", async () => {
+		const handle = mockHandle(["head-a"]);
+		const promise = waitForSync([handle], 5000);
+		setImmediate(() => handle.emitRemote(["head-a"]));
+		const result = await promise;
+		expect(result.failed).toHaveLength(0);
+	});
 
-    expect(result.failed).toHaveLength(0);
-    // getSyncInfo should never be called in head-stability mode
-    expect(handle.getSyncInfo).not.toHaveBeenCalled();
-  });
+	it("ignores remote-heads events whose heads don't match", async () => {
+		const handle = mockHandle(["head-a"]);
+		const promise = waitForSync([handle], 5000);
+		setImmediate(() => {
+			handle.emitRemote(["head-stale"]);
+			handle.emitRemote(["head-a"]);
+		});
+		const result = await promise;
+		expect(result.failed).toHaveLength(0);
+	});
 
-  it("should resolve after heads stabilize", async () => {
-    // Heads change for the first few polls, then stabilize
-    const handle = mockHandle([
-      ["head-1"],   // poll 1: initial
-      ["head-2"],   // poll 2: changed (reset stable count)
-      ["head-3"],   // poll 3: changed again
-      ["head-3"],   // poll 4: stable check 1
-      ["head-3"],   // poll 5: stable check 2
-      ["head-3"],   // poll 6: stable check 3 → converged
-    ]);
+	it("accepts confirmation regardless of which storageId reports it", async () => {
+		const handle = mockHandle(["head-a"]);
+		const promise = waitForSync([handle], 5000);
+		setImmediate(() => handle.emitRemote(["head-a"], "any-other-storage-id"));
+		const result = await promise;
+		expect(result.failed).toHaveLength(0);
+	});
 
-    const result = await waitForSync([handle], undefined, 10000);
-    expect(result.failed).toHaveLength(0);
-  });
+	it("falls back to head stability when no remote-heads event arrives", async () => {
+		// Heads never change → resolves via stability after ~300ms.
+		const handle = mockHandle(["stable-head"]);
+		const result = await waitForSync([handle], 5000);
+		expect(result.failed).toHaveLength(0);
+	});
 
-  it("should report handle as failed on timeout", async () => {
-    // Heads keep changing — never stabilize
-    let counter = 0;
-    const neverStable = {
-      url: "automerge:never-stable",
-      heads: () => [`head-${counter++}`],
-      getSyncInfo: jest.fn(),
-      on: jest.fn(),
-      off: jest.fn(),
-    } as unknown as DocHandle<unknown>;
+	it("times out if heads keep changing and no event confirms", async () => {
+		const ee = new EventEmitter();
+		let counter = 0;
+		const neverStable = {
+			url: "automerge:never-stable",
+			heads: () => [`head-${counter++}`],
+			on: ee.on.bind(ee),
+			off: ee.off.bind(ee),
+		} as unknown as DocHandle<unknown>;
 
-    const result = await waitForSync([neverStable], undefined, 500);
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0]).toBe(neverStable);
-  });
+		const result = await waitForSync([neverStable], 500);
+		expect(result.failed).toHaveLength(1);
+		expect(result.failed[0]).toBe(neverStable);
+	});
 
-  it("should handle a mix of stable and unstable handles", async () => {
-    const stable = mockHandle([["stable-head"]]);
+	it("waits for the latest local heads if a merge advances them mid-wait", async () => {
+		const handle = mockHandle(["head-a"]);
+		const promise = waitForSync([handle], 5000);
+		setImmediate(() => {
+			handle.setHeads(["head-b"]);
+			// Stale event for head-a should be ignored.
+			handle.emitRemote(["head-a"]);
+			// Confirmation of new heads.
+			handle.emitRemote(["head-b"]);
+		});
+		const result = await promise;
+		expect(result.failed).toHaveLength(0);
+	});
 
-    let counter = 0;
-    const unstable = {
-      url: "automerge:unstable",
-      heads: () => [`changing-${counter++}`],
-      getSyncInfo: jest.fn(),
-      on: jest.fn(),
-      off: jest.fn(),
-    } as unknown as DocHandle<unknown>;
+	it("handles a mix of confirmed and timed-out handles concurrently", async () => {
+		const fast = mockHandle(["fast-head"]);
 
-    const result = await waitForSync([stable, unstable], undefined, 500);
+		// Build an unstable handle that never converges.
+		const ee = new EventEmitter();
+		let counter = 0;
+		const slow = {
+			url: "automerge:unstable",
+			heads: () => [`changing-${counter++}`],
+			on: ee.on.bind(ee),
+			off: ee.off.bind(ee),
+		} as unknown as DocHandle<unknown>;
 
-    // The stable handle should succeed, the unstable one should fail
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0]).toBe(unstable);
-  });
+		const promise = waitForSync([fast, slow], 500);
+		setImmediate(() => fast.emitRemote(["fast-head"]));
 
-  it("should not use getSyncInfo when no StorageId is provided", async () => {
-    const handle = mockHandle([["head-a"]]);
-    await waitForSync([handle], undefined, 5000);
-
-    // The head-stability path does not call getSyncInfo at all
-    expect(handle.getSyncInfo).not.toHaveBeenCalled();
-  });
-});
-
-describe("waitForSync (WebSocket / StorageId mode)", () => {
-  // When a StorageId IS provided, waitForSync should use getSyncInfo-based
-  // verification instead of head-stability polling.
-
-  it("should use getSyncInfo when StorageId is provided", async () => {
-    const storageId = "test-storage-id" as StorageId;
-    const heads = ["head-a"];
-
-    const handle = {
-      url: "automerge:ws-handle",
-      heads: () => heads,
-      getSyncInfo: jest.fn().mockReturnValue({ lastHeads: heads }),
-      on: jest.fn(),
-      off: jest.fn(),
-    } as unknown as DocHandle<unknown>;
-
-    const result = await waitForSync([handle], storageId, 5000);
-
-    expect(result.failed).toHaveLength(0);
-    expect(handle.getSyncInfo).toHaveBeenCalledWith(storageId);
-  });
-
-  it("should detect already-synced handles via getSyncInfo", async () => {
-    const storageId = "test-storage-id" as StorageId;
-    const heads = ["same-head"];
-
-    const handle = {
-      url: "automerge:already-synced",
-      heads: () => heads,
-      // getSyncInfo returns matching heads → already synced
-      getSyncInfo: jest.fn().mockReturnValue({ lastHeads: heads }),
-      on: jest.fn(),
-      off: jest.fn(),
-    } as unknown as DocHandle<unknown>;
-
-    const result = await waitForSync([handle], storageId, 5000);
-    expect(result.failed).toHaveLength(0);
-  });
+		const result = await promise;
+		expect(result.failed).toHaveLength(1);
+		expect(result.failed[0]).toBe(slow);
+	});
 });

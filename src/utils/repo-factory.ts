@@ -117,11 +117,18 @@ export async function createRepo(
     return new RepoClass({
       storage,
       subductionWebsocketEndpoints: endpoints,
+      // Enable so Subduction's onRemoteHeadsChanged is wired up and
+      // remote-heads events fire on doc handles. waitForSync uses these
+      // events to confirm the sync server has our heads before returning.
+      enableRemoteHeadsGossiping: true,
     });
   }
 
   // Default: WebSocket sync adapter
-  const repoConfig: RepoConfig = { storage };
+  const repoConfig: RepoConfig = {
+    storage,
+    enableRemoteHeadsGossiping: true,
+  };
 
   if (config.sync_enabled && config.sync_server) {
     // Load the WebSocket adapter via ESM dynamic import to stay in the

@@ -114,7 +114,7 @@ async function syncUntilConverged(
     timeoutMs?: number;
   } = {}
 ): Promise<{ rounds: number; hashA: string; hashB: string }> {
-  const { maxRounds = 5, timeoutMs = 30000 } = options;
+  const { maxRounds = 5, timeoutMs = 60000 } = options;
   const startTime = Date.now();
 
   for (let round = 1; round <= maxRounds; round++) {
@@ -207,7 +207,7 @@ describe("Sync Reliability Tests", () => {
       const contentB = await fs.readFile(path.join(repoB, "test.txt"), "utf-8");
       expect(contentA).toBe("Hello from A");
       expect(contentB).toBe("Hello from A");
-    }, 30000);
+    }, 60000);
 
     it("should sync a file from A to B (with convergence)", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -234,7 +234,7 @@ describe("Sync Reliability Tests", () => {
       const contentB = await fs.readFile(path.join(repoB, "test.txt"), "utf-8");
       expect(contentA).toBe(contentB);
       expect(contentA).toBe("Hello from A");
-    }, 30000);
+    }, 60000);
 
     it("should sync a new file added to B back to A", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -265,7 +265,7 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "from-b.txt"))).toBe(true);
       const content = await fs.readFile(path.join(repoA, "from-b.txt"), "utf-8");
       expect(content).toBe("Created by B");
-    }, 30000);
+    }, 60000);
 
     it("should sync subdirectories correctly", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -291,7 +291,7 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoB, "subdir", "nested.txt"))).toBe(true);
       const content = await fs.readFile(path.join(repoB, "subdir", "nested.txt"), "utf-8");
       expect(content).toBe("Nested content");
-    }, 30000);
+    }, 60000);
   });
 
   describe("Concurrent Operations", () => {
@@ -326,7 +326,7 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "file-b.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-a.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-b.txt"))).toBe(true);
-    }, 30000);
+    }, 60000);
 
     it("should handle file modification sync", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -356,7 +356,7 @@ describe("Sync Reliability Tests", () => {
       // B should have the modification
       const contentB = await fs.readFile(path.join(repoB, "shared.txt"), "utf-8");
       expect(contentB).toBe("Modified by A");
-    }, 30000);
+    }, 60000);
 
     it("should handle file deletion sync", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -388,7 +388,7 @@ describe("Sync Reliability Tests", () => {
 
       // File should be deleted in B
       expect(await pathExists(path.join(repoB, "to-delete.txt"))).toBe(false);
-    }, 30000);
+    }, 60000);
   });
 
   describe("Subdirectory File Deletion - Resurrection Bug", () => {
@@ -825,6 +825,6 @@ describe("Sync Reliability Tests", () => {
       // Verify content preserved
       const contentB = await fs.readFile(path.join(repoB, "renamed.txt"), "utf-8");
       expect(contentB).toBe(content);
-    }, 30000);
+    }, 60000);
   });
 });

@@ -590,10 +590,6 @@ export class SyncEngine {
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
 				const sub = options?.sub ?? false
-				// In Subduction mode, pass no StorageId so waitForSync
-				// falls back to head-stability polling. In WebSocket mode,
-				// pass the StorageId for precise getSyncInfo-based verification.
-				const storageId = sub ? undefined : this.config.sync_server_storage_id
 
 				try {
 					// Ensure root directory handle is tracked for sync
@@ -613,10 +609,7 @@ export class SyncEngine {
 						const handlePaths = Array.from(this.handlesByPath.keys())
 						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
-						const {failed} = await waitForSync(
-							allHandles,
-							storageId
-						)
+						const {failed} = await waitForSync(allHandles)
 
 						// Recreate failed documents and retry once.
 						// Skip in Subduction mode — SubductionSource has its
@@ -628,10 +621,7 @@ export class SyncEngine {
 							if (retryHandles.length > 0) {
 								debug(`sync: retrying ${retryHandles.length} recreated handles`)
 								out.update(`Retrying ${retryHandles.length} recreated documents`)
-								const retry = await waitForSync(
-									retryHandles,
-									storageId
-								)
+								const retry = await waitForSync(retryHandles)
 								if (retry.failed.length > 0) {
 									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
 									debug(`sync: ${msg}`)
@@ -665,6 +655,7 @@ export class SyncEngine {
 							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
 							pollIntervalMs: 100,
 							stableChecksRequired: 3,
+							minWaitMs: 0,
 							handles: changedHandles.length > 0 ? changedHandles : undefined,
 						}
 					)
@@ -683,10 +674,7 @@ export class SyncEngine {
 							)
 						debug("sync: syncing root directory touch to server")
 						out.update("Syncing root directory update")
-						const rootSync = await waitForSync(
-							[rootHandle],
-							storageId
-						)
+						const rootSync = await waitForSync([rootHandle])
 						if (rootSync.failed.length > 0) {
 							const msg = "Root directory update did not converge to server; consumers may not see recent changes until next sync"
 							debug(`sync: ${msg}`)

@@ -262,24 +262,12 @@ export async function init(
   await syncEngine.setRootDirectoryUrl(rootHandle.url);
 
   // Wait for root document to sync to server if sync is enabled.
-  // With Subduction, we skip StorageId-based sync verification —
-  // the SubductionSource handles sync internally.
-  if (config.sync_enabled && !sub) {
-    if (config.sync_server_storage_id) {
-      out.update("Syncing to server");
-      const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
-      if (failed.length > 0) {
-        out.taskLine("Root document failed to sync to server", true);
-        // Continue anyway - the document is created locally and will sync later
-      }
-    } else {
-      // WebSocket mode without a storage id can't verify delivery via
-      // getSyncInfo. Warn loudly so users don't silently end up with
-      // data that never reached the server.
-      out.taskLine(
-        "Warning: sync_server_storage_id is not set; skipping post-init sync verification",
-        true
-      );
+  if (config.sync_enabled) {
+    out.update("Syncing to server");
+    const { failed } = await waitForSync([rootHandle]);
+    if (failed.length > 0) {
+      out.taskLine("Root document failed to sync to server", true);
+      // Continue anyway - the document is created locally and will sync later
     }
   }
 

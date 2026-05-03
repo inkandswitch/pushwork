@@ -376,7 +376,7 @@ describe("Pushwork Fuzzer", () => {
         // Cleanup
         tmpObj.removeCallback();
       },
-      20000
+      120000
     );
 
     it.concurrent(
@@ -450,7 +450,7 @@ describe("Pushwork Fuzzer", () => {
         // Cleanup
         tmpObj.removeCallback();
       },
-      20000
+      120000
     );
 
     it.concurrent(
