@@ -1,4 +1,2 @@
-export * from "./core";
-export * from "./utils";
-export * from "./types";
-export * from "./cli";
+export { init, clone, sync, url, type RootDoc } from "./pushwork.js";
+export type { Backend, PushworkConfig } from "./config.js";
