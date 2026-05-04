@@ -290,13 +290,13 @@ describe("pushwork branches & offline commands", () => {
 
 	describe("branch / switch", () => {
 		it(
-			"branch <name> creates a new branch but doesn't switch",
+			"branch <name> creates a new branch and switches to it",
 			async () => {
 				await initRepo();
 				await pushwork(["branch", "feat"], workRoot);
 				expect(
 					(await pushwork(["branch"], workRoot)).stdout.trim(),
-				).toBe("default");
+				).toBe("feat");
 				expect((await pushwork(["branches"], workRoot)).stdout).toContain(
 					"feat",
 				);
@@ -308,24 +308,22 @@ describe("pushwork branches & offline commands", () => {
 			"switch <name> materializes the branch's tree",
 			async () => {
 				await initRepo();
+				// Create feat (auto-switches to feat) and add a feat-only file.
 				await pushwork(["branch", "feat"], workRoot);
-
-				// Add a file on default and save
-				await fs.writeFile(path.join(workRoot, "default-only.txt"), "D\n");
+				await fs.writeFile(path.join(workRoot, "feat-only.txt"), "F\n");
 				await pushwork(["save"], workRoot);
 
-				// Switch to feat: default-only.txt should disappear (feat was branched
-				// from default before the save)
-				await pushwork(["switch", "feat"], workRoot);
-				expect(
-					await pathExists(path.join(workRoot, "default-only.txt")),
-				).toBe(false);
-
-				// Switch back to default: file reappears
+				// Switch to default: feat-only.txt should disappear.
 				await pushwork(["switch", "default"], workRoot);
 				expect(
-					await readText(path.join(workRoot, "default-only.txt")),
-				).toBe("D\n");
+					await pathExists(path.join(workRoot, "feat-only.txt")),
+				).toBe(false);
+
+				// Switch back to feat: file reappears.
+				await pushwork(["switch", "feat"], workRoot);
+				expect(
+					await readText(path.join(workRoot, "feat-only.txt")),
+				).toBe("F\n");
 			},
 			TEST_TIMEOUT,
 		);
@@ -379,9 +377,10 @@ describe("pushwork branches & offline commands", () => {
 			async () => {
 				await initRepo();
 				await pushwork(["branch", "feat"], workRoot);
+				// branch auto-switches → current is now feat
 				const { stdout } = await pushwork(["switch"], workRoot);
-				expect(stdout).toContain("* default");
-				expect(stdout).toContain("feat");
+				expect(stdout).toContain("* feat");
+				expect(stdout).toContain("default");
 			},
 			TEST_TIMEOUT,
 		);

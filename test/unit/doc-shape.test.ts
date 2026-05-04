@@ -38,6 +38,7 @@ import {
 	cutWorkdir,
 	pasteStash,
 	showStashes,
+	nuclearizeRepo,
 	type BranchesDoc,
 	isBranchesDoc,
 	detectDocType,
@@ -82,6 +83,28 @@ describe("doc shape", () => {
 	afterEach(() => cleanup());
 
 	const storageOf = (root: string) => path.join(root, ".pushwork", "storage");
+
+	it("BranchesDoc and DirectoryDoc get @patchwork.title set to the folder name", async () => {
+		const named = path.join(workRoot, "my-pushwork-repo");
+		await fs.mkdir(named);
+		await fs.writeFile(path.join(named, "a.txt"), "a\n");
+		const rootUrl = await init({
+			dir: named,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await withRepo(path.join(named, ".pushwork", "storage"), async (repo) => {
+			const root = await repo.find(rootUrl);
+			const branches = readDoc(root) as BranchesDoc;
+			expect(branches["@patchwork"].title).toBe("my-pushwork-repo");
+			const folder = await repo.find(branches.branches.default);
+			const folderDoc = readDoc(folder) as {
+				"@patchwork": { type: string; title?: string };
+			};
+			expect(folderDoc["@patchwork"].title).toBe("my-pushwork-repo");
+		});
+	});
 
 	it("init wraps the folder doc in a BranchesDoc by default", async () => {
 		await fs.writeFile(path.join(workRoot, "a.txt"), "hi\n");
@@ -414,7 +437,10 @@ describe("branch isolation", () => {
 			shape: "vfs",
 			online: false,
 		});
+		// createBranch auto-switches to feat; switch back to default so the
+		// merge has a different source.
 		await createBranch(workRoot, "feat");
+		await switchBranch(workRoot, "default");
 		await fs.writeFile(path.join(workRoot, "dirty.txt"), "uncommitted\n");
 		await expect(mergeBranch(workRoot, "feat")).rejects.toThrow(
 			/uncommitted changes/,
@@ -591,6 +617,67 @@ describe("branch isolation", () => {
 		expect(stashes[0].id).toBe(c2.id);
 	});
 
+	it("nuclearizeRepo regenerates every URL while preserving content", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "A\n");
+		await fs.writeFile(path.join(workRoot, "b.txt"), "B\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await createBranch(workRoot, "feat");
+		await fs.writeFile(path.join(workRoot, "feat-only.txt"), "F\n");
+		await save(workRoot);
+
+		const cfg1 = await readConfig(workRoot);
+
+		const oldUrls: string[] = [];
+		await withRepo(path.join(workRoot, ".pushwork", "storage"), async (repo) => {
+			const root = await repo.find(cfg1.rootUrl);
+			const doc = readDoc(root) as BranchesDoc;
+			oldUrls.push(cfg1.rootUrl);
+			for (const url of Object.values(doc.branches)) {
+				oldUrls.push(url);
+				const folder = await repo.find(url);
+				for (const [k, v] of Object.entries(readDoc(folder) as Record<string, unknown>)) {
+					if (k === "@patchwork" || k === "lastSyncAt") continue;
+					if (typeof v === "string") oldUrls.push(v);
+				}
+			}
+		});
+
+		await nuclearizeRepo(workRoot);
+
+		const cfg2 = await readConfig(workRoot);
+		expect(cfg2.rootUrl).not.toBe(cfg1.rootUrl);
+
+		const newUrls: string[] = [];
+		await withRepo(path.join(workRoot, ".pushwork", "storage"), async (repo) => {
+			const root = await repo.find(cfg2.rootUrl);
+			const doc = readDoc(root) as BranchesDoc;
+			newUrls.push(cfg2.rootUrl);
+			for (const url of Object.values(doc.branches)) {
+				newUrls.push(url);
+				const folder = await repo.find(url);
+				for (const [k, v] of Object.entries(readDoc(folder) as Record<string, unknown>)) {
+					if (k === "@patchwork" || k === "lastSyncAt") continue;
+					if (typeof v === "string") newUrls.push(v);
+				}
+			}
+			// Same shape: branches still default + feat
+			expect(Object.keys(doc.branches).sort()).toEqual(["default", "feat"]);
+			// Content preserved on feat: feat-only.txt still there
+			const feat = await repo.find(doc.branches.feat);
+			const featDoc = readDoc(feat) as Record<string, unknown>;
+			expect("feat-only.txt" in featDoc).toBe(true);
+		});
+
+		// No URL appears in both old and new sets.
+		const oldSet = new Set(oldUrls);
+		for (const u of newUrls) expect(oldSet.has(u)).toBe(false);
+	});
+
 	it("listBranches reports current and all names", async () => {
 		await fs.writeFile(path.join(workRoot, "a.txt"), "hi\n");
 		await init({
@@ -599,13 +686,17 @@ describe("branch isolation", () => {
 			shape: "vfs",
 			online: false,
 		});
+		// createBranch auto-switches; switch back so we can create another from
+		// default's history.
 		await createBranch(workRoot, "feat");
+		await switchBranch(workRoot, "default");
 		await createBranch(workRoot, "bugfix");
+		// We're now on bugfix (auto-switch).
 		const out = await listBranches(workRoot);
-		expect(out.current).toBe("default");
+		expect(out.current).toBe("bugfix");
 		expect(out.names.sort()).toEqual(["bugfix", "default", "feat"]);
 
-		expect(await currentBranch(workRoot)).toBe("default");
+		expect(await currentBranch(workRoot)).toBe("bugfix");
 		await switchBranch(workRoot, "feat");
 		expect(await currentBranch(workRoot)).toBe("feat");
 	});

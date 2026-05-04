@@ -21,6 +21,7 @@ import {
 	url,
 } from "./pushwork.js";
 import { log } from "./log.js";
+import { formatVersions } from "./version.js";
 
 const dlog = log("cli");
 
@@ -29,7 +30,15 @@ const collect = (value: string, prev: string[] | undefined) =>
 
 const program = new Command()
 	.name("pushwork")
-	.description("Bidirectional directory synchronization using Automerge CRDTs");
+	.description("Bidirectional directory synchronization using Automerge CRDTs")
+	.version(formatVersions(), "-v, --version", "Print version info and exit");
+
+program
+	.command("version")
+	.description("Print pushwork and Automerge package versions")
+	.action(() => {
+		process.stdout.write(formatVersions() + "\n");
+	});
 
 program
 	.command("init")
@@ -103,10 +112,14 @@ program
 program
 	.command("sync")
 	.description("Sync local changes with peers")
-	.action(async () => {
-		dlog("sync cwd=%s", process.cwd());
-		await sync(process.cwd());
-		process.stderr.write("synced\n");
+	.option(
+		"--nuclear",
+		"Re-create every doc (file, folder, branches) with a fresh URL before syncing. Stops referencing the old URLs from this repo.",
+	)
+	.action(async (opts) => {
+		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
+		await sync(process.cwd(), { nuclear: opts.nuclear });
+		process.stderr.write(opts.nuclear ? "nuclear synced\n" : "synced\n");
 	});
 
 program
@@ -165,7 +178,7 @@ program
 
 program
 	.command("branch")
-	.description("With no arg: print the current branch. With <name>: create a new branch from the current one (offline).")
+	.description("With no arg: print the current branch. With <name>: create a new branch from the current one and switch to it (offline).")
 	.argument("[name]", "Name of the new branch")
 	.action(async (name) => {
 		if (!name) {
@@ -174,7 +187,7 @@ program
 			return;
 		}
 		const newUrl = await createBranch(process.cwd(), name);
-		process.stderr.write(`created branch ${name} → ${newUrl}\n`);
+		process.stderr.write(`created branch ${name} → ${newUrl}\nswitched to ${name}\n`);
 	});
 
 program

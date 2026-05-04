@@ -22,6 +22,7 @@ export interface Shape {
 		repo: Repo;
 		tree: VfsNode;
 		previousRoot?: DocHandle<unknown>;
+		title?: string;
 	}): Promise<AutomergeUrl>;
 	decode(args: {
 		repo: Repo;

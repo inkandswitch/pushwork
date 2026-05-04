@@ -15,6 +15,7 @@ export {
 	cutWorkdir,
 	pasteStash,
 	showStashes,
+	nuclearizeRepo,
 } from "./pushwork.js";
 export type { MergeReport, MergePreview, MergePreviewEntry } from "./pushwork.js";
 export type { Stash, StashEntry } from "./stash.js";

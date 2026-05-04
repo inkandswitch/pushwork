@@ -11,7 +11,7 @@ const dlog = log("shapes:vfs");
 const META = "@patchwork";
 
 type DirectoryDoc = {
-	"@patchwork": { type: "directory" };
+	"@patchwork": { type: "directory"; title?: string };
 	lastSyncAt?: number;
 	[key: string]: unknown;
 };
@@ -29,16 +29,20 @@ const isDirectoryDoc = (doc: unknown): doc is DirectoryDoc => {
 const RESERVED = new Set([META, "lastSyncAt"]);
 
 export const vfsShape: Shape = {
-	async encode({ repo, tree, previousRoot }) {
+	async encode({ repo, tree, previousRoot, title }) {
 		if (tree.kind !== "dir") throw new Error("vfs: root must be a dir");
 		const flat = flattenLeaves(tree);
 		dlog("encode keys=%d previousRoot=%s", flat.size, previousRoot?.url ?? "<new>");
 
-		const handle = (previousRoot as DocHandle<DirectoryDoc> | undefined) ??
-			repo.create<DirectoryDoc>({ "@patchwork": { type: "directory" } });
+		const handle =
+			(previousRoot as DocHandle<DirectoryDoc> | undefined) ??
+			repo.create<DirectoryDoc>({
+				"@patchwork": { type: "directory", ...(title ? { title } : {}) },
+			});
 
 		handle.change((d: DirectoryDoc) => {
 			if (!d["@patchwork"]) d["@patchwork"] = { type: "directory" };
+			if (title && d["@patchwork"].title !== title) d["@patchwork"].title = title;
 			for (const k of Object.keys(d)) {
 				if (RESERVED.has(k)) continue;
 				if (!flat.has(k)) delete d[k];

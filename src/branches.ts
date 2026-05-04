@@ -13,7 +13,7 @@ export const META = "@patchwork";
 export const DEFAULT_BRANCH = "default";
 
 export type BranchesDoc = {
-	"@patchwork": { type: "branches" };
+	"@patchwork": { type: "branches"; title?: string };
 	branches: { [name: string]: AutomergeUrl };
 };
 

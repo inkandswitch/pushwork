@@ -109,9 +109,10 @@ export async function init(opts: InitOpts): Promise<AutomergeUrl> {
 		const fsFiles = await walkDir(root, ig);
 		dlog("init walked %d files", fsFiles.size);
 
+		const title = path.basename(root) || undefined;
 		const tree = await pushFiles(repo, fsFiles, undefined, artifactDirs);
-		const folderUrl = await shape.encode({ repo, tree });
-		dlog("init encoded folder=%s", folderUrl);
+		const folderUrl = await shape.encode({ repo, tree, title });
+		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
 
 		if (online) {
@@ -123,7 +124,7 @@ export async function init(opts: InitOpts): Promise<AutomergeUrl> {
 		let rootUrl: AutomergeUrl = folderUrl;
 		if (useBranches) {
 			const branchesHandle = repo.create<BranchesDoc>({
-				"@patchwork": { type: "branches" },
+				"@patchwork": { type: "branches", ...(title ? { title } : {}) },
 				branches: { [DEFAULT_BRANCH]: folderUrl },
 			});
 			if (online) {
@@ -214,8 +215,96 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 	return config.rootUrl;
 }
 
-export async function sync(cwd: string): Promise<void> {
+export async function sync(
+	cwd: string,
+	opts: { nuclear?: boolean } = {},
+): Promise<void> {
+	if (opts.nuclear) {
+		await nuclearizeRepo(cwd);
+	}
 	await commitWorkdir(cwd, { online: true });
+}
+
+/**
+ * Re-create every Automerge doc this repo references — every UnixFileEntry,
+ * every folder/directory doc, and (when in branches mode) the BranchesDoc —
+ * with brand-new URLs and no shared history with the originals. Updates
+ * `config.json` to point at the new root. Offline; the next sync publishes
+ * the new docs to the server.
+ *
+ * Use sparingly: this orphans the previous URLs from this repo's perspective.
+ * Anyone who had cloned the old URL keeps working from those docs; this
+ * client just stops referencing them.
+ */
+export async function nuclearizeRepo(cwd: string): Promise<void> {
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	const branchName = config.branches ? await readBranchFile(root) : null;
+	dlog("nuclear root=%s branches=%s current=%s", root, config.branches, branchName);
+
+	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	try {
+		const shape = await resolveShape(config.shape);
+		const oldRootHandle = await repo.find<unknown>(config.rootUrl);
+
+		const title = path.basename(root) || undefined;
+
+		const rebuildFolder = async (
+			oldFolderUrl: AutomergeUrl,
+			folderTitle?: string,
+		): Promise<AutomergeUrl> => {
+			const oldFolder = await repo.find<unknown>(oldFolderUrl);
+			const oldTree = await shape.decode({ repo, root: oldFolder });
+
+			// For each leaf: read content, create a fresh UnixFileEntry doc.
+			const newTree = newDir();
+			for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
+				const bare = stripHeads(fileUrl);
+				const oldFileHandle = await repo.find<UnixFileEntry>(bare);
+				const oldDoc = oldFileHandle.doc();
+				const newFileHandle = repo.create<UnixFileEntry>({
+					"@patchwork": { type: "file" },
+					name: oldDoc.name,
+					extension: oldDoc.extension,
+					mimeType: oldDoc.mimeType,
+					content: oldDoc.content,
+				});
+				let finalUrl: AutomergeUrl = newFileHandle.url;
+				if (parseAutomergeUrl(fileUrl).heads) {
+					finalUrl = pinUrl(newFileHandle);
+				}
+				setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
+			}
+
+			// Encode without previousRoot → fresh folder/directory doc URL.
+			return shape.encode({ repo, tree: newTree, title: folderTitle });
+		};
+
+		let newRootUrl: AutomergeUrl;
+		if (config.branches && isBranchesDoc(oldRootHandle.doc())) {
+			const oldDoc = oldRootHandle.doc() as BranchesDoc;
+			const newBranches: Record<string, AutomergeUrl> = {};
+			for (const [name, oldFolderUrl] of Object.entries(oldDoc.branches)) {
+				newBranches[name] = await rebuildFolder(oldFolderUrl, title);
+				dlog("nuclear rebuilt branch %s → %s", name, newBranches[name]);
+			}
+			const newRoot = repo.create<BranchesDoc>({
+				"@patchwork": {
+					type: "branches",
+					...(title ? { title } : {}),
+				},
+				branches: newBranches,
+			});
+			newRootUrl = newRoot.url;
+		} else {
+			newRootUrl = await rebuildFolder(config.rootUrl, title);
+		}
+		dlog("nuclear new rootUrl=%s", newRootUrl);
+
+		await writeConfig(root, { ...config, rootUrl: newRootUrl });
+	} finally {
+		await repo.shutdown();
+	}
 }
 
 export async function save(cwd: string): Promise<void> {
@@ -460,6 +549,12 @@ export async function createBranch(cwd: string, name: string): Promise<Automerge
 		rootHandle.change((d: BranchesDoc) => {
 			d.branches[name] = clonedFolder.url;
 		});
+
+		// Switch to the new branch. The deep clone has identical content to the
+		// source, so the working tree on disk is already correct — we just
+		// update .pushwork/branch.
+		await writeBranchFile(root, name);
+		dlog("createBranch switched to %s", name);
 		return clonedFolder.url;
 	} finally {
 		await repo.shutdown();
@@ -834,8 +929,12 @@ export async function switchBranch(cwd: string, name: string): Promise<void> {
 			throw new Error(`branch "${name}" does not exist`);
 		}
 
-		// Refuse if the working dir has uncommitted changes against the current branch.
-		if (currentName) {
+		const stranded = !!currentName && !doc.branches[currentName];
+
+		// Refuse if the working dir has uncommitted changes against the current
+		// branch. The user can `pushwork save` to commit, or `pushwork cut` +
+		// `pushwork paste` to carry the changes across the switch.
+		if (currentName && !stranded) {
 			const folderHandle = await resolveEffectiveRoot(repo, rootHandle, currentName);
 			const previousTree = await shape.decode({ repo, root: folderHandle });
 			const previousFiles = await readFileBytes(repo, previousTree);
@@ -844,7 +943,7 @@ export async function switchBranch(cwd: string, name: string): Promise<void> {
 			const d = computeDiff(previousFiles, fsFiles);
 			if (d.added.length || d.modified.length || d.deleted.length) {
 				throw new Error(
-					`refusing to switch: working tree has uncommitted changes on branch "${currentName}". run \`pushwork save\` first.`,
+					`refusing to switch: working tree has uncommitted changes on branch "${currentName}". run \`pushwork save\` to commit, or \`pushwork cut\` + \`pushwork switch ${name}\` + \`pushwork paste\` to carry them across.`,
 				);
 			}
 		}
@@ -852,9 +951,69 @@ export async function switchBranch(cwd: string, name: string): Promise<void> {
 		// Materialize from the new branch.
 		const newFolder = await repo.find<unknown>(doc.branches[name]);
 		const tree = await shape.decode({ repo, root: newFolder });
+
+		// Stranded: the current branch is gone, so we have no reference for a
+		// dirty check. Auto-cut working changes against the destination branch,
+		// materialize, then auto-paste so the user's work survives the switch.
+		let strandedStashId: number | null = null;
+		if (stranded) {
+			const newFiles = await readFileBytes(repo, tree);
+			const ig = await loadIgnore(root);
+			const fsFiles = await walkDir(root, ig);
+			const entries: StashEntry[] = [];
+			for (const [p, bytes] of fsFiles) {
+				const prev = newFiles.get(p);
+				if (!prev) {
+					entries.push({ path: p, kind: "added", contentBase64: encodeBytes(bytes) });
+				} else if (!byteEq(prev.bytes, bytes)) {
+					entries.push({ path: p, kind: "modified", contentBase64: encodeBytes(bytes) });
+				}
+			}
+			for (const [p] of newFiles) {
+				if (!fsFiles.has(p)) entries.push({ path: p, kind: "deleted" });
+			}
+			if (entries.length > 0) {
+				entries.sort((a, b) => a.path.localeCompare(b.path));
+				const stash = await appendStash(root, {
+					name: `stranded-from-${currentName}`,
+					branch: currentName,
+					entries,
+				});
+				strandedStashId = stash.id;
+				process.stderr.write(
+					`warning: branch "${currentName}" no longer exists; auto-cut ${entries.length} entr${entries.length === 1 ? "y" : "ies"} as stash #${stash.id} and will auto-paste after switch\n`,
+				);
+			} else {
+				process.stderr.write(
+					`warning: branch "${currentName}" no longer exists; switching (working tree already matches "${name}")\n`,
+				);
+			}
+		}
+
 		await materializeTree(repo, root, tree);
 		await writeBranchFile(root, name);
 		dlog("switch → %s", name);
+
+		if (strandedStashId != null) {
+			const stash = await takeStash(root, String(strandedStashId));
+			if (stash) {
+				for (const entry of stash.entries) {
+					const target = path.join(root, fromPosix(entry.path));
+					if (entry.kind === "deleted") {
+						try {
+							await fs.unlink(target);
+						} catch {
+							// already gone
+						}
+						await pruneEmptyDirs(root, path.dirname(fromPosix(entry.path)));
+					} else if (entry.contentBase64 != null) {
+						const bytes = decodeBytes(entry.contentBase64);
+						await writeFileAtomic(target, bytes);
+					}
+				}
+				dlog("stranded auto-paste applied stash #%d (%d entries)", stash.id, stash.entries.length);
+			}
+		}
 	} finally {
 		await repo.shutdown();
 	}
