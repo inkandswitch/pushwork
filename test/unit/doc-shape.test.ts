@@ -7,6 +7,15 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
+
+async function pathExists(p: string): Promise<boolean> {
+	try {
+		await fs.access(p);
+		return true;
+	} catch {
+		return false;
+	}
+}
 import {
 	initSubduction,
 	parseAutomergeUrl,
@@ -25,6 +34,10 @@ import {
 	currentBranch,
 	listBranches,
 	mergeBranch,
+	previewMerge,
+	cutWorkdir,
+	pasteStash,
+	showStashes,
 	type BranchesDoc,
 	isBranchesDoc,
 	detectDocType,
@@ -408,6 +421,63 @@ describe("branch isolation", () => {
 		);
 	});
 
+	it("merge does character-level CRDT merge on text content", async () => {
+		await fs.writeFile(path.join(workRoot, "x.txt"), "line one\nline two\nline three\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await createBranch(workRoot, "other");
+		await switchBranch(workRoot, "other");
+		await fs.writeFile(
+			path.join(workRoot, "x.txt"),
+			"line one\nline two\nline three EDITED ON OTHER\n",
+		);
+		await save(workRoot);
+		await switchBranch(workRoot, "default");
+		await fs.writeFile(
+			path.join(workRoot, "x.txt"),
+			"line one EDITED ON DEFAULT\nline two\nline three\n",
+		);
+		await save(workRoot);
+		await mergeBranch(workRoot, "other");
+
+		const merged = await fs.readFile(path.join(workRoot, "x.txt"), "utf8");
+		expect(merged).toContain("line one EDITED ON DEFAULT");
+		expect(merged).toContain("line three EDITED ON OTHER");
+	});
+
+	it("previewMerge shows entries without mutating", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "v1\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await createBranch(workRoot, "feat");
+		await switchBranch(workRoot, "feat");
+		await fs.writeFile(path.join(workRoot, "a.txt"), "v2\n");
+		await fs.writeFile(path.join(workRoot, "new.txt"), "n\n");
+		await save(workRoot);
+		await switchBranch(workRoot, "default");
+
+		const preview = await previewMerge(workRoot, "feat");
+		const paths = preview.entries.map((e) => e.path).sort();
+		expect(paths).toEqual(["a.txt", "new.txt"]);
+		expect(preview.entries.find((e) => e.path === "a.txt")?.kind).toBe(
+			"merged",
+		);
+		expect(preview.entries.find((e) => e.path === "new.txt")?.kind).toBe(
+			"added",
+		);
+		// Working tree unchanged on disk:
+		expect(await fs.readFile(path.join(workRoot, "a.txt"), "utf8")).toBe("v1\n");
+		expect(await pathExists(path.join(workRoot, "new.txt"))).toBe(false);
+	});
+
 	it("merge errors on missing source branch", async () => {
 		await fs.writeFile(path.join(workRoot, "a.txt"), "a\n");
 		await init({
@@ -417,6 +487,108 @@ describe("branch isolation", () => {
 			online: false,
 		});
 		await expect(mergeBranch(workRoot, "ghost")).rejects.toThrow(/does not exist/);
+	});
+
+	it("cut/paste round-trips modifications, additions, and deletions", async () => {
+		await fs.writeFile(path.join(workRoot, "mod.txt"), "v1\n");
+		await fs.writeFile(path.join(workRoot, "doomed.txt"), "remove me\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await fs.writeFile(path.join(workRoot, "mod.txt"), "v2\n");
+		await fs.writeFile(path.join(workRoot, "added.txt"), "new\n");
+		await fs.unlink(path.join(workRoot, "doomed.txt"));
+
+		const cut = await cutWorkdir(workRoot, { name: "wip" });
+		expect(cut.entries).toBe(3);
+
+		// Working tree restored to clean state:
+		expect(await fs.readFile(path.join(workRoot, "mod.txt"), "utf8")).toBe(
+			"v1\n",
+		);
+		expect(
+			await fs.readFile(path.join(workRoot, "doomed.txt"), "utf8"),
+		).toBe("remove me\n");
+		expect(await pathExists(path.join(workRoot, "added.txt"))).toBe(false);
+
+		const stashes = await showStashes(workRoot);
+		expect(stashes.length).toBe(1);
+		expect(stashes[0].name).toBe("wip");
+		expect(stashes[0].branch).toBe("default");
+
+		await pasteStash(workRoot);
+
+		expect(await fs.readFile(path.join(workRoot, "mod.txt"), "utf8")).toBe(
+			"v2\n",
+		);
+		expect(await fs.readFile(path.join(workRoot, "added.txt"), "utf8")).toBe(
+			"new\n",
+		);
+		expect(await pathExists(path.join(workRoot, "doomed.txt"))).toBe(false);
+
+		expect((await showStashes(workRoot)).length).toBe(0);
+	});
+
+	it("cut refuses on a clean working tree", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "a\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await expect(cutWorkdir(workRoot)).rejects.toThrow(/working tree clean/);
+	});
+
+	it("paste refuses on a dirty working tree", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "a\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await fs.writeFile(path.join(workRoot, "a.txt"), "edited\n");
+		await cutWorkdir(workRoot);
+		// dirty the working tree again
+		await fs.writeFile(path.join(workRoot, "b.txt"), "extra\n");
+		await expect(pasteStash(workRoot)).rejects.toThrow(/uncommitted/);
+	});
+
+	it("paste with no stashes errors", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "a\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await expect(pasteStash(workRoot)).rejects.toThrow(/no stashes/);
+	});
+
+	it("paste with id selects a specific stash", async () => {
+		await fs.writeFile(path.join(workRoot, "a.txt"), "a\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+		});
+		await fs.writeFile(path.join(workRoot, "first.txt"), "1\n");
+		const c1 = await cutWorkdir(workRoot, { name: "first" });
+		await fs.writeFile(path.join(workRoot, "second.txt"), "2\n");
+		const c2 = await cutWorkdir(workRoot, { name: "second" });
+
+		const out = await pasteStash(workRoot, String(c1.id));
+		expect(out.id).toBe(c1.id);
+		expect(await pathExists(path.join(workRoot, "first.txt"))).toBe(true);
+		// Second stash is still there
+		const stashes = await showStashes(workRoot);
+		expect(stashes.length).toBe(1);
+		expect(stashes[0].id).toBe(c2.id);
 	});
 
 	it("listBranches reports current and all names", async () => {
