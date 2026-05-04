@@ -7,6 +7,9 @@ import {
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import type { Backend } from "./config.js";
+import { log } from "./log.js";
+
+const dlog = log("repo");
 
 const DEFAULT_LEGACY = "wss://sync3.automerge.org";
 const DEFAULT_SUBDUCTION = "wss://subduction.sync.inkandswitch.com";
@@ -20,18 +23,23 @@ export async function openRepo(
 	backend: Backend,
 	storageDir: string,
 ): Promise<Repo> {
+	dlog("openRepo backend=%s storage=%s", backend, storageDir);
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
 	if (backend === "legacy") {
+		const endpoint = legacyUrl();
+		dlog("legacy ws endpoint=%s", endpoint);
 		const adapter = new WebSocketClientAdapter(
-			legacyUrl(),
+			endpoint,
 		) as unknown as NetworkAdapterInterface;
 		return new Repo({ storage, network: [adapter] });
 	}
+	const endpoint = subductionUrl();
+	dlog("subduction ws endpoint=%s", endpoint);
 	return new Repo({
 		storage,
 		network: [],
-		subductionWebsocketEndpoints: [subductionUrl()],
+		subductionWebsocketEndpoints: [endpoint],
 	});
 }
 
@@ -39,8 +47,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function waitForSync<T>(
 	handle: DocHandle<T>,
-	{ idleMs = 1500, maxMs = 15000, pollMs = 200 } = {},
+	{ minMs = 0, idleMs = 1500, maxMs = 15000, pollMs = 200 } = {},
 ): Promise<void> {
+	dlog("waitForSync url=%s minMs=%d idleMs=%d maxMs=%d", handle.url, minMs, idleMs, maxMs);
 	const headsKey = () => JSON.stringify(handle.heads());
 	let last = headsKey();
 	let lastChange = Date.now();
@@ -51,8 +60,13 @@ export async function waitForSync<T>(
 		if (next !== last) {
 			last = next;
 			lastChange = Date.now();
-		} else if (Date.now() - lastChange >= idleMs) {
+		} else if (
+			Date.now() - lastChange >= idleMs &&
+			Date.now() - start >= minMs
+		) {
+			dlog("waitForSync settled url=%s elapsed=%dms", handle.url, Date.now() - start);
 			return;
 		}
 	}
+	dlog("waitForSync timed out url=%s after %dms", handle.url, maxMs);
 }
