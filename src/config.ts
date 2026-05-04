@@ -4,7 +4,7 @@ import type { AutomergeUrl } from "@automerge/automerge-repo";
 
 export type Backend = "legacy" | "subduction";
 
-export const CONFIG_VERSION = 2;
+export const CONFIG_VERSION = 3;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;
@@ -12,6 +12,7 @@ export interface PushworkConfig {
 	backend: Backend;
 	shape: string;
 	artifactDirectories: string[];
+	branches: boolean;
 }
 
 const DIR = ".pushwork";
@@ -38,6 +39,7 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		backend: parsed.backend,
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],
+		branches: parsed.branches ?? true,
 	};
 }
 

@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@automerge/automerge-repo@2.6.0-subduction.15':
+    hash: 0dd24ff0db374f43a85a72c2277f33581031264662873e5ab67d915a3bc76bc9
+    path: patches/@automerge__automerge-repo@2.6.0-subduction.15.patch
+
 importers:
 
   .:
@@ -13,7 +18,7 @@ importers:
         version: 3.2.6
       '@automerge/automerge-repo':
         specifier: 2.6.0-subduction.15
-        version: 2.6.0-subduction.15
+        version: 2.6.0-subduction.15(patch_hash=0dd24ff0db374f43a85a72c2277f33581031264662873e5ab67d915a3bc76bc9)
       '@automerge/automerge-repo-network-websocket':
         specifier: 2.6.0-subduction.15
         version: 2.6.0-subduction.15
@@ -1243,7 +1248,7 @@ snapshots:
 
   '@automerge/automerge-repo-network-websocket@2.6.0-subduction.15':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.15
+      '@automerge/automerge-repo': 2.6.0-subduction.15(patch_hash=0dd24ff0db374f43a85a72c2277f33581031264662873e5ab67d915a3bc76bc9)
       cbor-x: 1.6.4
       debug: 4.4.3
       eventemitter3: 5.0.4
@@ -1256,14 +1261,14 @@ snapshots:
 
   '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.15':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.15
+      '@automerge/automerge-repo': 2.6.0-subduction.15(patch_hash=0dd24ff0db374f43a85a72c2277f33581031264662873e5ab67d915a3bc76bc9)
       rimraf: 5.0.10
     transitivePeerDependencies:
       - bufferutil
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo@2.6.0-subduction.15':
+  '@automerge/automerge-repo@2.6.0-subduction.15(patch_hash=0dd24ff0db374f43a85a72c2277f33581031264662873e5ab67d915a3bc76bc9)':
     dependencies:
       '@automerge/automerge': 3.2.6
       '@automerge/automerge-subduction': 0.8.1

@@ -1,0 +1,26 @@
+diff --git a/dist/helpers/throttle.js b/dist/helpers/throttle.js
+index 92f3cc8ed8b0c870aa9f52fa6e3605d736364534..8822b477e3800f163b58a153e747f2a7090c0d38 100644
+--- a/dist/helpers/throttle.js
++++ b/dist/helpers/throttle.js
+@@ -31,7 +31,7 @@ export const throttle = (fn, delay) => {
+     let pendingArgs;
+     const throttled = function (...args) {
+         pendingArgs = args;
+-        wait = lastCall + delay - Date.now();
++        wait = Math.max(0, lastCall + delay - Date.now());
+         clearTimeout(timeout);
+         timeout = setTimeout(() => {
+             timeout = undefined;
+diff --git a/src/helpers/throttle.ts b/src/helpers/throttle.ts
+index a0933cdc809ed9944f2129c943ac0c9e90bcd195..43050dc0375031bc4490162a7314e3b3541a3f40 100644
+--- a/src/helpers/throttle.ts
++++ b/src/helpers/throttle.ts
+@@ -42,7 +42,7 @@ export const throttle = <F extends (...args: any[]) => any>(
+ 
+   const throttled = function (...args: Parameters<F>) {
+     pendingArgs = args
+-    wait = lastCall + delay - Date.now()
++    wait = Math.max(0, lastCall + delay - Date.now())
+     clearTimeout(timeout)
+     timeout = setTimeout(() => {
+       timeout = undefined

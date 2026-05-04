@@ -22,10 +22,14 @@ export const subductionUrl = () =>
 export async function openRepo(
 	backend: Backend,
 	storageDir: string,
+	opts: { offline?: boolean } = {},
 ): Promise<Repo> {
-	dlog("openRepo backend=%s storage=%s", backend, storageDir);
+	dlog("openRepo backend=%s storage=%s offline=%s", backend, storageDir, !!opts.offline);
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
+	if (opts.offline) {
+		return new Repo({ storage, network: [] });
+	}
 	if (backend === "legacy") {
 		const endpoint = legacyUrl();
 		dlog("legacy ws endpoint=%s", endpoint);
