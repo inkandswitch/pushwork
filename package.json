@@ -37,6 +37,15 @@
 	],
 	"author": "Peter van Hardenberg",
 	"license": "MIT",
+	"files": [
+		"dist",
+		"patches"
+	],
+	"pnpm": {
+		"patchedDependencies": {
+			"@automerge/automerge-repo@2.6.0-subduction.15": "patches/@automerge__automerge-repo@2.6.0-subduction.15.patch"
+		}
+	},
 	"dependencies": {
 		"@automerge/automerge": "^3.2.6",
 		"@automerge/automerge-repo": "2.6.0-subduction.15",
