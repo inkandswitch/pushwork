@@ -266,7 +266,8 @@ program
 	});
 
 program
-	.command("cuts")
+	.command("snarfs")
+	.alias("clipboard")
 	.description("List stashed change sets (newest first)")
 	.action(async () => {
 		const stashes = await showStashes(process.cwd());
