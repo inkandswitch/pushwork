@@ -6,9 +6,9 @@
  * not how it does it.
  *
  * Run against both supported sync backends:
- *   - "legacy"      → default WebSocket sync server (no flag)
- *   - "subduction"  → --sub flag on init/clone (persisted in config; used
- *                     automatically by subsequent sync runs)
+ *   - "subduction"  → default (no flag)
+ *   - "legacy"      → --legacy flag on init/clone (persisted in config;
+ *                     used automatically by subsequent sync runs)
  *
  * Tests hit the public sync servers, so each test allows generous time
  * for network roundtrips.
@@ -28,8 +28,8 @@ const TEST_TIMEOUT = 120_000;
 
 type Backend = { name: string; flags: string[] };
 const BACKENDS: Backend[] = [
-	{ name: "legacy", flags: [] },
-	{ name: "subduction", flags: ["--sub"] },
+	{ name: "subduction", flags: [] },
+	{ name: "legacy", flags: ["--legacy"] },
 ];
 
 async function pushwork(
