@@ -216,32 +216,67 @@ export async function sync(
 ): Promise<void> {
 	if (opts.nuclear) {
 		await nuclearizeRepo(cwd);
+		await publishCurrentTree(cwd);
+		return;
 	}
 	await commitWorkdir(cwd, { online: true });
 }
 
 /**
- * Re-create every Automerge doc this repo references — every UnixFileEntry
- * and the folder/directory doc — with brand-new URLs and no shared history
- * with the originals. Updates `config.json` to point at the new root.
- * Offline; the next sync publishes the new docs to the server.
+ * Open an online repo, subscribe the root folder and every file leaf so the
+ * network adapter announces them to peers, then wait for the local heads to
+ * settle. No decode/diff/encode — used after nuclearizeRepo, where every doc
+ * is freshly created locally and the server has nothing to merge in.
+ */
+async function publishCurrentTree(cwd: string): Promise<void> {
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	dlog("publish root=%s", root);
+
+	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	try {
+		const shape = await resolveShape(config.shape);
+		const folderHandle = await repo.find<unknown>(config.rootUrl);
+		const tree = await shape.decode({ repo, root: folderHandle });
+		// Touch every leaf so the network adapter knows to push it.
+		for (const [, fileUrl] of flattenLeaves(tree)) {
+			await repo.find<UnixFileEntry>(fileUrl);
+		}
+		stampLastSyncAt(folderHandle);
+		await waitForSync(folderHandle, {
+			minMs: 3000,
+			idleMs: 1500,
+			maxMs: 15000,
+		});
+		dlog("publish complete");
+	} finally {
+		await repo.shutdown();
+	}
+}
+
+/**
+ * Re-create every UnixFileEntry doc this repo references with a fresh URL,
+ * then rewrite the existing folder doc's leaves to point at the new file
+ * URLs. The folder doc URL itself is preserved so anyone holding it keeps
+ * tracking this repo. Offline; the next sync publishes the new file docs
+ * and the rewritten folder doc to the server.
  *
- * Use sparingly: this orphans the previous URLs from this repo's perspective.
- * Anyone who had cloned the old URL keeps working from those docs; this
- * client just stops referencing them.
+ * The previous file-doc URLs are orphaned from this repo's perspective.
+ * Anyone holding one of those URLs directly continues to work from it;
+ * this client just stops referencing them.
  */
 export async function nuclearizeRepo(cwd: string): Promise<void> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
-	dlog("nuclear root=%s", root);
+	dlog("nuclear root=%s rootUrl=%s", root, config.rootUrl);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const oldFolder = await repo.find<unknown>(config.rootUrl);
+		const folderHandle = await repo.find<unknown>(config.rootUrl);
 
 		const title = path.basename(root) || undefined;
-		const oldTree = await shape.decode({ repo, root: oldFolder });
+		const oldTree = await shape.decode({ repo, root: folderHandle });
 
 		// For each leaf: read content, create a fresh UnixFileEntry doc.
 		const newTree = newDir();
@@ -263,11 +298,13 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 			setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
 		}
 
-		// Encode without previousRoot → fresh folder/directory doc URL.
-		const newRootUrl = await shape.encode({ repo, tree: newTree, title });
-		dlog("nuclear new rootUrl=%s", newRootUrl);
-
-		await writeConfig(root, { ...config, rootUrl: newRootUrl });
+		// Mutate the existing folder doc in place — same URL, new file leaves.
+		await shape.encode({
+			repo,
+			tree: newTree,
+			previousRoot: folderHandle,
+			title,
+		});
 	} finally {
 		await repo.shutdown();
 	}
@@ -311,14 +348,29 @@ async function commitWorkdir(
 		}
 
 		if (online) {
-			// Always stamp lastSyncAt on a sync, regardless of whether the
-			// working tree changed — a sync is also a checkpoint that "we
-			// reconciled with the server at this time."
-			stampLastSyncAt(folderHandle);
 			await waitForSync(folderHandle, {
 				minMs: 3000,
 				idleMs: 1500,
 				maxMs: 15000,
+			});
+
+			// After peer changes have settled, refresh the folder doc so its
+			// pinned (artifact) leaves reference each file doc's current
+			// heads. Bare URLs already track current heads implicitly.
+			const refreshed = await refreshFolderPins(
+				repo,
+				folderHandle,
+				shape,
+				config.artifactDirectories,
+			);
+
+			// Always stamp lastSyncAt — a sync is also a checkpoint that
+			// "we reconciled with the server at this time" — and let any
+			// resulting changes flush.
+			stampLastSyncAt(folderHandle);
+			await waitForSync(folderHandle, {
+				idleMs: 1500,
+				maxMs: refreshed ? 10000 : 5000,
 			});
 		}
 
@@ -328,6 +380,69 @@ async function commitWorkdir(
 	} finally {
 		await repo.shutdown();
 	}
+}
+
+export type HeadsEntry = {
+	path: string; // "/" for the root folder doc, posix file path otherwise
+	url: AutomergeUrl;
+	heads: string[];
+};
+
+/**
+ * List the current Automerge heads for the root folder doc and every file
+ * leaf it references. Offline; never contacts a sync server.
+ *
+ * `pathspec` filters results: exact match, or prefix match against a folder
+ * (e.g. "src" or "src/" matches "src/index.ts"). Pass "/" to show only the
+ * root folder doc.
+ */
+export async function heads(
+	cwd: string,
+	pathspec?: string,
+): Promise<HeadsEntry[]> {
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+
+	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	try {
+		const shape = await resolveShape(config.shape);
+		const folderHandle = await repo.find<unknown>(config.rootUrl);
+		const tree = await shape.decode({ repo, root: folderHandle });
+
+		const out: HeadsEntry[] = [];
+		const matches = (p: string) => matchesPathspec(p, pathspec);
+
+		if (matches("/")) {
+			out.push({
+				path: "/",
+				url: config.rootUrl,
+				heads: folderHandle.heads() ?? [],
+			});
+		}
+
+		for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
+			if (!matches(posixPath)) continue;
+			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			out.push({
+				path: posixPath,
+				url: fileUrl,
+				heads: handle.heads() ?? [],
+			});
+		}
+
+		out.sort((a, b) => a.path.localeCompare(b.path));
+		return out;
+	} finally {
+		await repo.shutdown();
+	}
+}
+
+function matchesPathspec(path: string, spec?: string): boolean {
+	if (!spec) return true;
+	if (spec === "/") return path === "/";
+	const trimmed = spec.endsWith("/") ? spec.slice(0, -1) : spec;
+	if (path === trimmed) return true;
+	return path.startsWith(trimmed + "/");
 }
 
 export async function status(cwd: string): Promise<{ diff: Diff }> {
@@ -618,6 +733,40 @@ async function pushFiles(
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
 	return root;
+}
+
+/**
+ * Re-pin every artifact leaf in the folder doc to its file doc's current
+ * heads. Bare (non-artifact) URLs are left as-is since they already track
+ * current heads implicitly. Returns true if any leaf URL was rewritten.
+ */
+async function refreshFolderPins(
+	repo: Repo,
+	folderHandle: DocHandle<unknown>,
+	shape: Shape,
+	artifactDirs: readonly string[],
+): Promise<boolean> {
+	const tree = await shape.decode({ repo, root: folderHandle });
+	const refreshed = newDir();
+	let changed = false;
+	for (const [posixPath, currentUrl] of flattenLeaves(tree)) {
+		const segments = posixPath.split("/").filter(Boolean);
+		let finalUrl: AutomergeUrl = currentUrl;
+		if (isInArtifactDir(posixPath, artifactDirs)) {
+			const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
+			const repinned = pinUrl(handle);
+			if (repinned !== currentUrl) {
+				finalUrl = repinned;
+				changed = true;
+			}
+		}
+		setFileAt(refreshed, segments, finalUrl);
+	}
+	if (changed) {
+		dlog("refreshFolderPins: re-pinned artifacts to current heads");
+		await shape.encode({ repo, tree: refreshed, previousRoot: folderHandle });
+	}
+	return changed;
 }
 
 async function readFileBytes(

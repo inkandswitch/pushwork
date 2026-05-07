@@ -5,12 +5,14 @@ export {
 	save,
 	status,
 	diff,
+	heads,
 	url,
 	cutWorkdir,
 	pasteSnarf,
 	showSnarfs,
 	nuclearizeRepo,
 } from "./pushwork.js";
+export type { HeadsEntry } from "./pushwork.js";
 export type { Snarf, SnarfEntry } from "./snarf.js";
 export type { Backend, PushworkConfig } from "./config.js";
 export { CONFIG_VERSION } from "./config.js";

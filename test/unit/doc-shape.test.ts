@@ -374,7 +374,7 @@ describe("snarf (cut/paste)", () => {
 		expect(snarfs[0].id).toBe(c2.id);
 	});
 
-	it("nuclearizeRepo regenerates every URL while preserving content", async () => {
+	it("nuclearizeRepo regenerates every file URL but preserves the root URL", async () => {
 		await fs.writeFile(path.join(workRoot, "a.txt"), "A\n");
 		await fs.writeFile(path.join(workRoot, "b.txt"), "B\n");
 		await init({
@@ -386,37 +386,37 @@ describe("snarf (cut/paste)", () => {
 
 		const cfg1 = await readConfig(workRoot);
 
-		const oldUrls: string[] = [];
+		const oldFileUrls: string[] = [];
 		await withRepo(path.join(workRoot, ".pushwork", "storage"), async (repo) => {
 			const folder = await repo.find(cfg1.rootUrl);
-			oldUrls.push(cfg1.rootUrl);
 			for (const [k, v] of Object.entries(readDoc(folder) as Record<string, unknown>)) {
 				if (k === "@patchwork" || k === "lastSyncAt") continue;
-				if (typeof v === "string") oldUrls.push(v);
+				if (typeof v === "string") oldFileUrls.push(v);
 			}
 		});
 
 		await nuclearizeRepo(workRoot);
 
 		const cfg2 = await readConfig(workRoot);
-		expect(cfg2.rootUrl).not.toBe(cfg1.rootUrl);
+		// Root folder URL is preserved across nuclearize.
+		expect(cfg2.rootUrl).toBe(cfg1.rootUrl);
 
-		const newUrls: string[] = [];
+		const newFileUrls: string[] = [];
 		await withRepo(path.join(workRoot, ".pushwork", "storage"), async (repo) => {
 			const folder = await repo.find(cfg2.rootUrl);
-			newUrls.push(cfg2.rootUrl);
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
 			for (const [k, v] of Object.entries(folderDoc)) {
 				if (k === "@patchwork" || k === "lastSyncAt") continue;
-				if (typeof v === "string") newUrls.push(v);
+				if (typeof v === "string") newFileUrls.push(v);
 			}
 			// Same content preserved.
 			expect("a.txt" in folderDoc).toBe(true);
 			expect("b.txt" in folderDoc).toBe(true);
 		});
 
-		// No URL appears in both old and new sets.
-		const oldSet = new Set(oldUrls);
-		for (const u of newUrls) expect(oldSet.has(u)).toBe(false);
+		// Every file URL is brand new.
+		const oldSet = new Set(oldFileUrls);
+		expect(newFileUrls.length).toBe(oldFileUrls.length);
+		for (const u of newFileUrls) expect(oldSet.has(u)).toBe(false);
 	});
 });

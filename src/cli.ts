@@ -9,6 +9,7 @@ import {
 	clone,
 	cutWorkdir,
 	diff,
+	heads,
 	init,
 	pasteSnarf,
 	save,
@@ -205,6 +206,21 @@ program
 				`*** ${e.path}`;
 			process.stdout.write(header + "\n");
 			process.stdout.write(createPatch(e.path, before, after, "", "") + "\n");
+		}
+	});
+
+program
+	.command("heads")
+	.description("Print Automerge heads for the root folder and every file doc (offline)")
+	.argument("[pathspec]", "Limit to a path or path prefix (e.g. \"src\" or \"src/foo.ts\")")
+	.action(async (pathspec) => {
+		const entries = await heads(process.cwd(), pathspec);
+		if (entries.length === 0) {
+			process.stdout.write("(no matching docs)\n");
+			return;
+		}
+		for (const e of entries) {
+			process.stdout.write(`${e.path}\t${e.url}\t${e.heads.join(" ")}\n`);
 		}
 	});
 
