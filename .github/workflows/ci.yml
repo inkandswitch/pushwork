@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, lint, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        # Reads the pnpm version from package.json#packageManager.
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+  test:
+    name: Test (${{ matrix.name }})
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      # Always run both backends so a regression in one is visible even if the
+      # other fails first.
+      fail-fast: false
+      matrix:
+        include:
+          # WebSocket suite hits wss://sync3.automerge.org.
+          - name: WebSocket backend
+            script: test:websocket
+          # Subduction suite hits wss://subduction.sync.inkandswitch.com via
+          # the --sub flag (plus pure-unit Subduction tests).
+          - name: Subduction backend
+            script: test:subduction
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        # Several integration tests shell out to `dist/cli.js`, so the build
+        # artifact must exist before tests run.
+        run: pnpm build
+
+      - name: Test
+        run: pnpm run ${{ matrix.script }}
+        timeout-minutes: 20

@@ -231,7 +231,7 @@ export class SyncEngine {
 	 * Used by --force to re-sync every file.
 	 */
 	async resetSnapshot(): Promise<void> {
-		let snapshot = await this.snapshotManager.load()
+		const snapshot = await this.snapshotManager.load()
 		if (!snapshot) return
 		this.snapshotManager.clear(snapshot)
 		await this.snapshotManager.save(snapshot)
@@ -243,7 +243,7 @@ export class SyncEngine {
 	 * documents. The root directory document itself is preserved.
 	 */
 	async nuclearReset(): Promise<void> {
-		let snapshot = await this.snapshotManager.load()
+		const snapshot = await this.snapshotManager.load()
 		if (!snapshot) return
 
 		// Clear the root directory document's entries
@@ -1062,7 +1062,19 @@ export class SyncEngine {
 		// Create or update local file
 		await writeFileContent(localPath, change.remoteContent)
 
-		// Update or create snapshot entry for this file
+		// Update or create snapshot entry for this file.
+		//
+		// IMPORTANT: For artifact paths we must record the contentHash here.
+		// detectLocalChanges treats a missing contentHash as "assume the file
+		// was modified locally" (see change-detection.ts), so an artifact file
+		// pulled from a peer without a hash would be falsely flagged as a
+		// local change on the next sync. That spurious change would trigger
+		// updateRemoteFile, which replaces the artifact document entirely
+		// with a fresh one (new URL). Two peers each independently doing this
+		// to the same file forks the parent directory document into concurrent
+		// branches whose merge contains BOTH the original and replacement
+		// entries — the source of the artifact-deletion "resurrection" bug.
+		const isArtifact = this.isArtifactPath(change.path)
 		const snapshotEntry = snapshot.files.get(change.path)
 		if (snapshotEntry) {
 			// Update existing entry
@@ -1071,6 +1083,9 @@ export class SyncEngine {
 			if (change.remoteUrl) {
 				const fileHandle = await this.repo.find<FileDocument>(change.remoteUrl)
 				snapshotEntry.url = this.getEntryUrl(fileHandle, change.path)
+			}
+			if (isArtifact) {
+				snapshotEntry.contentHash = contentHash(change.remoteContent)
 			}
 		} else {
 			// Create new snapshot entry for newly discovered remote file
@@ -1092,6 +1107,9 @@ export class SyncEngine {
 							head: change.remoteHead,
 							extension: getFileExtension(change.path),
 							mimeType: getEnhancedMimeType(change.path),
+							...(isArtifact
+								? {contentHash: contentHash(change.remoteContent)}
+								: {}),
 						})
 					}
 				} catch (error) {

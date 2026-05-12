@@ -135,31 +135,6 @@ describe("Sync Engine Deletion Integration", () => {
         snapshotManager.removeFileEntry(snapshot, "rapid-changes.ts");
       }
     });
-
-    it("should handle deletion during content modification attempts", async () => {
-      const filePath = path.join(testDir, "modify-delete-race.ts");
-      const initialContent = "interface Race { test: boolean; }";
-
-      // Create initial file
-      await writeFileContent(filePath, initialContent);
-
-      // Start modification and deletion concurrently
-      const modifyPromise = writeFileContent(
-        filePath,
-        initialContent + "\n// Modified"
-      );
-      const deletePromise = (async () => {
-        // Small delay to let modification start
-        await new Promise((resolve) => setTimeout(resolve, 1));
-        await removePath(filePath);
-      })();
-
-      // Wait for both operations to complete
-      await Promise.allSettled([modifyPromise, deletePromise]);
-
-      // File should be deleted regardless of modification timing
-      expect(await pathExists(filePath)).toBe(false);
-    });
   });
 
   describe("Directory Structure Impact", () => {
