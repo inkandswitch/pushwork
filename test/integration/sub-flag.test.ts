@@ -224,6 +224,21 @@ describe("--sub flag integration", () => {
       },
       60000,
     );
+
+    it(
+      "should initialize an empty directory",
+      async () => {
+        await pushwork(["init", "--sub", tmpDir]);
+
+        const snapshotManager = new SnapshotManager(tmpDir);
+        const snapshot = await snapshotManager.load();
+        expect(snapshot).not.toBeNull();
+        expect(snapshot!.rootDirectoryUrl).toBeDefined();
+        expect(snapshot!.rootDirectoryUrl).toMatch(/^automerge:/);
+        expect(snapshot!.files.size).toBe(0);
+      },
+      60000,
+    );
   });
 
   describe("sync --sub", () => {
