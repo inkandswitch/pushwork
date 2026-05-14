@@ -12,14 +12,14 @@ importers:
         specifier: ^3.2.6
         version: 3.2.6
       '@automerge/automerge-repo':
-        specifier: 2.6.0-subduction.19
-        version: 2.6.0-subduction.19
+        specifier: 2.6.0-subduction.20
+        version: 2.6.0-subduction.20
       '@automerge/automerge-repo-network-websocket':
-        specifier: 2.6.0-subduction.19
-        version: 2.6.0-subduction.19
+        specifier: 2.6.0-subduction.20
+        version: 2.6.0-subduction.20
       '@automerge/automerge-repo-storage-nodefs':
-        specifier: 2.6.0-subduction.19
-        version: 2.6.0-subduction.19
+        specifier: 2.6.0-subduction.20
+        version: 2.6.0-subduction.20
       '@automerge/automerge-subduction':
         specifier: 0.12.0
         version: 0.12.0
@@ -91,17 +91,20 @@ packages:
     resolution: {integrity: sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw==}
     engines: {node: '>=6.0.0'}
 
-  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.19':
-    resolution: {integrity: sha512-PPDTHSx0lZl/7+D7fMJVuGlcU5HbQdqKCwRDFUjYCOQN8NsYW5Mfu/74qDnSJpXq6eeTqHbE6V0wchPiq+GlRg==}
+  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.20':
+    resolution: {integrity: sha512-N05WTZfosGYLrljt+qdtWbreqqWuvHQSf/2qAhGmkolfUBCz5BlnTtZ4hwhpXW1RICEOzrC9o+d4gYNN+Og3fw==}
 
-  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.19':
-    resolution: {integrity: sha512-8J4QWLIPkkQU2MlR9M/wRtmuhKGz6X8rcK8PCrlh27X0ylwCMI7VmX0rJrE8gDw3YtGSkFuPMJVUhCyAlDlmJQ==}
+  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.20':
+    resolution: {integrity: sha512-+dKRHg+q2M7F4i7WRj90qHBr+YLniYt+SRDKZWCOfcit8lWLozx7H/4y/aDHX3Bvo0+HKLDIljsRaJtatHFGuA==}
 
-  '@automerge/automerge-repo@2.6.0-subduction.19':
-    resolution: {integrity: sha512-LedVBFiCDt5/loWqcoyHQAxVclIO0axywX4m8bb0euWDJZYbk1Pp44DN7bD3v23SmRAxZXtG6of3rz3s5+wxHQ==}
+  '@automerge/automerge-repo@2.6.0-subduction.20':
+    resolution: {integrity: sha512-3LkXIFvY79bRSEtVMncUFjOp2KBIUN9C/j9FUsmlEBFSiK2Ec9E4qo2WWpg5aJ5rDXh/HzZe+ZSKDSAJwA77oA==}
 
   '@automerge/automerge-subduction@0.12.0':
     resolution: {integrity: sha512-6guXcwChiiL9DpivO90vHLMSL3BMOqb9EpLhOdWke+AkzDrlaX4Jw5ptk0qkBzudv6mF5qnBbAUk1Jy/9PBXUw==}
+
+  '@automerge/automerge-subduction@0.12.1':
+    resolution: {integrity: sha512-s1s40RTozkqExIk1LYdogKPzpCMFfe/7KBS0ccAlwsy4JwdcUGG9NQO2Pm3kZq8vD3OPw7DcIOSPG+bnLESQFg==}
 
   '@automerge/automerge@3.2.6':
     resolution: {integrity: sha512-9/GXXfYYWNVGpnbRrGQzTNU4fWZ3XaEMeEg0OrpK4pvlQSpkmUBoirEb/4TMK6BwMysZGV5Yeneq3wwc7RNGfg==}
@@ -1242,9 +1245,9 @@ snapshots:
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.31
 
-  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.19':
+  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.20':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.19
+      '@automerge/automerge-repo': 2.6.0-subduction.20
       cbor-x: 1.6.4
       debug: 4.4.3
       eventemitter3: 5.0.4
@@ -1255,19 +1258,19 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.19':
+  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.20':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.19
+      '@automerge/automerge-repo': 2.6.0-subduction.20
       rimraf: 5.0.10
     transitivePeerDependencies:
       - bufferutil
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo@2.6.0-subduction.19':
+  '@automerge/automerge-repo@2.6.0-subduction.20':
     dependencies:
       '@automerge/automerge': 3.2.6
-      '@automerge/automerge-subduction': 0.12.0
+      '@automerge/automerge-subduction': 0.12.1
       bs58check: 3.0.1
       cbor-x: 1.6.4
       debug: 4.4.3
@@ -1283,6 +1286,8 @@ snapshots:
       - utf-8-validate
 
   '@automerge/automerge-subduction@0.12.0': {}
+
+  '@automerge/automerge-subduction@0.12.1': {}
 
   '@automerge/automerge@3.2.6': {}
 
