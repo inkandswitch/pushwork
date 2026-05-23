@@ -56,24 +56,55 @@ export class ChangeDetector {
 	 * Detect all changes between local filesystem and snapshot
 	 */
 	async detectChanges(snapshot: SyncSnapshot, excludePaths?: Set<string>): Promise<DetectedChange[]> {
-		const changes: DetectedChange[] = []
-
 		// Get current filesystem state
 		const currentFiles = await this.getCurrentFilesystemState()
 
 		// Check for local changes (new, modified, deleted files)
 		const localChanges = await this.detectLocalChanges(snapshot, currentFiles)
-		changes.push(...localChanges)
 
 		// Check for remote changes (changes in Automerge documents)
 		const remoteChanges = await this.detectRemoteChanges(snapshot)
-		changes.push(...remoteChanges)
 
 		// Check for new remote documents not in snapshot (critical for clone scenarios)
 		const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot, excludePaths)
-		changes.push(...newRemoteDocuments)
 
-		return changes
+		const changesByPath = new Map<string, DetectedChange>()
+		for (const change of [...localChanges, ...remoteChanges, ...newRemoteDocuments]) {
+			const existing = changesByPath.get(change.path)
+			if (!existing) {
+				changesByPath.set(change.path, change)
+				continue
+			}
+
+			changesByPath.set(change.path, {
+				...existing,
+				changeType: this.mergeChangeTypes(existing.changeType, change.changeType),
+				localContent:
+					existing.localContent !== null ? existing.localContent : change.localContent,
+				remoteContent:
+					change.remoteContent !== null ? change.remoteContent : existing.remoteContent,
+				localHead: existing.localHead ?? change.localHead,
+				remoteHead: change.remoteHead ?? existing.remoteHead,
+			})
+		}
+
+		return Array.from(changesByPath.values())
+	}
+
+	private mergeChangeTypes(a: ChangeType, b: ChangeType): ChangeType {
+		if (a === b) return a
+		if (a === ChangeType.BOTH_CHANGED || b === ChangeType.BOTH_CHANGED) {
+			return ChangeType.BOTH_CHANGED
+		}
+		if (a === ChangeType.NO_CHANGE) return b
+		if (b === ChangeType.NO_CHANGE) return a
+		if (
+			(a === ChangeType.LOCAL_ONLY && b === ChangeType.REMOTE_ONLY) ||
+			(a === ChangeType.REMOTE_ONLY && b === ChangeType.LOCAL_ONLY)
+		) {
+			return ChangeType.BOTH_CHANGED
+		}
+		return b
 	}
 
 	/**
@@ -272,16 +303,9 @@ export class ChangeDetector {
 						return
 					}
 
-					// Check if the document was replaced entirely (new URL).
-					// This happens when a peer replaces an artifact file, fixes a
-					// legacy immutable string, or recreates a failed document.
-					// The old snapshot URL is now orphaned — read from the new one.
-					const urlReplaced = getPlainUrl(remoteEntry.url) !== getPlainUrl(snapshotEntry.url)
-					const remoteUrl = urlReplaced ? remoteEntry.url : snapshotEntry.url
+					const currentRemoteHead = await this.getCurrentRemoteHead(snapshotEntry.url)
 
-					const currentRemoteHead = await this.getCurrentRemoteHead(remoteUrl)
-
-					if (urlReplaced || !A.equals(currentRemoteHead, snapshotEntry.head)) {
+					if (!A.equals(currentRemoteHead, snapshotEntry.head)) {
 						if (this.isArtifactPath(relativePath)) {
 							// Artifact: skip content reads, just report head change
 							const localContent = await this.getLocalContent(relativePath)
@@ -296,20 +320,17 @@ export class ChangeDetector {
 								remoteContent: null,
 								localHead: snapshotEntry.head,
 								remoteHead: currentRemoteHead,
-								...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
 							})
 							return
 						}
 
 						// Remote document has changed
-						const currentRemoteContent = await this.getCurrentRemoteContent(remoteUrl)
+						const currentRemoteContent = await this.getCurrentRemoteContent(snapshotEntry.url)
 						const localContent = await this.getLocalContent(relativePath)
-						const lastKnownContent = urlReplaced
-							? null // Can't diff against old doc when URL changed
-							: await this.getContentAtHead(
-								snapshotEntry.url,
-								snapshotEntry.head
-							)
+						const lastKnownContent = await this.getContentAtHead(
+							snapshotEntry.url,
+							snapshotEntry.head
+						)
 
 						const localChanged = localContent && lastKnownContent
 							? !isContentEqual(localContent, lastKnownContent)
@@ -327,7 +348,6 @@ export class ChangeDetector {
 							remoteContent: currentRemoteContent,
 							localHead: snapshotEntry.head,
 							remoteHead: currentRemoteHead,
-							...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
 						})
 					}
 				}
@@ -440,43 +460,6 @@ export class ChangeDetector {
 								remoteHead,
 							})
 						}
-					// Only ignore if neither local nor remote content exists (ghost entry)
-				} else if (
-					getPlainUrl(entry.url) !== getPlainUrl(existingEntry.url)
-				) {
-					// HACK: URL replacement detection bolted onto the "discover new docs" walk.
-					//
-					// A peer can replace a document entirely (creating a new URL) rather than mutating
-					// the existing one. This happens in several cases in updateRemoteFile(): artifact
-					// paths are always replaced; non-artifact docs with legacy immutable string content
-					// are also replaced; and recreateFailedDocuments() replaces docs that timed out
-					// during network sync. The two normal remote-change scans both miss this:
-					//   - detectRemoteChanges() is snapshot-centric: it checks the old (now orphaned)
-					//     doc's heads, which haven't changed, so it reports no change.
-					//   - The "new doc" branch above is directory-centric: it skips paths already in
-					//     the snapshot, assuming they're handled by detectRemoteChanges().
-					//
-					// A cleaner fix would be to have detectRemoteChanges() also verify that the
-					// directory still points to the same URL for each snapshot entry, treating a
-					// mismatch as a first-class URL-replacement change rather than a special case here.
-					const localContent = await this.getLocalContent(entryPath)
-						const remoteContent = await this.getCurrentRemoteContent(entry.url)
-						const remoteHead = await this.getCurrentRemoteHead(entry.url)
-
-						if (remoteContent !== null) {
-							changes.push({
-								path: entryPath,
-								changeType:
-									localContent !== null
-										? ChangeType.BOTH_CHANGED
-										: ChangeType.REMOTE_ONLY,
-								fileType: await this.getFileTypeFromContent(remoteContent),
-								localContent: localContent ?? null,
-								remoteContent,
-								remoteHead,
-								remoteUrl: entry.url,
-							})
-						}
 					}
 				} else if (entry.type === "folder") {
 					// Recursively process subdirectory
@@ -559,17 +542,29 @@ export class ChangeDetector {
 		url: AutomergeUrl,
 		heads: UrlHeads
 	): Promise<string | Uint8Array | null> {
-		try {
-			// Strip heads for current document state
-			const plainUrl = getPlainUrl(url)
-			const handle = await this.repo.find<FileDocument>(plainUrl)
-			const doc = await handle.view(heads).doc()
+		const plainUrl = getPlainUrl(url)
 
-			const content = (doc as FileDocument | undefined)?.content
-			return readDocContent(content)
-		} catch {
-			return null
+		for (let attempt = 0; attempt < 5; attempt++) {
+			try {
+				const result = await this.findDocument<FileDocument>(plainUrl, {
+					maxRetries: 1,
+					retryDelayMs: 0,
+				})
+				if (!result) {
+					throw new Error("document unavailable")
+				}
+
+				const doc = await result.handle.view(heads).doc()
+				const content = (doc as FileDocument | undefined)?.content
+				return readDocContent(content)
+			} catch {
+				if (attempt < 4) {
+					await new Promise(r => setTimeout(r, 200 * (attempt + 1)))
+				}
+			}
 		}
+
+		return null
 	}
 
 	/**

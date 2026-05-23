@@ -30,6 +30,7 @@ import {
 	getPlainUrl,
 	updateTextContent,
 	readDocContent,
+	mergeTextWithBase,
 } from "../utils"
 import {isContentEqual, contentHash} from "../utils/content"
 import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
@@ -121,7 +122,9 @@ export function nukeAndRebuildDocs(
 /**
  * Sync configuration constants
  */
-const BIDIRECTIONAL_SYNC_TIMEOUT_MS = 5000 // Timeout for bidirectional sync stability check
+const BIDIRECTIONAL_SYNC_TIMEOUT_MS = Number(
+	process.env.PUSHWORK_BIDIRECTIONAL_SYNC_TIMEOUT_MS ?? 5000
+) // Timeout for bidirectional sync stability check
 
 /**
  * Bidirectional sync engine implementing two-phase sync
@@ -450,6 +453,8 @@ export class SyncEngine {
 			const snapshot =
 				(await this.snapshotManager.load()) ||
 				this.snapshotManager.createEmpty()
+			const sub = options?.sub ?? false
+			const storageId = sub ? undefined : this.config.sync_server_storage_id
 
 			debug(`sync: rootDirectoryUrl=${snapshot.rootDirectoryUrl}, files=${snapshot.files.size}, dirs=${snapshot.directories.size}`)
 
@@ -487,11 +492,9 @@ export class SyncEngine {
 
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
-				const sub = options?.sub ?? false
 				// In Subduction mode, pass no StorageId so waitForSync
 				// falls back to head-stability polling. In WebSocket mode,
 				// pass the StorageId for precise getSyncInfo-based verification.
-				const storageId = sub ? undefined : this.config.sync_server_storage_id
 
 				try {
 					// Ensure root directory handle is tracked for sync
@@ -1020,11 +1023,6 @@ export class SyncEngine {
 		if (snapshotEntry) {
 			// Update existing entry
 			snapshotEntry.head = change.remoteHead
-			// If the remote document was replaced (new URL), update the snapshot URL
-			if (change.remoteUrl) {
-				const fileHandle = await this.repo.find<FileDocument>(change.remoteUrl)
-				snapshotEntry.url = this.getEntryUrl(fileHandle, change.path)
-			}
 		} else {
 			// Create new snapshot entry for newly discovered remote file
 			// We need to find the remote file's URL from the directory hierarchy
@@ -1257,27 +1255,51 @@ export class SyncEngine {
 
 		const currentContent = readDocContent(rawContent)
 		const contentChanged = !isContentEqual(content, currentContent)
-
-		// Update snapshot heads even when content is identical
 		const snapshotEntry = snapshot.files.get(filePath)
-		if (snapshotEntry) {
-			// Update snapshot with current document heads
-			snapshot.files.set(filePath, {
-				...snapshotEntry,
-				head: handle.heads(),
-			})
-		}
+		const snapshotHeads = snapshotEntry?.head
+		const currentHeads = handle.heads()
+		const remoteChangedSinceSnapshot =
+			snapshotHeads != null && !A.equals(currentHeads, snapshotHeads)
 
 		if (!contentChanged) {
-			// Content is identical, but we've updated the snapshot heads above
-			// This prevents fresh change detection from seeing stale heads
+			if (snapshotEntry) {
+				// No local content delta remains to reconcile, so it's safe to
+				// advance the snapshot to the current remote heads immediately.
+				snapshot.files.set(filePath, {
+					...snapshotEntry,
+					head: currentHeads,
+				})
+			}
 			return
 		}
 
-		const heads = snapshotEntry?.head
+		const heads = snapshotHeads
 
 		if (!heads) {
 			throw new Error(`No heads found for ${url}`)
+		}
+
+		if (
+			remoteChangedSinceSnapshot &&
+			typeof content === "string" &&
+			typeof currentContent === "string"
+		) {
+			const baseDoc = await handle.view(heads).doc()
+			const baseContent = readDocContent(baseDoc?.content)
+
+			if (typeof baseContent === "string") {
+				const mergedContent = mergeTextWithBase(
+					baseContent,
+					content,
+					currentContent,
+				)
+
+				handle.change((doc: FileDocument) => {
+					updateTextContent(doc, ["content"], mergedContent)
+				})
+				this.handlesByPath.set(filePath, handle)
+				return
+			}
 		}
 
 		handle.changeAt(heads, (doc: FileDocument) => {
@@ -1288,8 +1310,10 @@ export class SyncEngine {
 			}
 		})
 
-		// Update snapshot with new heads after content change
-		if (snapshotEntry) {
+		// When the document changed remotely since our snapshot, keep the old
+		// snapshot heads until phase 2 so change re-detection still sees the
+		// merged remote state and pulls it back into the local workspace.
+		if (snapshotEntry && !remoteChangedSinceSnapshot) {
 			snapshot.files.set(filePath, {
 				...snapshotEntry,
 				head: handle.heads(),
@@ -1719,7 +1743,7 @@ export class SyncEngine {
 		}
 
 		try {
-			await this.refreshRemoteState(snapshot, {bestEffort: true})
+			await this.refreshRemoteState(snapshot)
 		} catch {
 			// Best-effort refresh: preview should still work from local state.
 		}
@@ -1818,21 +1842,44 @@ export class SyncEngine {
 		}
 	}
 
-	private async refreshRemoteState(
-		snapshot: SyncSnapshot,
-		options: {bestEffort?: boolean} = {}
-	): Promise<void> {
+	private async refreshTrackedHandles(
+		snapshot: SyncSnapshot
+	): Promise<DocHandle<unknown>[]> {
+		const urls = new Set<AutomergeUrl>()
+		if (snapshot.rootDirectoryUrl) {
+			urls.add(getPlainUrl(snapshot.rootDirectoryUrl))
+		}
+		for (const entry of snapshot.directories.values()) {
+			urls.add(getPlainUrl(entry.url))
+		}
+		for (const entry of snapshot.files.values()) {
+			urls.add(getPlainUrl(entry.url))
+		}
+
+		const handles: DocHandle<unknown>[] = []
+		for (const url of urls) {
+			const handle = await this.findReadyHandle(url)
+			if (handle) {
+				handles.push(handle)
+			}
+		}
+
+		return handles
+	}
+
+	private async refreshRemoteState(snapshot: SyncSnapshot): Promise<void> {
 		if (!this.config.sync_enabled || !snapshot.rootDirectoryUrl) {
 			return
 		}
 
-		const plainRootUrl = getPlainUrl(snapshot.rootDirectoryUrl)
-		const bestEffort = options.bestEffort ?? false
-		const maxAttempts = bestEffort ? 2 : 6
+		const sub = this.config.subduction ?? false
+		const storageId = sub ? undefined : this.config.sync_server_storage_id
 
 		debug("sync: waiting for root document to be ready")
 		out.update("Waiting for root document from server")
 
+		const plainRootUrl = getPlainUrl(snapshot.rootDirectoryUrl)
+		const maxAttempts = 6
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
 				const rootHandle = await this.repo.find<DirectoryDocument>(plainRootUrl)
@@ -1844,21 +1891,13 @@ export class SyncEngine {
 					String(error).includes("unavailable") ||
 					String(error).includes("not ready")
 				if (isUnavailable && attempt < maxAttempts) {
-					const delay = bestEffort
-						? Math.min(250 * Math.pow(2, attempt - 1), 500)
-						: Math.min(1000 * Math.pow(2, attempt - 1), 10000)
+					const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000)
 					debug(
 						`sync: root document not available (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms`
 					)
 					out.update(`Waiting for root document (attempt ${attempt}/${maxAttempts})`)
 					await new Promise(r => setTimeout(r, delay))
 				} else {
-					if (bestEffort && isUnavailable) {
-						debug(
-							`sync: root document unavailable after ${attempt} attempts in best-effort mode`
-						)
-						return
-					}
 					debug(
 						`sync: root document unavailable after ${maxAttempts} attempts: ${error}`
 					)
@@ -1869,37 +1908,20 @@ export class SyncEngine {
 		}
 
 		debug("sync: waiting for initial bidirectional sync")
-		out.update("Waiting for initial sync from server")
-		try {
-			await waitForBidirectionalSync(this.repo, snapshot.rootDirectoryUrl, {
-				timeoutMs: 5000,
-				pollIntervalMs: 100,
-				stableChecksRequired: 3,
-			})
-		} catch (error) {
-			out.taskLine(`Initial sync: ${error}`, true)
-		}
-
-		const trackedHandles: DocHandle<unknown>[] = []
-		const trackedUrls = new Set<AutomergeUrl>()
-		trackedUrls.add(plainRootUrl)
-		for (const entry of snapshot.directories.values()) {
-			trackedUrls.add(getPlainUrl(entry.url))
-		}
-		for (const entry of snapshot.files.values()) {
-			trackedUrls.add(getPlainUrl(entry.url))
-		}
-
-		for (const url of trackedUrls) {
+		if (snapshot.files.size === 0) {
+			out.update("Waiting for initial sync from server")
 			try {
-				const handle = await this.repo.find(url)
-				handle.doc()
-				trackedHandles.push(handle)
-			} catch {
-				// Change detection will retry unavailable documents.
+				await waitForBidirectionalSync(this.repo, snapshot.rootDirectoryUrl, {
+					timeoutMs: 5000,
+					pollIntervalMs: 100,
+					stableChecksRequired: 3,
+				})
+			} catch (error) {
+				out.taskLine(`Initial sync: ${error}`, true)
 			}
 		}
 
+		const trackedHandles = await this.refreshTrackedHandles(snapshot)
 		if (trackedHandles.length === 0) {
 			return
 		}
@@ -1908,29 +1930,9 @@ export class SyncEngine {
 			`sync: refreshing ${trackedHandles.length} tracked documents before change detection`
 		)
 		out.update(`Refreshing ${trackedHandles.length} tracked documents`)
-
-		const storageId = this.config.subduction
-			? undefined
-			: this.config.sync_server_storage_id
-		const syncTimeoutMs = Number(process.env.PUSHWORK_SYNC_TIMEOUT_MS ?? 60000)
-
 		if (storageId) {
-			await waitForSync(trackedHandles, storageId, syncTimeoutMs)
-			for (const handle of trackedHandles) {
-				const syncInfo = handle.getSyncInfo(storageId as never)
-				const remoteHeads = syncInfo?.lastHeads
-				if (!remoteHeads || A.equals(remoteHeads, handle.heads())) {
-					continue
-				}
-
-				const {documentId} = parseAutomergeUrl(handle.url)
-				const remoteUrl = stringifyAutomergeUrl({documentId, heads: remoteHeads})
-				try {
-					await this.repo.find(remoteUrl)
-				} catch {
-					// Fall back to the current local handle state if remote materialization fails.
-				}
-			}
+			await waitForSync(trackedHandles, storageId)
+			await this.materializeTrackedRemoteHeads(trackedHandles, storageId)
 			return
 		}
 
@@ -1940,6 +1942,48 @@ export class SyncEngine {
 			stableChecksRequired: 3,
 			handles: trackedHandles,
 		})
+	}
+
+	private async materializeTrackedRemoteHeads(
+		handles: DocHandle<unknown>[],
+		storageId: string
+	): Promise<void> {
+		for (const handle of handles) {
+			const syncInfo = handle.getSyncInfo(storageId as never)
+			const remoteHeads = syncInfo?.lastHeads
+			if (!remoteHeads || A.equals(remoteHeads, handle.heads())) {
+				continue
+			}
+
+			const {documentId} = parseAutomergeUrl(handle.url)
+			const remoteUrl = stringifyAutomergeUrl({documentId, heads: remoteHeads})
+			try {
+				await this.repo.find(remoteUrl)
+			} catch {
+				// Leave detection to fall back to the current local handle state.
+			}
+		}
+	}
+
+	private async findReadyHandle(
+		url: AutomergeUrl,
+		options: {maxRetries?: number; retryDelayMs?: number} = {}
+	): Promise<DocHandle<unknown> | undefined> {
+		const {maxRetries = 5, retryDelayMs = 200} = options
+
+		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			try {
+				const handle = await this.repo.find(url)
+				handle.doc()
+				return handle
+			} catch {
+				if (attempt < maxRetries - 1) {
+					await new Promise(r => setTimeout(r, retryDelayMs * (attempt + 1)))
+				}
+			}
+		}
+
+		return undefined
 	}
 
 }

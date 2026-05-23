@@ -99,3 +99,78 @@ export function spliceText(
 		}
 	}
 }
+
+interface TextEditSpan {
+	start: number
+	end: number
+	text: string
+}
+
+export function mergeTextWithBase(
+	baseContent: string,
+	localContent: string,
+	remoteContent: string
+): string {
+	if (localContent === remoteContent) return localContent
+	if (localContent === baseContent) return remoteContent
+	if (remoteContent === baseContent) return localContent
+
+	const localEdit = getTextEditSpan(baseContent, localContent)
+	const remoteEdit = getTextEditSpan(baseContent, remoteContent)
+
+	if (
+		localEdit.end <= remoteEdit.start ||
+		remoteEdit.end <= localEdit.start
+	) {
+		return applyEdits(baseContent, [localEdit, remoteEdit])
+	}
+
+	if (
+		localEdit.start === localEdit.end &&
+		remoteEdit.start === remoteEdit.end &&
+		localEdit.start === remoteEdit.start
+	) {
+		return applyEdits(baseContent, [remoteEdit, localEdit])
+	}
+
+	return remoteContent
+}
+
+function getTextEditSpan(baseContent: string, nextContent: string): TextEditSpan {
+	let start = 0
+	while (
+		start < baseContent.length &&
+		start < nextContent.length &&
+		baseContent[start] === nextContent[start]
+	) {
+		start++
+	}
+
+	let baseEnd = baseContent.length
+	let nextEnd = nextContent.length
+	while (
+		baseEnd > start &&
+		nextEnd > start &&
+		baseContent[baseEnd - 1] === nextContent[nextEnd - 1]
+	) {
+		baseEnd--
+		nextEnd--
+	}
+
+	return {
+		start,
+		end: baseEnd,
+		text: nextContent.slice(start, nextEnd),
+	}
+}
+
+function applyEdits(baseContent: string, edits: TextEditSpan[]): string {
+	let merged = baseContent
+	for (const edit of [...edits].sort((a, b) => b.start - a.start)) {
+		merged =
+			merged.slice(0, edit.start) +
+			edit.text +
+			merged.slice(edit.end)
+	}
+	return merged
+}
