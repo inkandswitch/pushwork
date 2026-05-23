@@ -189,6 +189,7 @@ program
     "Recreate all Automerge documents from scratch",
     false
   )
+  .addOption(new Option("--sub", "Accepted for backwards compatibility").default(false).hideHelp())
   .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
   .option("-v, --verbose", "Verbose output", false)
   .action(async (path, opts) => {
