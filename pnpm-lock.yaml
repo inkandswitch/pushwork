@@ -21,8 +21,8 @@ importers:
         specifier: 2.6.0-subduction.20
         version: 2.6.0-subduction.20
       '@automerge/automerge-subduction':
-        specifier: 0.12.0
-        version: 0.12.0
+        specifier: 0.12.1
+        version: 0.12.1
       '@commander-js/extra-typings':
         specifier: ^14.0.0
         version: 14.0.0(commander@14.0.3)
@@ -99,9 +99,6 @@ packages:
 
   '@automerge/automerge-repo@2.6.0-subduction.20':
     resolution: {integrity: sha512-3LkXIFvY79bRSEtVMncUFjOp2KBIUN9C/j9FUsmlEBFSiK2Ec9E4qo2WWpg5aJ5rDXh/HzZe+ZSKDSAJwA77oA==}
-
-  '@automerge/automerge-subduction@0.12.0':
-    resolution: {integrity: sha512-6guXcwChiiL9DpivO90vHLMSL3BMOqb9EpLhOdWke+AkzDrlaX4Jw5ptk0qkBzudv6mF5qnBbAUk1Jy/9PBXUw==}
 
   '@automerge/automerge-subduction@0.12.1':
     resolution: {integrity: sha512-s1s40RTozkqExIk1LYdogKPzpCMFfe/7KBS0ccAlwsy4JwdcUGG9NQO2Pm3kZq8vD3OPw7DcIOSPG+bnLESQFg==}
@@ -1284,8 +1281,6 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
-
-  '@automerge/automerge-subduction@0.12.0': {}
 
   '@automerge/automerge-subduction@0.12.1': {}
 
