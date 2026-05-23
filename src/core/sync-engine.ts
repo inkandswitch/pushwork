@@ -492,6 +492,7 @@ export class SyncEngine {
 				// falls back to head-stability polling. In WebSocket mode,
 				// pass the StorageId for precise getSyncInfo-based verification.
 				const storageId = sub ? undefined : this.config.sync_server_storage_id
+				const syncTimeoutMs = Number(process.env.PUSHWORK_SYNC_TIMEOUT_MS ?? 60000)
 
 				try {
 					// Ensure root directory handle is tracked for sync
@@ -513,7 +514,8 @@ export class SyncEngine {
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
 						const {failed} = await waitForSync(
 							allHandles,
-							storageId
+							storageId,
+							syncTimeoutMs
 						)
 
 						// Recreate failed documents and retry once.
@@ -528,7 +530,8 @@ export class SyncEngine {
 								out.update(`Retrying ${retryHandles.length} recreated documents`)
 								const retry = await waitForSync(
 									retryHandles,
-									storageId
+									storageId,
+									syncTimeoutMs
 								)
 								if (retry.failed.length > 0) {
 									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
@@ -583,7 +586,8 @@ export class SyncEngine {
 						out.update("Syncing root directory update")
 						const rootSync = await waitForSync(
 							[rootHandle],
-							storageId
+							storageId,
+							syncTimeoutMs
 						)
 						if (rootSync.failed.length > 0) {
 							const msg = "Root directory update did not converge to server; consumers may not see recent changes until next sync"
