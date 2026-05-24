@@ -1,498 +1,274 @@
 #!/usr/bin/env node
-
-import { StorageId } from "@automerge/automerge-repo";
-import { Command, Option } from "@commander-js/extra-typings";
-import chalk from "chalk";
+import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
+import { Command } from "@commander-js/extra-typings";
+import * as path from "path";
+import * as readline from "readline/promises";
+import { stdin as input, stdout as output } from "process";
+import type { AutomergeUrl } from "@automerge/automerge-repo";
 import {
-  init,
-  clone,
-  sync,
-  root,
-  diff,
-  status,
-  log,
-  checkout,
-  commit,
-  url,
-  rm,
-  ls,
-  config,
-  watch,
-} from "./commands";
+	clone,
+	cutWorkdir,
+	diff,
+	heads,
+	init,
+	pasteSnarf,
+	save,
+	showSnarfs,
+	status,
+	sync,
+	url,
+} from "./pushwork.js";
+import { log } from "./log.js";
+import { formatVersions } from "./version.js";
 
-const pkg = require("../package.json");
-const version = pkg.version;
+const dlog = log("cli");
 
-// Resolve dependency versions from installed package.json files. These
-// are the actual runtime versions, which is what users care about when
-// reporting bugs (they may differ from package.json ranges after a
-// `pnpm install` that satisfied a range with a newer patch).
-//
-// Some packages (like @automerge/automerge-repo) have an `exports` field
-// that blocks `require("pkg/package.json")`, so we resolve the package
-// entry point with `require.resolve` and walk up to find package.json.
-function depVersion(pkgName: string): string {
-  try {
-    const fs = require("fs");
-    const path = require("path");
-    let dir = path.dirname(require.resolve(pkgName));
-    while (dir !== path.dirname(dir)) {
-      const candidate = path.join(dir, "package.json");
-      if (fs.existsSync(candidate)) {
-        const data = JSON.parse(fs.readFileSync(candidate, "utf8"));
-        if (data.name === pkgName) {
-          return data.version;
-        }
-      }
-      dir = path.dirname(dir);
-    }
-    return "unknown";
-  } catch {
-    return "unknown";
-  }
+const collect = (value: string, prev: string[] | undefined) =>
+	(prev ?? []).concat(value);
+
+const backendOf = (opts: { sub?: boolean; legacy?: boolean }) =>
+	opts.legacy || opts.sub === false ? "legacy" : "subduction";
+
+async function pickBranchInteractively(info: {
+	title?: string;
+	branches: { name: string; url: AutomergeUrl }[];
+}): Promise<AutomergeUrl> {
+	const titlePart = info.title ? ` (${info.title})` : "";
+	process.stderr.write(
+		`\nThis URL points to a legacy "branches" doc${titlePart}.\n`,
+	);
+	process.stderr.write(
+		`Branches aren't supported in pushwork — pick a branch to clone its folder directly:\n\n`,
+	);
+	for (let i = 0; i < info.branches.length; i++) {
+		process.stderr.write(`  ${i + 1}) ${info.branches[i].name}\n`);
+	}
+	process.stderr.write("\n");
+
+	const rl = readline.createInterface({ input, output });
+	try {
+		while (true) {
+			const answer = (
+				await rl.question(`Pick a branch [1-${info.branches.length}]: `)
+			).trim();
+			const n = Number.parseInt(answer, 10);
+			if (Number.isFinite(n) && n >= 1 && n <= info.branches.length) {
+				return info.branches[n - 1].url;
+			}
+			const byName = info.branches.find((b) => b.name === answer);
+			if (byName) return byName.url;
+			process.stderr.write(`invalid selection: ${answer}\n`);
+		}
+	} finally {
+		rl.close();
+	}
 }
-
-const versionString = [
-  `pushwork ${version}`,
-  `  @automerge/automerge               ${depVersion("@automerge/automerge")}`,
-  `  @automerge/automerge-repo          ${depVersion("@automerge/automerge-repo")}`,
-  `  @automerge/automerge-subduction    ${depVersion("@automerge/automerge-subduction")}`,
-].join("\n");
 
 const program = new Command()
-  .name("pushwork")
-  .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(versionString, "-V, --version", "output the version number");
-
-// Init command
-program
-  .command("init")
-  .summary("Initialize sync in a directory")
-  .argument(
-    "[path]",
-    "Directory path to initialize (default: current directory)",
-    "."
-  )
-  .option(
-    "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
-  )
-  .option("--sub", "Use Subduction sync backend", false)
-  .action(async (path, opts) => {
-    const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
-    );
-    await init(path, { syncServer, syncServerStorageId, sub: opts.sub });
-  });
-
-// Track command (set root directory URL without full initialization)
-const trackAction = async (
-  url: string,
-  path: string,
-  opts: { force: boolean; sub: boolean }
-) => {
-  await root(url, path, { force: opts.force, sub: opts.sub });
-};
+	.name("pushwork")
+	.description("Bidirectional directory synchronization using Automerge CRDTs")
+	.version(formatVersions(), "-v, --version", "Print version info and exit");
 
 program
-  .command("track")
-  .summary("Set root directory URL without full initialization")
-  .argument(
-    "<url>",
-    "AutomergeUrl of root directory (format: automerge:XXXXX)"
-  )
-  .argument(
-    "[path]",
-    "Directory path (default: current directory)",
-    "."
-  )
-  .option("-f, --force", "Overwrite existing pushwork setup", false)
-  .option("--sub", "Use Subduction sync backend", false)
-  .action(async (url, path, opts) => {
-    await trackAction(url, path, opts);
-  });
+	.command("version")
+	.description("Print pushwork and Automerge package versions")
+	.action(() => {
+		process.stdout.write(formatVersions() + "\n");
+	});
 
-// Hidden alias for backwards compatibility
 program
-  .command("root", { hidden: true })
-  .argument("<url>")
-  .argument("[path]", "", ".")
-  .option("-f, --force", "", false)
-  .option("--sub", "", false)
-  .action(async (url: string, path: string, opts: { force: boolean; sub: boolean }) => {
-    await trackAction(url, path, opts);
-  });
+	.command("init")
+	.description("Initialize pushwork in a directory")
+	.argument("[dir]", "Directory to initialize", ".")
+	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.option("--legacy", "Alias for --no-sub")
+	.option(
+		"--shape <shape>",
+		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
+		"vfs",
+	)
+	.option(
+		"--artifact-dir <dir>",
+		"Directory whose contents are stored as ImmutableString and pinned with heads in the root doc. Repeatable.",
+		collect,
+		undefined as string[] | undefined,
+	)
+	.action(async (dir, opts) => {
+		dlog("init dir=%s opts=%o", dir, opts);
+		const u = await init({
+			dir: path.resolve(dir),
+			backend: backendOf(opts),
+			shape: opts.shape,
+			artifactDirectories: opts.artifactDir,
+		});
+		process.stderr.write(`initialized ${u}\n`);
+	});
 
-// Clone command
 program
-  .command("clone")
-  .summary("Clone an existing synced directory")
-  .argument(
-    "<url>",
-    "AutomergeUrl of root directory to clone (format: automerge:XXXXX)"
-  )
-  .argument("<path>", "Target directory path")
-  .option("-f, --force", "Overwrite existing directory", false)
-  .option(
-    "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
-  )
-  .option("--sub", "Use Subduction sync backend", false)
-  .option("-v, --verbose", "Verbose output", false)
-  .action(async (url, path, opts) => {
-    const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
-    );
-    await clone(url, path, {
-      force: opts.force,
-      verbose: opts.verbose,
-      syncServer,
-      syncServerStorageId,
-      sub: opts.sub,
-    });
-  });
+	.command("clone")
+	.description("Clone an automerge URL into a directory")
+	.argument("<url>", "automerge: URL")
+	.argument("[dir]", "Target directory", ".")
+	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.option("--legacy", "Alias for --no-sub")
+	.option(
+		"--shape <shape>",
+		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
+		"vfs",
+	)
+	.option(
+		"--artifact-dir <dir>",
+		"Directory whose contents are stored as ImmutableString and pinned with heads in the root doc. Repeatable.",
+		collect,
+		undefined as string[] | undefined,
+	)
+	.action(async (u, dir, opts) => {
+		dlog("clone url=%s dir=%s opts=%o", u, dir, opts);
+		await clone({
+			url: u,
+			dir: path.resolve(dir),
+			backend: backendOf(opts),
+			shape: opts.shape,
+			artifactDirectories: opts.artifactDir,
+			onBranchesDoc: pickBranchInteractively,
+		});
+		process.stderr.write(`cloned into ${path.resolve(dir)}\n`);
+	});
 
-// Commit command
 program
-  .command("commit")
-  .summary("Save local changes to Automerge documents")
-  .argument(
-    "[path]",
-    "Directory path to commit (default: current directory)",
-    "."
-  )
-  .action(async (path, _opts) => {
-    await commit(path);
-  });
+	.command("url")
+	.description("Print the automerge URL of this pushwork repo")
+	.action(async () => {
+		dlog("url cwd=%s", process.cwd());
+		const u = await url(process.cwd());
+		process.stdout.write(u + "\n");
+	});
 
-// Sync command
 program
-  .command("sync")
-  .summary("Run full bidirectional synchronization")
-  .argument(
-    "[path]",
-    "Directory path to sync (default: current directory)",
-    "."
-  )
-  .option(
-    "--dry-run",
-    "Show what would be done without applying changes",
-    false
-  )
-  .option(
-    "--gentle",
-    "Use config files and only sync changed files (instead of default full resync)",
-    false
-  )
-  .option(
-    "--nuclear",
-    "Recreate all Automerge documents from scratch",
-    false
-  )
-  .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
-  .option("-v, --verbose", "Verbose output", false)
-  .action(async (path, opts) => {
-    await sync(path, {
-      dryRun: opts.dryRun,
-      force: opts.force,
-      gentle: opts.gentle,
-      nuclear: opts.nuclear,
-      verbose: opts.verbose,
-    });
-  });
+	.command("sync")
+	.description("Sync local changes with peers")
+	.option(
+		"--nuclear",
+		"Re-create every doc (file, folder) with a fresh URL before syncing. Stops referencing the old URLs from this repo.",
+	)
+	.action(async (opts) => {
+		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
+		await sync(process.cwd(), { nuclear: opts.nuclear });
+		process.stderr.write(opts.nuclear ? "nuclear synced\n" : "synced\n");
+	});
 
-// Diff command
 program
-  .command("diff")
-  .summary("Show changes in working directory")
-  .argument(
-    "[path]",
-    "Limit diff to specific path (default: current directory)",
-    "."
-  )
-  .option("--name-only", "Show only changed file names", false)
-  .action(async (path, opts) => {
-    await diff(path, {
-      nameOnly: opts.nameOnly,
-    });
-  });
+	.command("save")
+	.alias("commit")
+	.description("Commit local changes without contacting the sync server")
+	.action(async () => {
+		dlog("save cwd=%s", process.cwd());
+		await save(process.cwd());
+		process.stderr.write("saved\n");
+	});
 
-// Status command
 program
-  .command("status")
-  .summary("Show sync status summary")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .option(
-    "-v, --verbose",
-    "Show detailed status including document info and all tracked files",
-    false
-  )
-  .action(async (path, opts) => {
-    await status(path, {
-      verbose: opts.verbose,
-    });
-  });
+	.command("status")
+	.description("Show changes against the saved state")
+	.action(async () => {
+		const { diff: d } = await status(process.cwd());
+		const lines: string[] = [];
+		const total = d.added.length + d.modified.length + d.deleted.length;
+		if (total === 0) {
+			lines.push("nothing to save, working tree clean");
+		} else {
+			lines.push("Changes:");
+			for (const p of d.modified) lines.push(`  modified:   ${p}`);
+			for (const p of d.added) lines.push(`  added:      ${p}`);
+			for (const p of d.deleted) lines.push(`  deleted:    ${p}`);
+		}
+		process.stdout.write(lines.join("\n") + "\n");
+	});
 
-// Log command
 program
-  .command("log")
-  .summary("Show sync history (experimental)")
-  .argument(
-    "[path]",
-    "Show history for specific file or directory (default: current directory)",
-    "."
-  )
-  .option("--oneline", "Compact one-line per sync format", false)
-  .option("--since <date>", "Show syncs since date")
-  .option("--limit <n>", "Limit number of syncs shown", "10")
-  .action(async (path, opts) => {
-    await log(path, {
-      oneline: opts.oneline,
-      since: opts.since,
-      limit: parseInt(opts.limit),
-    });
-  });
+	.command("diff")
+	.description("Show textual diffs of local changes against the saved state")
+	.argument("[path]", "Limit to a specific path")
+	.action(async (limitPath) => {
+		const entries = await diff(process.cwd(), limitPath);
+		if (entries.length === 0) {
+			process.stdout.write("(no changes)\n");
+			return;
+		}
+		const { createPatch } = await import("diff");
+		const td = new TextDecoder("utf-8", { fatal: false });
+		for (const e of entries) {
+			const before = e.before ? td.decode(e.before) : "";
+			const after = e.after ? td.decode(e.after) : "";
+			const header =
+				e.kind === "added" ? `+++ ${e.path}` :
+				e.kind === "deleted" ? `--- ${e.path}` :
+				`*** ${e.path}`;
+			process.stdout.write(header + "\n");
+			process.stdout.write(createPatch(e.path, before, after, "", "") + "\n");
+		}
+	});
 
-// Checkout command
 program
-  .command("checkout")
-  .summary("Restore to previous sync (experimental)")
-  .argument("<sync-id>", "Sync ID to restore to")
-  .argument(
-    "[path]",
-    "Specific path to restore (default: current directory)",
-    "."
-  )
-  .option(
-    "-f, --force",
-    "Force checkout even if there are uncommitted changes",
-    false
-  )
-  .action(async (syncId, path, opts) => {
-    await checkout(syncId, path, {
-      force: opts.force,
-    });
-  });
+	.command("heads")
+	.description("Print Automerge heads for the root folder and every file doc (offline)")
+	.argument("[pathspec]", "Limit to a path or path prefix (e.g. \"src\" or \"src/foo.ts\")")
+	.action(async (pathspec) => {
+		const entries = await heads(process.cwd(), pathspec);
+		if (entries.length === 0) {
+			process.stdout.write("(no matching docs)\n");
+			return;
+		}
+		for (const e of entries) {
+			process.stdout.write(`${e.path}\t${e.url}\t${e.heads.join(" ")}\n`);
+		}
+	});
 
-// URL command
 program
-  .command("url")
-  .summary("Show the Automerge root URL")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .action(async (path) => {
-    await url(path);
-  });
+	.command("cut")
+	.description("Snarf working-tree changes and reset the tree to the saved state (offline)")
+	.argument("[name]", "Optional name for the snarf entry")
+	.action(async (name) => {
+		const result = await cutWorkdir(process.cwd(), { name });
+		process.stderr.write(`cut #${result.id}: ${result.entries} entr${result.entries === 1 ? "y" : "ies"}\n`);
+	});
 
-// Remove command
 program
-  .command("rm")
-  .summary("Remove local pushwork data")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .action(async (path) => {
-    await rm(path);
-  });
+	.command("paste")
+	.description("Re-apply a snarfed set of changes; default is the most recent (offline)")
+	.argument("[id-or-name]", "Snarf id or name")
+	.action(async (selector) => {
+		const result = await pasteSnarf(process.cwd(), selector);
+		process.stderr.write(
+			`pasted #${result.id}${result.name ? ` (${result.name})` : ""}: ${result.entries} entr${result.entries === 1 ? "y" : "ies"}\n`,
+		);
+	});
 
-// List command
 program
-  .command("ls")
-  .summary("List tracked files")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("-v, --verbose", "Show with Automerge URLs", false)
-  .action(async (path, opts) => {
-    await ls(path, {
-      verbose: opts.verbose,
-    });
-  });
+	.command("snarfs")
+	.alias("clipboard")
+	.description("List snarfed change sets (newest first)")
+	.action(async () => {
+		const snarfs = await showSnarfs(process.cwd());
+		if (snarfs.length === 0) {
+			process.stdout.write("(no snarfs)\n");
+			return;
+		}
+		for (const s of snarfs) {
+			const ts = new Date(s.createdAt).toISOString();
+			const label = s.name ? `"${s.name}"` : "";
+			process.stdout.write(
+				`#${s.id}${label ? " " + label : ""}  ${s.entries.length} entr${s.entries.length === 1 ? "y" : "ies"}  ${ts}\n`,
+			);
+		}
+	});
 
-// Config command
 program
-  .command("config")
-  .summary("View or edit configuration")
-  .argument("[path]", "Directory path (default: current directory)", ".")
-  .option("--list", "Show full configuration", false)
-  .option(
-    "--get <key>",
-    "Get specific config value (dot notation, e.g., sync.move_detection_threshold)"
-  )
-  .action(async (path, opts) => {
-    await config(path, {
-      list: opts.list,
-      get: opts.get,
-    });
-  });
-
-// Watch command
-program
-  .command("watch")
-  .summary("Watch directory for changes, build, and sync")
-  .argument(
-    "[path]",
-    "Directory path to sync (default: current directory)",
-    "."
-  )
-  .option(
-    "--script <command>",
-    "Build script to run before syncing",
-    "pnpm build"
-  )
-  .option(
-    "--dir <dir>",
-    "Directory to watch for changes (relative to working directory)",
-    "src"
-  )
-  .option("-v, --verbose", "Show build script output", false)
-  .action(async (path, opts) => {
-    await watch(path, {
-      script: opts.script,
-      watchDir: opts.dir,
-      verbose: opts.verbose,
-    });
-  });
-
-// Completion command (hidden from help)
-program.command("completion", { hidden: true }).action(() => {
-  // Generate completion dynamically from registered commands
-  const commands = program.commands
-    .filter((cmd) => cmd.name() !== "completion") // Exclude self
-    .map((cmd) => {
-      const name = cmd.name();
-      const desc = (cmd.summary() || cmd.description() || "").replace(
-        /'/g,
-        "\\'"
-      );
-      return `'${name}:${desc}'`;
-    })
-    .join(" ");
-
-  // Generate option completions for each command
-  const commandCases = program.commands
-    .filter((cmd) => cmd.name() !== "completion")
-    .map((cmd) => {
-      const options = cmd.options
-        .filter((opt) => opt.flags !== "-h, --help") // Exclude help
-        .map((opt) => {
-          // Parse flags like "-v, --verbose" or "--dry-run"
-          const flags = opt.flags.split(",").map((f) => f.trim());
-          const desc = (opt.description || "")
-            .replace(/'/g, "\\'")
-            .replace(/\n/g, " ");
-
-          // For options with arguments like "--sync-server <url>"
-          // Extract just the flag part
-          const cleanFlags = flags.map((f) => f.split(/\s+/)[0]);
-
-          if (cleanFlags.length > 1) {
-            // Multiple flags (short and long): '(-v --verbose)'{-v,--verbose}'[description]'
-            const short = cleanFlags[0];
-            const long = cleanFlags[1];
-            return `'(${short} ${long})'{${short},${long}}'[${desc}]'`;
-          } else {
-            // Single flag: '--flag[description]'
-            return `'${cleanFlags[0]}[${desc}]'`;
-          }
-        })
-        .join(" \\\n        ");
-
-      return options
-        ? `    ${cmd.name()})
-      _arguments \\
-        ${options}
-      ;;`
-        : "";
-    })
-    .filter(Boolean)
-    .join("\n");
-
-  const completionScript = `
-# pushwork completion for zsh
-_pushwork() {
-  local -a commands
-  commands=(${commands})
-  
-  _arguments -C \\
-    '1: :->command' \\
-    '*::arg:->args'
-  
-  case $state in
-    command)
-      _describe 'command' commands
-      ;;
-    args)
-      case $words[1] in
-${commandCases}
-      esac
-      ;;
-  esac
-}
-
-compdef _pushwork pushwork
-    `.trim();
-
-  console.log(completionScript);
-});
-
-// Helper to validate and extract sync server options
-function validateSyncServer(
-  syncServerOpt: string[] | undefined
-): [string | undefined, StorageId | undefined] {
-  if (!syncServerOpt) {
-    return [undefined, undefined];
-  }
-
-  if (syncServerOpt.length < 2) {
-    console.error(
-      chalk.red("Error: --sync-server requires both URL and storage ID")
-    );
-    process.exit(1);
-  }
-
-  const [syncServer, syncServerStorageId] = syncServerOpt;
-  return [syncServer, syncServerStorageId as StorageId];
-}
-
-process.on("unhandledRejection", (error) => {
-  console.log(chalk.bgRed.white(" ERROR "));
-  if (error instanceof Error && error.stack) {
-    console.log(chalk.red(error.stack));
-  } else {
-    console.error(chalk.red(error));
-  }
-  process.exit(1);
-});
-
-// Configure help colors using Commander v13's built-in color support
-program
-  .configureHelp({
-    styleTitle: (str) => chalk.bold(str),
-    styleCommandText: (str) => chalk.white(str),
-    styleCommandDescription: (str) => chalk.dim(str),
-    styleOptionText: (str) => chalk.green(str),
-    styleArgumentText: (str) => chalk.cyan(str),
-    subcommandTerm: (cmd) => {
-      const opts = cmd.options
-        .filter((opt) => opt.flags !== "-h, --help")
-        .map((opt) => opt.short || opt.long)
-        .join(", ");
-
-      const name = chalk.white(cmd.name());
-      const args = cmd.registeredArguments
-        .map((arg) =>
-          arg.required
-            ? chalk.cyan(`<${arg.name()}>`)
-            : chalk.dim(`[${arg.name()}]`)
-        )
-        .join(" ");
-
-      return [name, args, opts && chalk.dim(`[${opts}]`)]
-        .filter(Boolean)
-        .join(" ");
-    },
-  })
-  .addHelpText(
-    "after",
-    chalk.dim(
-      '\nEnable tab completion by adding this to your ~/.zshrc:\neval "$(pushwork completion)"'
-    )
-  );
-
-program.parseAsync();
+	.parseAsync(process.argv)
+	.then(() => process.exit(0))
+	.catch((err) => {
+		process.stderr.write(
+			`pushwork: ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+		process.exit(1);
+	});
