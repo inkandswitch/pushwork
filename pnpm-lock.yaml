@@ -12,14 +12,14 @@ importers:
         specifier: ^3.2.6
         version: 3.2.6
       '@automerge/automerge-repo':
-        specifier: 2.6.0-subduction.20
-        version: 2.6.0-subduction.20
+        specifier: 2.6.0-subduction.26
+        version: 2.6.0-subduction.26
       '@automerge/automerge-repo-network-websocket':
-        specifier: 2.6.0-subduction.20
-        version: 2.6.0-subduction.20
+        specifier: 2.6.0-subduction.26
+        version: 2.6.0-subduction.26
       '@automerge/automerge-repo-storage-nodefs':
-        specifier: 2.6.0-subduction.20
-        version: 2.6.0-subduction.20
+        specifier: 2.6.0-subduction.26
+        version: 2.6.0-subduction.26
       '@automerge/automerge-subduction':
         specifier: 0.12.1
         version: 0.12.1
@@ -93,20 +93,26 @@ importers:
 
 packages:
 
-  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.20':
-    resolution: {integrity: sha512-N05WTZfosGYLrljt+qdtWbreqqWuvHQSf/2qAhGmkolfUBCz5BlnTtZ4hwhpXW1RICEOzrC9o+d4gYNN+Og3fw==}
+  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.26':
+    resolution: {integrity: sha512-C8vZ5SajHtBckP2z92254xTvINhXx4CkZGVP0S7mLxFaW5o/MpjzeO94EsygorD0/XISiW3v5RUvBTIbjpFOYg==}
 
-  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.20':
-    resolution: {integrity: sha512-+dKRHg+q2M7F4i7WRj90qHBr+YLniYt+SRDKZWCOfcit8lWLozx7H/4y/aDHX3Bvo0+HKLDIljsRaJtatHFGuA==}
+  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.26':
+    resolution: {integrity: sha512-dhRhzlmkyf4CxdDttFCCcyuQbSowrXX1tIyMDYXRA/bqDA4QizR5up+WAi+2CP58f6KtrXaERS6qvRad+uMROA==}
 
-  '@automerge/automerge-repo@2.6.0-subduction.20':
-    resolution: {integrity: sha512-3LkXIFvY79bRSEtVMncUFjOp2KBIUN9C/j9FUsmlEBFSiK2Ec9E4qo2WWpg5aJ5rDXh/HzZe+ZSKDSAJwA77oA==}
+  '@automerge/automerge-repo@2.6.0-subduction.26':
+    resolution: {integrity: sha512-GbL4YA7OBNJPyrMWbof649bqPtTmkxmDwh8a/H+MX8Aqq9NzftxRosYNJP2b+O4SpaphwUdT/dKnvtc/4cHOPw==}
 
   '@automerge/automerge-subduction@0.12.1':
     resolution: {integrity: sha512-s1s40RTozkqExIk1LYdogKPzpCMFfe/7KBS0ccAlwsy4JwdcUGG9NQO2Pm3kZq8vD3OPw7DcIOSPG+bnLESQFg==}
 
+  '@automerge/automerge-subduction@0.13.0':
+    resolution: {integrity: sha512-7XlCIS0GH3ctboE8UPmD9rfiv203Q8n5Lx63xE6xCgtlpwecDKqzLDp77e9hUEo76j17Y8bYQyfsROqaByLf5A==}
+
   '@automerge/automerge@3.2.6':
     resolution: {integrity: sha512-9/GXXfYYWNVGpnbRrGQzTNU4fWZ3XaEMeEg0OrpK4pvlQSpkmUBoirEb/4TMK6BwMysZGV5Yeneq3wwc7RNGfg==}
+
+  '@automerge/automerge@3.3.0-fragments.1':
+    resolution: {integrity: sha512-Im2n3qcYSuIsLDSjofTRo7CZyyvFn5pKLSCCO5sjWzESw+9q9G25ZIrL2mczDX43cXtyzi+w/4b9VUaiNdY56Q==}
 
   '@babel/code-frame@7.29.0':
     resolution: {integrity: sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==}
@@ -2250,9 +2256,9 @@ packages:
 
 snapshots:
 
-  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.20':
+  '@automerge/automerge-repo-network-websocket@2.6.0-subduction.26':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.20
+      '@automerge/automerge-repo': 2.6.0-subduction.26
       cbor-x: 1.6.4
       debug: 4.4.3
       eventemitter3: 5.0.4
@@ -2263,19 +2269,19 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.20':
+  '@automerge/automerge-repo-storage-nodefs@2.6.0-subduction.26':
     dependencies:
-      '@automerge/automerge-repo': 2.6.0-subduction.20
+      '@automerge/automerge-repo': 2.6.0-subduction.26
       rimraf: 5.0.10
     transitivePeerDependencies:
       - bufferutil
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo@2.6.0-subduction.20':
+  '@automerge/automerge-repo@2.6.0-subduction.26':
     dependencies:
-      '@automerge/automerge': 3.2.6
-      '@automerge/automerge-subduction': 0.12.1
+      '@automerge/automerge': 3.3.0-fragments.1
+      '@automerge/automerge-subduction': 0.13.0
       bs58check: 3.0.1
       cbor-x: 1.6.4
       debug: 4.4.3
@@ -2292,7 +2298,11 @@ snapshots:
 
   '@automerge/automerge-subduction@0.12.1': {}
 
+  '@automerge/automerge-subduction@0.13.0': {}
+
   '@automerge/automerge@3.2.6': {}
+
+  '@automerge/automerge@3.3.0-fragments.1': {}
 
   '@babel/code-frame@7.29.0':
     dependencies:
