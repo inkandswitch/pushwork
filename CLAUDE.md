@@ -139,15 +139,15 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 - **`waitForBidirectionalSync` on large trees.** Full tree traversal (`getAllDocumentHeads`) is expensive because it `repo.find()`s every document. For post-push stabilization, pass the `handles` option to only check documents that actually changed. The initial pre-pull call still needs the full scan to discover remote changes. The dynamic timeout adds the first scan's duration on top of the base timeout, since the first scan is just establishing baseline — its duration shouldn't count against stability-wait time.
 - **Versioned URLs and `repo.find()`.** `repo.find(versionedUrl)` returns a view handle whose `.heads()` returns the VERSION heads, not the current document heads. Always use `getPlainUrl()` when you need the current/mutable state. The snapshot head update loop at the end of `sync()` must use `getPlainUrl(snapshotEntry.url)` — without this, artifact directories (which store versioned URLs) get stale heads written to the snapshot, causing `changeAt()` to fork from the wrong point on the next sync. This was the root cause of the artifact deletion resurrection bug: `batchUpdateDirectory` would `changeAt` from an empty directory state where the file entry didn't exist yet, so the splice found nothing to delete.
 
-## Subduction sync backend (`--sub`)
+## Subduction sync backend (default)
 
-The `--sub` flag switches from the default WebSocket sync adapter to the Subduction backend built into `automerge-repo@2.6.0-subduction.14`. The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
+Subduction is the **default** sync backend (`wss://subduction.sync.inkandswitch.com`). Pass `--websocket` on `init` / `clone` / `track` for legacy sync3. The Repo manages a `SubductionSource` internally — pushwork passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
 
 ### How it works
 
 - `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. When `sub: true`, passes `subductionWebsocketEndpoints: [syncServer]` and the Repo handles sync cadence internally. When `sub: false`, uses the traditional WebSocket network adapter instead.
 - Default server: `wss://subduction.sync.inkandswitch.com` (vs `wss://sync3.automerge.org` for WebSocket)
-- `network-sync.ts`: When no `StorageId` is provided (Subduction mode), `waitForSync` falls back to head-stability polling (3 consecutive stable checks at 100ms intervals) instead of `getSyncInfo`-based verification
+- `network-sync.ts`: When no `StorageId` is provided (Subduction mode), `waitForSync` calls `repo.subduction.syncWithAllPeers()` per changed document (after `repo.flush()`), requiring at least one successful peer — same criterion as `SubductionSource.#doSync`
 - `sync-engine.ts`: In sub mode, skips `recreateFailedDocuments` — SubductionSource has its own heal-sync retry logic
 - Everything else (push/pull phases, artifact handling, `nukeAndRebuildDocs`, change detection) is identical
 
@@ -170,9 +170,9 @@ The Repo class itself is also loaded via this ESM dynamic import (cached after f
 
 ### Subduction mode persistence
 
-`--sub` is only accepted on `init` and `clone`. It persists `subduction: true` in `.pushwork/config.json`. All subsequent commands (`sync`, `watch`, etc.) read it from config via `config.subduction ?? false`. The force-defaults path in `setupCommandContext` preserves `subduction` alongside `root_directory_url`.
+`init` / `clone` persist `subduction: true` by default. Use `--websocket` for legacy sync3 (`subduction: false`, storage id required with `--sync-server`). Subsequent commands use `useSubductionBackend(config)` — legacy configs without `subduction` but with sync3 URL or a storage id stay on WebSocket.
 
-When Subduction mode is active, commands print a banner: "Using Subduction sync backend (from config)".
+Legacy WebSocket mode prints: "Using legacy WebSocket sync backend (from config)".
 
 Every `sync` run prints the root Automerge URL at the end.
 

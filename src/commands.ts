@@ -18,7 +18,13 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
-import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
+import {
+  DEFAULT_SUBDUCTION_SERVER,
+  DEFAULT_SYNC_SERVER,
+  DEFAULT_SYNC_SERVER_STORAGE_ID,
+  subductionFromCliFlags,
+  useSubductionBackend,
+} from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
 import { ConfigManager } from "./core/config";
@@ -44,23 +50,27 @@ interface CommandContext {
 async function initializeRepository(
   resolvedPath: string,
   overrides: Partial<DirectoryConfig>,
-  sub: boolean = false
+  sub: boolean = true
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
   // Create .pushwork directory structure
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-  // Persist Subduction mode + server in config so subsequent commands pick
-  // them up. Without persisting sync_server here, `.pushwork/config.json`
-  // would retain the default WebSocket server even in --sub mode, and
-  // `pushwork config` / `status` would misreport the endpoint.
   if (sub) {
     const { sync_server_storage_id: _discarded, ...rest } = overrides;
     overrides = {
       ...rest,
       subduction: true,
       sync_server: rest.sync_server ?? DEFAULT_SUBDUCTION_SERVER,
+    };
+  } else {
+    overrides = {
+      ...overrides,
+      subduction: false,
+      sync_server: overrides.sync_server ?? DEFAULT_SYNC_SERVER,
+      sync_server_storage_id:
+        overrides.sync_server_storage_id ?? DEFAULT_SYNC_SERVER_STORAGE_ID,
     };
   }
 
@@ -139,17 +149,11 @@ async function setupCommandContext(
     config = { ...config, sync_enabled: options.syncEnabled };
   }
 
-  const sub = config.subduction ?? false;
+  const sub = useSubductionBackend(config);
   if (sub) {
-    // Default to the Subduction endpoint only if the user hasn't
-    // configured one. Respect any explicit sync_server value (including
-    // custom Subduction endpoints set via `init --sub --sync-server ...`).
     if (!config.sync_server) {
       config.sync_server = DEFAULT_SUBDUCTION_SERVER;
     }
-    // sync_server_storage_id is a WebSocket-mode concept; clear it so
-    // the in-memory config reflects what waitForSync actually uses
-    // (head-stability polling, not getSyncInfo verification).
     config.sync_server_storage_id = undefined;
   }
 
@@ -170,12 +174,8 @@ async function setupCommandContext(
  * Safely shutdown a repository with proper error handling
  */
 async function safeRepoShutdown(repo: Repo): Promise<void> {
-  // TEMPORARY WORKAROUND: pushwork's Subduction sync-verification only
-  // watches local head stability, which doesn't actually confirm the
-  // server received anything. Give any in-flight `syncWithAllPeers`
-  // calls a chance to finish (and the scheduler time to heal transient
-  // failures) before we tear the repo down. Remove once awaitSynced()
-  // (or equivalent) lands in @automerge/automerge-repo@subduction.
+  // Brief grace before teardown so in-flight Subduction/WebSocket work
+  // started after waitForSync can finish. Override with PUSHWORK_SYNC_GRACE_MS=0.
   const graceMsEnv = process.env.PUSHWORK_SYNC_GRACE_MS;
   const graceMs = graceMsEnv !== undefined ? Number(graceMsEnv) : 3000;
   if (Number.isFinite(graceMs) && graceMs > 0) {
@@ -224,11 +224,11 @@ export async function init(
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
-  const sub = options.sub ?? false;
+  const sub = subductionFromCliFlags(options);
 
   out.task(`Initializing`);
-  if (sub) {
-    out.taskLine("Using Subduction sync backend", true);
+  if (!sub) {
+    out.taskLine("Using legacy WebSocket sync backend", true);
   }
 
   await ensureDirectoryExists(resolvedPath);
@@ -318,9 +318,9 @@ export async function sync(
     forceDefaults: !options.gentle,
   });
 
-  const sub = config.subduction ?? false;
-  if (sub) {
-    out.taskLine("Using Subduction sync backend (from config)", true);
+  const sub = useSubductionBackend(config);
+  if (!sub) {
+    out.taskLine("Using legacy WebSocket sync backend (from config)", true);
   }
 
   if (options.nuclear) {
@@ -553,7 +553,7 @@ export async function status(
   statusInfo["Files"] = syncStatus.snapshot
     ? `${fileCount} tracked`
     : undefined;
-  statusInfo["Backend"] = config?.subduction ? "subduction" : "websocket";
+  statusInfo["Backend"] = config && useSubductionBackend(config) ? "subduction" : "websocket";
   statusInfo["Sync"] = config?.sync_server;
 
   // Add more detailed info in verbose mode
@@ -681,11 +681,11 @@ export async function clone(
 
   const resolvedPath = path.resolve(targetPath);
 
-  const sub = options.sub ?? false;
+  const sub = subductionFromCliFlags(options);
 
   out.task(`Cloning ${rootUrl}`);
-  if (sub) {
-    out.taskLine("Using Subduction sync backend", true);
+  if (!sub) {
+    out.taskLine("Using legacy WebSocket sync backend", true);
   }
 
   // Check if directory exists and handle --force
@@ -733,7 +733,7 @@ export async function clone(
   out.obj({
     Path: resolvedPath,
     Files: `${result.filesChanged} downloaded`,
-    Backend: config.subduction ? "subduction" : "websocket",
+    Backend: useSubductionBackend(config) ? "subduction" : "websocket",
     Sync: config.sync_server,
   });
   out.successBlock("CLONED", rootUrl);
@@ -920,7 +920,7 @@ export async function config(
     // Show basic config info
     out.infoBlock("CONFIGURATION");
     out.obj({
-      Backend: config.subduction ? "subduction" : "websocket",
+      Backend: useSubductionBackend(config) ? "subduction" : "websocket",
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
       Exclusions: config.exclude_patterns?.length,
@@ -944,7 +944,7 @@ export async function watch(
     targetPath,
   );
 
-  const sub = config.subduction ?? false;
+  const sub = useSubductionBackend(config);
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
 
@@ -960,8 +960,8 @@ export async function watch(
     "WATCHING",
     `${chalk.underline(formatRelativePath(watchDir))} for changes...`
   );
-  if (sub) {
-    out.info("Using Subduction sync backend (from config)");
+  if (!sub) {
+    out.info("Using legacy WebSocket sync backend (from config)");
   }
   out.info(`Build script: ${script}`);
   out.info(`Working directory: ${workingDir}`);
@@ -1130,7 +1130,7 @@ async function runScript(
 export async function root(
   rootUrl: string,
   targetPath: string = ".",
-  options: { force?: boolean; sub?: boolean } = {}
+  options: { force?: boolean; sub?: boolean; websocket?: boolean } = {}
 ): Promise<void> {
   if (!rootUrl.startsWith("automerge:")) {
     out.error(
@@ -1142,7 +1142,7 @@ export async function root(
 
   const resolvedPath = path.resolve(targetPath);
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
-  const sub = options.sub ?? false;
+  const sub = subductionFromCliFlags(options);
 
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
@@ -1179,12 +1179,16 @@ export async function root(
       await configManager.save(cfg);
     }
   } else {
-    await configManager.initializeWithOverrides({});
+    await configManager.initializeWithOverrides({
+      subduction: false,
+      sync_server: DEFAULT_SYNC_SERVER,
+      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+    });
   }
 
   out.successBlock("ROOT SET", rootUrl);
-  if (sub) {
-    out.info("Using Subduction sync backend");
+  if (!sub) {
+    out.info("Using legacy WebSocket sync backend");
   }
   process.exit();
 }

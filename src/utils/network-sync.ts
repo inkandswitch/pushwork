@@ -8,6 +8,23 @@ import * as A from "@automerge/automerge";
 import { out } from "./output";
 import { DirectoryDocument } from "../types";
 import { getPlainUrl } from "./directory";
+import { toSedimentreeId as toSedimentreeIdFromRepoFactory } from "./repo-factory";
+
+/** @internal Mock SedimentreeId conversion in unit tests. */
+let sedimentreeIdForTests:
+  | ((handle: DocHandle<unknown>) => Promise<unknown>)
+  | undefined;
+
+export function __setSedimentreeIdForTests(
+  fn: ((handle: DocHandle<unknown>) => Promise<unknown>) | undefined,
+): void {
+  sedimentreeIdForTests = fn;
+}
+
+async function toSedimentreeId(handle: DocHandle<unknown>): Promise<unknown> {
+  if (sedimentreeIdForTests) return sedimentreeIdForTests(handle);
+  return toSedimentreeIdFromRepoFactory(handle);
+}
 
 const isDebug = !!process.env.DEBUG;
 function debug(...args: any[]) {
@@ -290,6 +307,7 @@ export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
   timeoutMs: number = 60000,
+  repo?: Repo,
 ): Promise<SyncWaitResult> {
   const startTime = Date.now();
 
@@ -298,13 +316,19 @@ export async function waitForSync(
     return { failed: [] };
   }
 
-  // When no StorageId is available (Subduction mode), use head-stability
-  // polling. The SubductionSource handles sync internally — we just wait
-  // for each handle's heads to stop changing.
+  // Subduction mode: run an explicit sync round per document and require
+  // at least one connected peer to succeed (same criterion as SubductionSource).
   if (!syncServerStorageId) {
-    debug(`waitForSync: no storage ID, using head-stability polling for ${handlesToWaitOn.length} documents`);
-    out.taskLine(`Waiting for ${handlesToWaitOn.length} documents to sync`);
-    return waitForSyncViaHeadStability(handlesToWaitOn, timeoutMs, startTime);
+    if (!repo) {
+      throw new Error(
+        "waitForSync: Subduction verification requires a Repo instance (pass repo as the 4th argument)",
+      );
+    }
+    debug(
+      `waitForSync: Subduction syncWithAllPeers for ${handlesToWaitOn.length} documents`,
+    );
+    out.taskLine(`Uploading ${handlesToWaitOn.length} documents via Subduction`);
+    return waitForSyncViaSubduction(repo, handlesToWaitOn, timeoutMs, startTime);
   }
 
   debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms, batchSize=${SYNC_BATCH_SIZE})`);
@@ -373,26 +397,61 @@ export async function waitForSync(
   return { failed };
 }
 
+type PeerBatchSyncResult = {
+  success: boolean;
+  stats?: unknown;
+  transport_errors?: unknown[];
+};
+
+type SubductionSync = {
+  syncWithAllPeers: (
+    id: unknown,
+    subscribe: boolean,
+    timeoutMs?: number | bigint,
+  ) => Promise<{ entries: () => PeerBatchSyncResult[] }>;
+};
+
+function subductionSyncTimeoutMs(ms: number): number | bigint {
+  // automerge-subduction 0.13+ expects a BigInt timeout in milliseconds.
+  return BigInt(Math.max(1, Math.floor(ms)));
+}
+
 /**
- * Wait for sync by polling head stability (Subduction mode).
- * Each handle's heads are polled until they remain unchanged for
- * several consecutive checks, indicating the SubductionSource has
- * finished syncing.
+ * Wait for upload by running syncWithAllPeers on each document.
+ * Succeeds when at least one connected peer reports success for that round.
  */
-async function waitForSyncViaHeadStability(
+async function waitForSyncViaSubduction(
+  repo: Repo,
   handles: DocHandle<unknown>[],
   timeoutMs: number,
   startTime: number,
 ): Promise<SyncWaitResult> {
+  // Subduction websocket may still be connecting when push finishes a batch.
+  if (repo.networkSubsystem) {
+    await repo.networkSubsystem.whenReady();
+  }
+
+  const subduction = (await repo.subduction) as SubductionSync;
+  const documentIds = handles.map(h => h.documentId);
+  await repo.flush(documentIds);
+
   const failed: DocHandle<unknown>[] = [];
   let synced = 0;
 
-  // Process in batches
   for (let i = 0; i < handles.length; i += SYNC_BATCH_SIZE) {
     const batch = handles.slice(i, i + SYNC_BATCH_SIZE);
+    const batchNum = Math.floor(i / SYNC_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(handles.length / SYNC_BATCH_SIZE);
+
+    if (totalBatches > 1) {
+      debug(`waitForSync(sub): batch ${batchNum}/${totalBatches} (${batch.length} docs)`);
+      out.update(
+        `Uploading batch ${batchNum}/${totalBatches} (${synced}/${handles.length} done)`,
+      );
+    }
 
     const results = await Promise.allSettled(
-      batch.map(handle => waitForHandleHeadStability(handle, timeoutMs, startTime))
+      batch.map(handle => syncHandleWithAllPeers(subduction, handle, timeoutMs, startTime)),
     );
 
     for (const result of results) {
@@ -406,51 +465,66 @@ async function waitForSyncViaHeadStability(
 
   const elapsed = Date.now() - startTime;
   if (failed.length > 0) {
-    debug(`waitForSync(heads): ${failed.length} documents failed after ${elapsed}ms`);
-    out.taskLine(`Sync: ${synced} synced, ${failed.length} timed out after ${(elapsed / 1000).toFixed(1)}s`, true);
+    debug(`waitForSync(sub): ${failed.length} documents failed after ${elapsed}ms`);
+    out.taskLine(
+      `Upload: ${synced} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`,
+      true,
+    );
   } else {
-    debug(`waitForSync(heads): all ${handles.length} documents synced in ${elapsed}ms`);
-    out.taskLine(`All ${handles.length} documents synced (${(elapsed / 1000).toFixed(1)}s)`);
+    debug(`waitForSync(sub): all ${handles.length} documents synced in ${elapsed}ms`);
+    out.taskLine(
+      `All ${handles.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`,
+    );
   }
 
   return { failed };
 }
 
-/**
- * Wait for a single handle's heads to stabilize.
- * Polls heads at 100ms intervals; resolves after 3 consecutive stable
- * checks, rejects on timeout.
- */
-function waitForHandleHeadStability(
+async function syncHandleWithAllPeers(
+  subduction: SubductionSync,
   handle: DocHandle<unknown>,
   timeoutMs: number,
   startTime: number,
 ): Promise<DocHandle<unknown>> {
-  return new Promise<DocHandle<unknown>>((resolve, reject) => {
-    let lastHeads = JSON.stringify(handle.heads());
-    let stableCount = 0;
-    const stableRequired = 3;
+  const sid = await toSedimentreeId(handle);
+  const deadline = startTime + timeoutMs;
+  const pollMs = 250;
+  let lastPeerCount = 0;
+  let lastAnySuccess = false;
 
-    const pollInterval = setInterval(() => {
-      const currentHeads = JSON.stringify(handle.heads());
-      if (currentHeads === lastHeads) {
-        stableCount++;
-        if (stableCount >= stableRequired) {
-          clearInterval(pollInterval);
-          clearTimeout(timeout);
-          debug(`waitForSync(heads): ${handle.url}... converged in ${Date.now() - startTime}ms`);
-          resolve(handle);
-        }
-      } else {
-        stableCount = 0;
-        lastHeads = currentHeads;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+
+    try {
+      const peerResultMap = await subduction.syncWithAllPeers(
+        sid,
+        true,
+        subductionSyncTimeoutMs(Math.min(remaining, 30_000)),
+      );
+      const results = peerResultMap.entries();
+      lastPeerCount = results.length;
+      lastAnySuccess = results.some(r => r.success);
+
+      if (lastPeerCount > 0 && lastAnySuccess) {
+        debug(
+          `waitForSync(sub): ${handle.url}... synced in ${Date.now() - startTime}ms (${lastPeerCount} peer(s))`,
+        );
+        return handle;
       }
-    }, 100);
 
-    const timeout = setTimeout(() => {
-      clearInterval(pollInterval);
-      debug(`waitForSync(heads): ${handle.url}... timed out after ${timeoutMs}ms`);
-      reject(handle);
-    }, timeoutMs);
-  });
+      debug(
+        `waitForSync(sub): ${handle.url}... retry (peers=${lastPeerCount}, success=${lastAnySuccess})`,
+      );
+    } catch (e) {
+      debug(`waitForSync(sub): ${handle.url}... sync round error: ${e}`);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+  }
+
+  debug(
+    `waitForSync(sub): ${handle.url}... failed after ${Date.now() - startTime}ms (peers=${lastPeerCount}, success=${lastAnySuccess})`,
+  );
+  throw handle;
 }

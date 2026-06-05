@@ -6,7 +6,7 @@
  * in a real Node.js context) and inspecting the results.
  *
  * Non-sub (WebSocket) init is tested elsewhere (init-sync.test.ts).
- * These tests focus on the --sub path.
+ * These tests focus on the default Subduction init path.
  */
 
 import * as path from "path";
@@ -14,7 +14,7 @@ import * as fs from "fs/promises";
 import * as tmp from "tmp";
 import { execSync } from "child_process";
 
-describe("createRepo with --sub", () => {
+describe("createRepo with Subduction default", () => {
   let tmpDir: string;
   let cleanup: () => void;
   const cliPath = path.join(__dirname, "../../dist/cli.js");
@@ -33,10 +33,10 @@ describe("createRepo with --sub", () => {
     cleanup();
   });
 
-  it("should create a working repo with --sub flag", async () => {
+  it("should create a working repo with default init", async () => {
     await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -49,7 +49,7 @@ describe("createRepo with --sub", () => {
   it("should produce a valid automerge URL", async () => {
     await fs.writeFile(path.join(tmpDir, "test.txt"), "hello");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -67,7 +67,7 @@ describe("createRepo with --sub", () => {
     await fs.mkdir(path.join(tmpDir, "sub"), { recursive: true });
     await fs.writeFile(path.join(tmpDir, "sub", "b.txt"), "bbb");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -84,7 +84,7 @@ describe("createRepo with --sub", () => {
   it("should be able to sync after init", async () => {
     await fs.writeFile(path.join(tmpDir, "initial.txt"), "first");
 
-    execSync(`node "${cliPath}" init --sub "${tmpDir}"`, {
+    execSync(`node "${cliPath}" init "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,
     });
@@ -92,9 +92,7 @@ describe("createRepo with --sub", () => {
     // Add a new file
     await fs.writeFile(path.join(tmpDir, "added.txt"), "second");
 
-    // Sync should not throw. The `sync` command has no --sub flag — it
-    // reads the backend choice from .pushwork/config.json (persisted by
-    // the init --sub above).
+    // Sync reads Subduction from .pushwork/config.json (default init).
     execSync(`node "${cliPath}" sync "${tmpDir}"`, {
       stdio: "pipe",
       timeout: 30000,

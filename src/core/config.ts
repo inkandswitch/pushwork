@@ -4,8 +4,7 @@ import * as os from "os";
 import {
   GlobalConfig,
   DirectoryConfig,
-  DEFAULT_SYNC_SERVER,
-  DEFAULT_SYNC_SERVER_STORAGE_ID,
+  DEFAULT_SUBDUCTION_SERVER,
 } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
 
@@ -129,8 +128,7 @@ export class ConfigManager {
         ".pushwork",
       ],
       artifact_directories: ["dist"],
-      sync_server: DEFAULT_SYNC_SERVER,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      sync_server: DEFAULT_SUBDUCTION_SERVER,
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -143,8 +141,8 @@ export class ConfigManager {
   getDefaultDirectoryConfig(): DirectoryConfig {
     return {
       sync_enabled: true,
-      sync_server: DEFAULT_SYNC_SERVER,
-      sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+      subduction: true,
+      sync_server: DEFAULT_SUBDUCTION_SERVER,
       exclude_patterns: [
         ".git",
         "node_modules",

@@ -534,10 +534,9 @@ export class SyncEngine {
 
 			// Wait for network sync (important for clone scenarios)
 			if (this.config.sync_enabled) {
-				const sub = options?.sub ?? false
-				// In Subduction mode, pass no StorageId so waitForSync
-				// falls back to head-stability polling. In WebSocket mode,
-				// pass the StorageId for precise getSyncInfo-based verification.
+				const sub = options?.sub ?? true
+				// Subduction: waitForSync uses syncWithAllPeers (repo required).
+				// WebSocket: getSyncInfo against sync_server_storage_id.
 				const storageId = sub ? undefined : this.config.sync_server_storage_id
 
 				try {
@@ -560,7 +559,9 @@ export class SyncEngine {
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
 						const {failed} = await waitForSync(
 							allHandles,
-							storageId
+							storageId,
+							60000,
+							sub ? this.repo : undefined
 						)
 
 						// Recreate failed documents and retry once.
@@ -575,7 +576,9 @@ export class SyncEngine {
 								out.update(`Retrying ${retryHandles.length} recreated documents`)
 								const retry = await waitForSync(
 									retryHandles,
-									storageId
+									storageId,
+									60000,
+									sub ? this.repo : undefined
 								)
 								if (retry.failed.length > 0) {
 									const msg = `${retry.failed.length} documents failed to sync to server after recreation`
@@ -589,10 +592,14 @@ export class SyncEngine {
 								}
 							}
 						} else if (failed.length > 0 && sub) {
-							const msg = `${failed.length} document${failed.length === 1 ? '' : 's'} did not converge during sync (Subduction will retry in the background; re-run sync to confirm)`
+							const msg = `${failed.length} document${failed.length === 1 ? "" : "s"} failed to sync to server via Subduction`
 							debug(`sync: ${msg}`)
-							out.taskLine(msg, true)
-							result.warnings.push(msg)
+							result.errors.push({
+								path: "sync",
+								operation: "upload",
+								error: new Error(msg),
+								recoverable: true,
+							})
 						}
 
 						debug("sync: all handles synced to server")
@@ -630,12 +637,25 @@ export class SyncEngine {
 						out.update("Syncing root directory update")
 						const rootSync = await waitForSync(
 							[rootHandle],
-							storageId
+							storageId,
+							60000,
+							sub ? this.repo : undefined
 						)
 						if (rootSync.failed.length > 0) {
-							const msg = "Root directory update did not converge to server; consumers may not see recent changes until next sync"
+							const msg = sub
+								? "Root directory update failed to sync to server; consumers may not see recent changes until next sync"
+								: "Root directory update did not converge to server; consumers may not see recent changes until next sync"
 							debug(`sync: ${msg}`)
-							result.warnings.push(msg)
+							if (sub) {
+								result.errors.push({
+									path: "sync",
+									operation: "upload",
+									error: new Error(msg),
+									recoverable: true,
+								})
+							} else {
+								result.warnings.push(msg)
+							}
 						}
 					}
 				} catch (error) {

@@ -2,6 +2,11 @@
  * Jest setup file to mock ESM modules that don't work well with Jest
  */
 
+// uuid@14 is ESM-only; automerge-repo imports it from CJS tests
+jest.mock("uuid", () => ({
+  v4: () => "00000000-0000-4000-8000-000000000000",
+}));
+
 // Mock chalk (ESM-only module)
 jest.mock("chalk", () => ({
   __esModule: true,

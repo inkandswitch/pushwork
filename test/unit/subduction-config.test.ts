@@ -2,7 +2,13 @@ import * as path from "path";
 import * as fs from "fs/promises";
 import * as tmp from "tmp";
 import { ConfigManager } from "../../src/core/config";
-import { DEFAULT_SUBDUCTION_SERVER, DEFAULT_SYNC_SERVER } from "../../src/types/config";
+import {
+  DEFAULT_SUBDUCTION_SERVER,
+  DEFAULT_SYNC_SERVER,
+  DEFAULT_SYNC_SERVER_STORAGE_ID,
+  useSubductionBackend,
+  subductionFromCliFlags,
+} from "../../src/types/config";
 
 describe("Subduction configuration", () => {
   let tmpDir: string;
@@ -32,38 +38,51 @@ describe("Subduction configuration", () => {
   });
 
   describe("ConfigManager defaults", () => {
-    it("should use the WebSocket server as default sync_server", async () => {
+    it("should use the Subduction server as default sync_server", async () => {
       const configManager = new ConfigManager(tmpDir);
       const config = configManager.getDefaultDirectoryConfig();
-      expect(config.sync_server).toBe(DEFAULT_SYNC_SERVER);
+      expect(config.sync_server).toBe(DEFAULT_SUBDUCTION_SERVER);
+      expect(config.subduction).toBe(true);
     });
 
-    it("should not default to the subduction server", async () => {
+    it("should not include a WebSocket storage id by default", async () => {
       const configManager = new ConfigManager(tmpDir);
       const config = configManager.getDefaultDirectoryConfig();
-      expect(config.sync_server).not.toBe(DEFAULT_SUBDUCTION_SERVER);
+      expect(config.sync_server_storage_id).toBeUndefined();
     });
   });
 
-  describe("sub flag option types", () => {
-    // These tests verify that the option interfaces accept `sub` on the
-    // commands that actually have a --sub flag (init and clone). The flag
-    // is NOT on SyncOptions or WatchOptions because sync/watch read the
-    // backend choice from persisted config (see `setupCommandContext`).
-    // If the type definitions are wrong, these will fail at compile time.
-    it("should accept sub on InitOptions", () => {
-      const opts: import("../../src/types/config").InitOptions = { sub: true };
-      expect(opts.sub).toBe(true);
+  describe("useSubductionBackend", () => {
+    it("should default to Subduction for new-style config", () => {
+      expect(
+        useSubductionBackend({
+          subduction: true,
+          sync_server: DEFAULT_SUBDUCTION_SERVER,
+        }),
+      ).toBe(true);
     });
 
-    it("should accept sub on CloneOptions", () => {
-      const opts: import("../../src/types/config").CloneOptions = { sub: true };
-      expect(opts.sub).toBe(true);
+    it("should detect legacy WebSocket config without subduction field", () => {
+      expect(
+        useSubductionBackend({
+          sync_server: DEFAULT_SYNC_SERVER,
+          sync_server_storage_id: DEFAULT_SYNC_SERVER_STORAGE_ID,
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe("subductionFromCliFlags", () => {
+    it("should default to Subduction", () => {
+      expect(subductionFromCliFlags({})).toBe(true);
     });
 
-    it("should default sub to undefined (not required) on InitOptions", () => {
-      const opts: import("../../src/types/config").InitOptions = {};
-      expect(opts.sub).toBeUndefined();
+    it("should select WebSocket with --websocket", () => {
+      expect(subductionFromCliFlags({ websocket: true })).toBe(false);
+    });
+
+    it("should honor deprecated sub: false", () => {
+      expect(subductionFromCliFlags({ sub: false })).toBe(false);
     });
   });
 });

@@ -77,21 +77,34 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option(
+    "--websocket",
+    "Use legacy WebSocket sync server (sync3) instead of Subduction",
+    false
+  )
+  .addOption(
+    new Option("--sub", "deprecated: Subduction is now the default").hideHelp()
+  )
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
+      opts.syncServer,
+      !opts.websocket
     );
-    await init(path, { syncServer, syncServerStorageId, sub: opts.sub });
+    await init(path, {
+      syncServer,
+      syncServerStorageId,
+      websocket: opts.websocket,
+      sub: opts.sub || undefined,
+    });
   });
 
 // Track command (set root directory URL without full initialization)
 const trackAction = async (
   url: string,
   path: string,
-  opts: { force: boolean; sub: boolean }
+  opts: { force: boolean; websocket?: boolean }
 ) => {
-  await root(url, path, { force: opts.force, sub: opts.sub });
+  await root(url, path, { force: opts.force, websocket: opts.websocket });
 };
 
 program
@@ -107,7 +120,11 @@ program
     "."
   )
   .option("-f, --force", "Overwrite existing pushwork setup", false)
-  .option("--sub", "Use Subduction sync backend", false)
+  .option(
+    "--websocket",
+    "Use legacy WebSocket sync server (sync3) instead of Subduction",
+    false
+  )
   .action(async (url, path, opts) => {
     await trackAction(url, path, opts);
   });
@@ -118,8 +135,8 @@ program
   .argument("<url>")
   .argument("[path]", "", ".")
   .option("-f, --force", "", false)
-  .option("--sub", "", false)
-  .action(async (url: string, path: string, opts: { force: boolean; sub: boolean }) => {
+  .option("--websocket", "", false)
+  .action(async (url: string, path: string, opts: { force: boolean; websocket?: boolean }) => {
     await trackAction(url, path, opts);
   });
 
@@ -137,18 +154,27 @@ program
     "--sync-server <url> <storage-id...>",
     "Custom sync server URL and storage ID"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option(
+    "--websocket",
+    "Use legacy WebSocket sync server (sync3) instead of Subduction",
+    false
+  )
+  .addOption(
+    new Option("--sub", "deprecated: Subduction is now the default").hideHelp()
+  )
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
+      opts.syncServer,
+      !opts.websocket
     );
     await clone(url, path, {
       force: opts.force,
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
-      sub: opts.sub,
+      websocket: opts.websocket,
+      sub: opts.sub || undefined,
     });
   });
 
@@ -433,21 +459,22 @@ compdef _pushwork pushwork
 
 // Helper to validate and extract sync server options
 function validateSyncServer(
-  syncServerOpt: string[] | undefined
+  syncServerOpt: string[] | undefined,
+  requireStorageId: boolean = false
 ): [string | undefined, StorageId | undefined] {
   if (!syncServerOpt) {
     return [undefined, undefined];
   }
 
-  if (syncServerOpt.length < 2) {
+  if (requireStorageId && syncServerOpt.length < 2) {
     console.error(
-      chalk.red("Error: --sync-server requires both URL and storage ID")
+      chalk.red("Error: --sync-server requires both URL and storage ID with --websocket")
     );
     process.exit(1);
   }
 
   const [syncServer, syncServerStorageId] = syncServerOpt;
-  return [syncServer, syncServerStorageId as StorageId];
+  return [syncServer, syncServerStorageId as StorageId | undefined];
 }
 
 process.on("unhandledRejection", (error) => {

@@ -45,15 +45,15 @@ pushwork url
 
 **`init [path]`** - Initialize sync in a directory
 
-- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
-- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
+- `--sync-server <url> [<storage-id>]` - Custom sync server (storage ID required with `--websocket`)
+- `--websocket` - Legacy WebSocket sync via sync3 (Subduction is the default)
 - `--debug` - Export performance flame graphs
 
 **`clone <url> <path>`** - Clone an existing synced directory
 
 - `--force` - Overwrite existing directory
-- `--sync-server <url> <storage-id>` - Custom sync server URL and storage ID
-- `--sub` - Use the Subduction sync backend (opt-in, persisted in config)
+- `--sync-server <url> [<storage-id>]` - Custom sync server (storage ID required with `--websocket`)
+- `--websocket` - Legacy WebSocket sync via sync3 (Subduction is the default)
 
 **`sync [path]`** - Run bidirectional synchronization
 
@@ -105,8 +105,8 @@ Configuration is stored in `.pushwork/config.json`:
 
 ```json
 {
-  "sync_server": "wss://sync3.automerge.org",
-  "sync_server_storage_id": "3760df37-a4c6-4f66-9ecd-732039a9385d",
+  "sync_server": "wss://subduction.sync.inkandswitch.com",
+  "subduction": true,
   "sync_enabled": true,
   "defaults": {
     "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
@@ -128,15 +128,12 @@ Configuration is stored in `.pushwork/config.json`:
 
 Pushwork supports two sync backends:
 
-- **WebSocket (default)** — talks to `wss://sync3.automerge.org` via the
-  standard Automerge sync protocol. Uses `sync_server_storage_id` to
-  verify delivery via `getSyncInfo`.
-- **Subduction (opt-in)** — pass `--sub` on `init` or `clone` to select
-  the Subduction backend (default endpoint:
-  `wss://subduction.sync.inkandswitch.com`). The Subduction choice is
-  persisted in `.pushwork/config.json` as `"subduction": true`, so
-  subsequent `sync` / `watch` commands pick it up automatically.
-  `sync_server_storage_id` is not used in this mode.
+- **Subduction (default)** — `wss://subduction.sync.inkandswitch.com`.
+  Used automatically for `init`, `clone`, and `sync`. Upload verification
+  uses `syncWithAllPeers` (requires at least one successful peer).
+- **WebSocket (legacy)** — pass `--websocket` on `init` or `clone` for
+  `wss://sync3.automerge.org` and `getSyncInfo`-based verification via
+  `sync_server_storage_id`.
 
 ## How It Works
 

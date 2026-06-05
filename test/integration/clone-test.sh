@@ -104,7 +104,7 @@ test_clone_functionality() {
                 
                 # Check configuration
                 if [ -f clone-default/.pushwork/config.json ]; then
-                    if grep -q "wss://sync3.automerge.org" clone-default/.pushwork/config.json; then
+                    if grep -q "wss://subduction.sync.inkandswitch.com" clone-default/.pushwork/config.json; then
                         log_success "Default sync server in config"
                     else
                         log_error "Default sync server not found in config"

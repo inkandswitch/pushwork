@@ -1,8 +1,15 @@
-import { type Repo, type RepoConfig, type NetworkAdapterInterface } from "@automerge/automerge-repo";
+import {
+  type Repo,
+  type RepoConfig,
+  type NetworkAdapterInterface,
+  type DocHandle,
+  parseAutomergeUrl,
+} from "@automerge/automerge-repo";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { DirectoryConfig } from "../types";
+import { getPlainUrl } from "./directory";
 
 /**
  * Perform a real ESM dynamic import that tsc won't rewrite to require().
@@ -84,13 +91,12 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
  * we just pass `subductionWebsocketEndpoints` and the Repo handles
  * connection management, sync, and retries.
  *
- * When `sub` is false (default), uses the traditional WebSocket network
- * adapter for sync via the automerge sync server.
+ * When `sub` is false, uses the traditional WebSocket network adapter.
  */
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig,
-  sub: boolean = false
+  sub: boolean = true
 ): Promise<Repo> {
   const RepoClass = await getRepoClass();
 
@@ -139,4 +145,21 @@ export async function createRepo(
   }
 
   return new RepoClass(repoConfig);
+}
+
+let cachedSlimSubduction: { SedimentreeId: { fromBytes: (bytes: Uint8Array) => unknown } } | undefined;
+
+/**
+ * Build a SedimentreeId in the same ESM/Wasm module graph as the Repo.
+ * Must not import /slim from network-sync directly — that loads a separate graph.
+ */
+export async function toSedimentreeId(handle: DocHandle<unknown>): Promise<unknown> {
+  await getRepoClass();
+  if (!cachedSlimSubduction) {
+    cachedSlimSubduction = await dynamicImport("@automerge/automerge-subduction/slim");
+  }
+  const { binaryDocumentId } = parseAutomergeUrl(getPlainUrl(handle.url));
+  const padded = new Uint8Array(32);
+  padded.set(binaryDocumentId.subarray(0, 32));
+  return cachedSlimSubduction!.SedimentreeId.fromBytes(padded);
 }

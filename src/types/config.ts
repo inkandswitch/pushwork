@@ -44,7 +44,10 @@ export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
   syncServer?: string; // Custom sync server URL
   syncServerStorageId?: StorageId; // Custom sync server storage ID
+  /** @deprecated Subduction is default; use `websocket: true` for legacy sync3. */
   sub?: boolean;
+  /** Use legacy WebSocket sync (sync3) instead of Subduction. */
+  websocket?: boolean;
 }
 
 /**
@@ -86,7 +89,10 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
+  /** @deprecated Subduction is default; use `websocket: true` for legacy sync3. */
   sub?: boolean;
+  /** Use legacy WebSocket sync (sync3) instead of Subduction. */
+  websocket?: boolean;
 }
 
 /**
@@ -112,4 +118,32 @@ export interface StatusOptions extends CommandOptions {
 export interface WatchOptions extends CommandOptions {
   script?: string; // Script to run before syncing
   watchDir?: string; // Directory to watch (relative to working dir)
+}
+
+/**
+ * Whether to use the Subduction sync backend for this config.
+ * New projects default to Subduction. Legacy WebSocket projects set
+ * `subduction: false` or use a sync3 URL / storage id without `subduction: true`.
+ */
+export function useSubductionBackend(
+  config: Pick<DirectoryConfig, "subduction" | "sync_server" | "sync_server_storage_id">,
+): boolean {
+  if (config.subduction === true) return true;
+  if (config.subduction === false) return false;
+  // Legacy .pushwork/config.json without a subduction field
+  if (config.sync_server === DEFAULT_SYNC_SERVER) return false;
+  if (config.sync_server_storage_id !== undefined) return false;
+  return true;
+}
+
+/** CLI backend selection: Subduction by default; `--websocket` or deprecated `sub: false` selects sync3. */
+export function subductionFromCliFlags(flags: {
+  websocket?: boolean;
+  /** @deprecated Use `websocket: true` instead of `sub: false`. */
+  sub?: boolean;
+}): boolean {
+  if (flags.websocket) return false;
+  if (flags.sub === false) return false;
+  if (flags.sub === true) return true;
+  return true;
 }
