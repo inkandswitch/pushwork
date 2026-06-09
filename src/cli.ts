@@ -64,6 +64,73 @@ async function pickBranchInteractively(info: {
 	}
 }
 
+// Read a single keypress (git-style prompts). Falls back to a line read when
+// stdin isn't a TTY (e.g. piped input), returning the first character.
+async function readChar(): Promise<string> {
+	if (!input.isTTY || typeof input.setRawMode !== "function") {
+		const rl = readline.createInterface({ input, output });
+		try {
+			const line = (await rl.question("")).trim();
+			return line.slice(0, 1) || "\n";
+		} finally {
+			rl.close();
+		}
+	}
+	return new Promise<string>((resolve) => {
+		input.setRawMode(true);
+		input.resume();
+		input.once("data", (buf: Buffer) => {
+			input.setRawMode(false);
+			input.pause();
+			resolve(buf.toString("utf8"));
+		});
+	});
+}
+
+async function pickStrategyInteractively(info: {
+	url: AutomergeUrl;
+	viewCode: () => string;
+}): Promise<boolean> {
+	process.stderr.write(
+		`\nThis repo's root doc has no standard @patchwork.type, but it declares a custom strategy:\n`,
+	);
+	process.stderr.write(`  .pushworkStrategy → ${info.url}\n\n`);
+	process.stderr.write(
+		`Pushwork can download this strategy module and run it to decode the repo.\n`,
+	);
+	process.stderr.write(
+		`Running it executes code written by the document's author. Inspect it first.\n\n`,
+	);
+
+	while (true) {
+		process.stderr.write(
+			`Download and run this strategy? [y]es, [n]o, [v]iew code, [?] help: `,
+		);
+		const raw = await readChar();
+		const code = raw.charCodeAt(0);
+		if (code === 3) {
+			// Ctrl-C
+			process.stderr.write("\naborted\n");
+			process.exit(130);
+		}
+		const ch = raw.toLowerCase();
+		process.stderr.write(/\S/.test(ch) ? ch + "\n" : "\n");
+		if (ch === "y") return true;
+		if (ch === "n" || code === 27) return false; // n or Esc
+		if (ch === "v") {
+			process.stderr.write("\n----- .pushworkStrategy -----\n");
+			process.stderr.write(info.viewCode().replace(/\n?$/, "\n"));
+			process.stderr.write("----- end -----\n\n");
+			continue;
+		}
+		process.stderr.write(
+			`  y - download the strategy module and run it to decode this repo\n` +
+				`  n - abort the clone (Esc also works)\n` +
+				`  v - print the strategy source, then ask again\n`,
+		);
+	}
+}
+
 const program = new Command()
 	.name("pushwork")
 	.description("Bidirectional directory synchronization using Automerge CRDTs")
@@ -113,7 +180,7 @@ program
 	.option("--legacy", "Alias for --no-sub")
 	.option(
 		"--shape <shape>",
-		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
+		"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
 		"vfs",
 	)
 	.option(
@@ -131,6 +198,7 @@ program
 			shape: opts.shape,
 			artifactDirectories: opts.artifactDir,
 			onBranchesDoc: pickBranchInteractively,
+			onStrategyDoc: pickStrategyInteractively,
 		});
 		process.stderr.write(`cloned into ${path.resolve(dir)}\n`);
 	});

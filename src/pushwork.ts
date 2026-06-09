@@ -38,14 +38,18 @@ import {
 	makeFileEntry,
 	newDir,
 	normalizeArtifactDir,
+	patchworkFolderShape,
 	pinUrl,
+	readFileEntry,
 	resolveShape,
 	setFileAt,
 	stripHeads,
+	vfsShape,
 	type Shape,
 	type UnixFileEntry,
 	type VfsNode,
 } from "./shapes/index.js";
+import { loadCustomShape } from "./shapes/custom.js";
 
 const dlog = log("pushwork");
 
@@ -73,6 +77,16 @@ export type CloneOpts = {
 		title?: string;
 		branches: { name: string; url: AutomergeUrl }[];
 	}) => Promise<AutomergeUrl> | AutomergeUrl;
+	// If the root doc has no recognized @patchwork.type but declares a
+	// `.pushworkStrategy` automerge URL, this callback is invoked to decide
+	// whether to download that strategy module and run it as a custom shape.
+	// `viewCode` returns the strategy source so the user can inspect it before
+	// approving. Returning false (or omitting the callback) skips the strategy
+	// and falls back to `opts.shape`.
+	onStrategyDoc?: (info: {
+		url: AutomergeUrl;
+		viewCode: () => string;
+	}) => Promise<boolean> | boolean;
 };
 
 export type Diff = {
@@ -145,7 +159,6 @@ export async function clone(opts: CloneOpts): Promise<void> {
 	const online = opts.online ?? true;
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
 	try {
-		const shape = await resolveShape(opts.shape);
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
 		if (online) {
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
@@ -174,6 +187,14 @@ export async function clone(opts: CloneOpts): Promise<void> {
 			storedUrl = chosenUrl;
 		}
 
+		const { shape, shapeName } = await resolveCloneShape({
+			opts,
+			repo,
+			root,
+			online,
+			folderHandle,
+		});
+
 		const tree = await shape.decode({ repo, root: folderHandle });
 		await materializeTree(repo, root, tree);
 
@@ -181,13 +202,89 @@ export async function clone(opts: CloneOpts): Promise<void> {
 			version: CONFIG_VERSION,
 			rootUrl: storedUrl,
 			backend: opts.backend,
-			shape: opts.shape,
+			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
 		dlog("clone complete");
 	} finally {
 		await repo.shutdown();
 	}
+}
+
+// Reads `doc["@patchwork"].type` if present (e.g. "directory", "folder").
+function patchworkType(doc: unknown): string | undefined {
+	if (!doc || typeof doc !== "object") return undefined;
+	const meta = (doc as Record<string, unknown>)["@patchwork"];
+	if (!meta || typeof meta !== "object") return undefined;
+	const t = (meta as Record<string, unknown>).type;
+	return typeof t === "string" ? t : undefined;
+}
+
+// Reads a `.pushworkStrategy` automerge URL off the root doc, if present.
+function strategyUrl(doc: unknown): AutomergeUrl | undefined {
+	if (!doc || typeof doc !== "object") return undefined;
+	const v = (doc as Record<string, unknown>)[".pushworkStrategy"];
+	return typeof v === "string" && isValidAutomergeUrl(v) ? v : undefined;
+}
+
+// Picks the shape to decode a cloned repo with, based on the root doc:
+//   @patchwork.type === "directory" → vfs
+//   @patchwork.type === "folder"    → patchwork-folder
+//   otherwise, if a `.pushworkStrategy` URL is present, prompt (via
+//     opts.onStrategyDoc) to download + run it as a custom shape
+//   otherwise, fall back to the explicitly requested opts.shape
+// Returns the resolved Shape plus the name to record in config (a builtin
+// name, a repo-relative path to the downloaded strategy, or opts.shape).
+async function resolveCloneShape(args: {
+	opts: CloneOpts;
+	repo: Repo;
+	root: string;
+	online: boolean;
+	folderHandle: DocHandle<unknown>;
+}): Promise<{ shape: Shape; shapeName: string }> {
+	const { opts, repo, root, online, folderHandle } = args;
+	const doc = folderHandle.doc();
+
+	const type = patchworkType(doc);
+	if (type === "directory") {
+		dlog("clone shape: @patchwork.type=directory → vfs");
+		return { shape: vfsShape, shapeName: "vfs" };
+	}
+	if (type === "folder") {
+		dlog("clone shape: @patchwork.type=folder → patchwork-folder");
+		return { shape: patchworkFolderShape, shapeName: "patchwork-folder" };
+	}
+
+	const sUrl = strategyUrl(doc);
+	if (sUrl) {
+		dlog("clone shape: root doc declares .pushworkStrategy=%s", sUrl);
+		if (!opts.onStrategyDoc) {
+			throw new Error(
+				`root doc has no recognized @patchwork.type and declares a .pushworkStrategy (${sUrl}); refusing to download and run it without confirmation. Provide an onStrategyDoc callback (the CLI prompts you), or pass --shape explicitly.`,
+			);
+		}
+		const strategyHandle = await repo.find<UnixFileEntry>(sUrl);
+		if (online) {
+			await waitForSync(strategyHandle as DocHandle<unknown>, {
+				idleMs: 1500,
+				maxMs: 15000,
+			});
+		}
+		const { bytes } = readFileEntry(strategyHandle as DocHandle<unknown>);
+		const code = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+		const approved = await opts.onStrategyDoc({ url: sUrl, viewCode: () => code });
+		if (approved) {
+			const dest = path.join(pushworkDir(root), "strategy.mjs");
+			await fs.writeFile(dest, code, "utf8");
+			const shapeName = path.relative(root, dest);
+			dlog("clone shape: wrote strategy to %s, running it", dest);
+			return { shape: await loadCustomShape(dest), shapeName };
+		}
+		dlog("clone shape: user declined strategy, falling back to opts.shape");
+	}
+
+	dlog("clone shape: falling back to opts.shape=%s", opts.shape);
+	return { shape: await resolveShape(opts.shape), shapeName: opts.shape };
 }
 
 function asBranchesDoc(
