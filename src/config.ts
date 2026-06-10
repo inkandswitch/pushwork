@@ -26,7 +26,7 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 	const parsed = JSON.parse(text) as Partial<PushworkConfig>;
 	if (parsed.version !== CONFIG_VERSION) {
 		throw new Error(
-			`pushwork config version mismatch: expected ${CONFIG_VERSION}, got ${parsed.version ?? "(missing)"}`,
+			`pushwork config version mismatch: expected ${CONFIG_VERSION}, got ${parsed.version ?? "(missing)"} — run \`pushwork migrate\` to upgrade it`,
 		);
 	}
 	if (!parsed.rootUrl) throw new Error("pushwork config missing rootUrl");

@@ -20,6 +20,7 @@ import {
 } from "./pushwork.js";
 import { log } from "./log.js";
 import { formatVersions } from "./version.js";
+import { migrate, versionLabel } from "./migrations.js";
 
 const dlog = log("cli");
 
@@ -201,6 +202,26 @@ program
 			onStrategyDoc: pickStrategyInteractively,
 		});
 		process.stderr.write(`cloned into ${path.resolve(dir)}\n`);
+	});
+
+program
+	.command("migrate")
+	.description(
+		"Upgrade an old .pushwork/config.json (including an original pushwork \"main\" repo) to the current format",
+	)
+	.argument("[dir]", "Directory to migrate", ".")
+	.action(async (dir) => {
+		const root = path.resolve(dir);
+		dlog("migrate root=%s", root);
+		const result = await migrate(root);
+		if (result.steps.length === 0) {
+			process.stderr.write(`already up to date (version ${result.to})\n`);
+			return;
+		}
+		process.stderr.write(
+			`migrated ${versionLabel(result.from)} → ${result.to}\n`,
+		);
+		for (const s of result.steps) process.stderr.write(`  ${s}\n`);
 	});
 
 program
