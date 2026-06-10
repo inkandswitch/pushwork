@@ -87,27 +87,8 @@ describe("Sync backend configuration", () => {
     });
   });
 
-  describe("legacy flag option types", () => {
-    // The `--legacy` flag lives on init and clone only. sync/watch read
-    // the backend choice from persisted config (see setupCommandContext).
-    // These tests fail at compile time if the type definitions drift.
-    it("InitOptions accepts legacy: true", () => {
-      const opts: import("../../src/types/config").InitOptions = {
-        legacy: true,
-      };
-      expect(opts.legacy).toBe(true);
-    });
-
-    it("CloneOptions accepts legacy: true", () => {
-      const opts: import("../../src/types/config").CloneOptions = {
-        legacy: true,
-      };
-      expect(opts.legacy).toBe(true);
-    });
-
-    it("InitOptions.legacy is optional (defaults to undefined)", () => {
-      const opts: import("../../src/types/config").InitOptions = {};
-      expect(opts.legacy).toBeUndefined();
-    });
-  });
+  // (Removed: a "legacy flag option types" block whose runtime assertions were
+  // tautologies — `const o: InitOptions = { legacy: true }; expect(o.legacy)`.
+  // The only real check there is the type annotation, already enforced by `tsc`
+  // on the production usage of InitOptions/CloneOptions. See test-review 2026-06.)
 });
