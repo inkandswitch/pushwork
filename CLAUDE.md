@@ -139,21 +139,23 @@ Used throughout sync-engine: if heads are available, calls `handle.changeAt(head
 - **`waitForBidirectionalSync` on large trees.** Full tree traversal (`getAllDocumentHeads`) is expensive because it `repo.find()`s every document. For post-push stabilization, pass the `handles` option to only check documents that actually changed. The initial pre-pull call still needs the full scan to discover remote changes. The dynamic timeout adds the first scan's duration on top of the base timeout, since the first scan is just establishing baseline — its duration shouldn't count against stability-wait time.
 - **Versioned URLs and `repo.find()`.** `repo.find(versionedUrl)` returns a view handle whose `.heads()` returns the VERSION heads, not the current document heads. Always use `getPlainUrl()` when you need the current/mutable state. The snapshot head update loop at the end of `sync()` must use `getPlainUrl(snapshotEntry.url)` — without this, artifact directories (which store versioned URLs) get stale heads written to the snapshot, causing `changeAt()` to fork from the wrong point on the next sync. This was the root cause of the artifact deletion resurrection bug: `batchUpdateDirectory` would `changeAt` from an empty directory state where the file entry didn't exist yet, so the splice found nothing to delete.
 
-## Subduction sync backend (`--sub`)
+## Sync backends (default: Subduction)
 
-The `--sub` flag switches from the default WebSocket sync adapter to the Subduction backend built into `automerge-repo@2.6.0-subduction.14`. The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` and the Repo handles connection management, sync, and retries.
+Pushwork supports two sync backends. Subduction is the default; legacy WebSocket is opt-in via `--legacy` on `init`/`clone`/`track`.
+
+The Repo manages a `SubductionSource` internally — pushwork just passes `subductionWebsocketEndpoints` (Subduction mode) or constructs a `BrowserWebSocketClientAdapter` (legacy mode), and the Repo handles connection management, sync, and retries.
 
 ### How it works
 
-- `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. When `sub: true`, passes `subductionWebsocketEndpoints: [syncServer]` and the Repo handles sync cadence internally. When `sub: false`, uses the traditional WebSocket network adapter instead.
-- Default server: `wss://subduction.sync.inkandswitch.com` (vs `wss://sync3.automerge.org` for WebSocket)
+- `repo-factory.ts`: Initializes Subduction Wasm via ESM dynamic import, then creates Repo. `createRepo(workingDir, config, protocol)` takes a `SyncProtocol`. When `protocol` is `"subduction"` (the default), passes `subductionWebsocketEndpoints: [syncServer]` and the Repo handles sync cadence internally. When `"legacy"`, constructs a `BrowserWebSocketClientAdapter` instead.
+- Default Subduction server: `wss://subduction.sync.inkandswitch.com`; legacy server: `wss://sync3.automerge.org`
 - `network-sync.ts`: When no `StorageId` is provided (Subduction mode), `waitForSync` falls back to head-stability polling (3 consecutive stable checks at 100ms intervals) instead of `getSyncInfo`-based verification
-- `sync-engine.ts`: In sub mode, skips `recreateFailedDocuments` — SubductionSource has its own heal-sync retry logic
-- Everything else (push/pull phases, artifact handling, `nukeAndRebuildDocs`, change detection) is identical
+- `sync-engine.ts`: In Subduction mode, skips `recreateFailedDocuments` — SubductionSource has its own heal-sync retry logic
+- Everything else (push/pull phases, artifact handling, `nukeAndRebuildDocs`, change detection) is identical across backends
 
 ### Wasm initialization
 
-As of `automerge-repo@2.6.0-subduction.14`, the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the default WebSocket path.
+Since `automerge-repo@2.6.0-subduction.14` (pushwork currently pins `2.6.0-subduction.29`), the Repo constructor _always_ creates a `SubductionSource` internally (even without Subduction endpoints), which imports `MemorySigner` and `set_subduction_logger` from `@automerge/automerge-subduction/slim`. The `/slim` entry does NOT auto-init the Wasm — so Wasm must be initialized before _any_ `new Repo()` call, including the legacy WebSocket path.
 
 `automerge-repo` exports `initSubduction()` which dynamically imports `@automerge/automerge-subduction` (the non-`/slim` entry that auto-inits Wasm). Pushwork calls this via `repoMod.initSubduction()` after loading the Repo module — no direct dependency on `@automerge/automerge-subduction` is needed.
 
@@ -163,18 +165,35 @@ The Repo class itself is also loaded via this ESM dynamic import (cached after f
 
 ### Packaging notes
 
-- `automerge-repo@2.6.0-subduction.14` correctly pins `@automerge/automerge-subduction@0.7.0` — no pnpm override needed (unlike subduction.7 which required an override to fix a version mismatch).
+- `automerge-repo@2.6.0-subduction.29` pins `@automerge/automerge-subduction@0.15.0`. Pushwork pins `@automerge/automerge` to `3.3.0-fragments.1` via a `pnpm.overrides` entry so transitive deps can't pull a second copy of the core CRDT (a second copy means a separate Wasm instance, which breaks document sharing). See ADR-021.
 - `RepoConfig` properly types the Subduction options pushwork uses (`subductionWebsocketEndpoints`, `signer`, `subductionPolicy`, `subductionAdapters`) — no `as any` cast needed.
 - The `automerge-repo-network-websocket` adapter's `NetworkAdapter` types are slightly behind the repo's `NetworkAdapterInterface` (missing `state()` method in declarations). The adapter works at runtime; the type mismatch is worked around with `as unknown as NetworkAdapterInterface`.
 - New `"heal-exhausted"` event on Repo fires when self-healing sync gives up after all retry attempts for a document. Not currently used by pushwork but available for better error reporting.
 
-### Subduction mode persistence
+### Backend persistence in config
 
-`--sub` is only accepted on `init` and `clone`. It persists `subduction: true` in `.pushwork/config.json`. All subsequent commands (`sync`, `watch`, etc.) read it from config via `config.subduction ?? false`. The force-defaults path in `setupCommandContext` preserves `subduction` alongside `root_directory_url`.
+`--legacy` is only accepted on `init`, `clone`, and `track`. It persists `"protocol": "legacy"` in `.pushwork/config.json`. Default (Subduction) installs persist `"protocol": "subduction"`. All subsequent commands (`sync`, `watch`, etc.) read it from config via `resolveProtocol(localConfig)`. The force-defaults path in `setupCommandContext` preserves the protocol alongside `root_directory_url` and any user-configured `sync_server`.
 
-When Subduction mode is active, commands print a banner: "Using Subduction sync backend (from config)".
+When legacy mode is active, commands print a banner: "Using legacy WebSocket sync backend (from config)". No banner is printed for default Subduction operation.
+
+The old opt-in `--sub` flag is **removed** (v1.4.0) — Subduction is now the default, so `--sub` errors with "unknown option". `--legacy` is the inverse selector.
+
+`--sync-server` storage-id rule (D9): the storage ID is a legacy-only concept (`getSyncInfo` delivery verification). `validateSyncServer(opt, legacy)` in `cli.ts` enforces it — `--legacy` requires `<url> <storage-id>`; default (Subduction) mode accepts a URL only and **hard-errors** if a storage ID is supplied (rather than silently stripping it). Migration of old on-disk configs still strips stale storage-ids silently — the error is reserved for fresh CLI input.
 
 Every `sync` run prints the root Automerge URL at the end.
+
+### Config schema version and migration
+
+The `config_version` field in `.pushwork/config.json` tracks schema version. Current: `CONFIG_VERSION = 1` (exported from `src/types/config.ts`).
+
+- **v0** (no `config_version` field): pre-flip configs. Had a `subduction?: boolean` opt-in flag. Absence of that flag ⇒ classic WebSocket install.
+- **v1**: Subduction is the default. Uses `"protocol": "subduction" | "legacy"` instead of `subduction: boolean`. Always written explicitly.
+
+Migration is in `ConfigManager.migrateIfNeeded()`:
+
+- `sync`, `watch`, and `commit` call `migrateConfigIfNeeded()` at the top, upgrading an existing v0 config in place. `init`/`clone`/`track` do _not_ call it — they write a fresh v1 config via `initializeWithOverrides` instead. Read-only commands (`status`, `diff`, `log`, `ls`, `url`) never touch disk — they read v0 configs transparently via `resolveProtocol` in memory.
+- Migration reads the raw v0 config, infers protocol (`subduction: true` → `"subduction"`; `false` or absent → `"legacy"`), writes a backup to `config.json.bak` (or `.bak.1`, `.bak.2`, ... if prior backups exist), and rewrites the file in v1 shape. Prints a multi-line banner so the user sees what happened.
+- `resolveProtocol(config)` is the single source of truth for backend selection across all paths. Given `null`/`undefined` it returns `"subduction"` (new-install default).
 
 ### Corrupt storage recovery
 

@@ -2,7 +2,7 @@ import { type Repo, type RepoConfig, type NetworkAdapterInterface } from "@autom
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { DirectoryConfig } from "../types";
+import { DirectoryConfig, SyncProtocol } from "../types";
 
 /**
  * Perform a real ESM dynamic import that tsc won't rewrite to require().
@@ -79,18 +79,18 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
 /**
  * Create an Automerge repository with configuration-based setup.
  *
- * When `sub` is true, uses the Subduction sync backend built into
- * automerge-repo. The Repo manages its own SubductionSource internally —
- * we just pass `subductionWebsocketEndpoints` and the Repo handles
- * connection management, sync, and retries.
- *
- * When `sub` is false (default), uses the traditional WebSocket network
- * adapter for sync via the automerge sync server.
+ * `protocol` selects the sync backend:
+ *   - "subduction" (default) — uses the Subduction sync backend built
+ *     into automerge-repo. The Repo manages its own SubductionSource
+ *     internally; we just pass `subductionWebsocketEndpoints` and the
+ *     Repo handles connection management, sync, and retries.
+ *   - "legacy" — uses the traditional WebSocket network adapter for
+ *     sync via the classic automerge sync server.
  */
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig,
-  sub: boolean = false
+  protocol: SyncProtocol = "subduction"
 ): Promise<Repo> {
   const RepoClass = await getRepoClass();
 
@@ -108,7 +108,7 @@ export async function createRepo(
 
   const storage = new NodeFSStorageAdapter(automergeDir);
 
-  if (sub) {
+  if (protocol === "subduction") {
     const endpoints: string[] = [];
     if (config.sync_enabled && config.sync_server) {
       endpoints.push(config.sync_server);
@@ -120,7 +120,7 @@ export async function createRepo(
     });
   }
 
-  // Default: WebSocket sync adapter
+  // Legacy: classic WebSocket sync adapter.
   const repoConfig: RepoConfig = { storage };
 
   if (config.sync_enabled && config.sync_server) {

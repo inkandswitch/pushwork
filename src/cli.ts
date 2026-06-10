@@ -75,23 +75,24 @@ program
   )
   .option(
     "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
+    "Custom sync server URL; storage ID only used with --legacy"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .action(async (path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
+      opts.syncServer,
+      opts.legacy
     );
-    await init(path, { syncServer, syncServerStorageId, sub: opts.sub });
+    await init(path, { syncServer, syncServerStorageId, legacy: opts.legacy });
   });
 
 // Track command (set root directory URL without full initialization)
 const trackAction = async (
   url: string,
   path: string,
-  opts: { force: boolean; sub: boolean }
+  opts: { force: boolean; legacy: boolean }
 ) => {
-  await root(url, path, { force: opts.force, sub: opts.sub });
+  await root(url, path, { force: opts.force, legacy: opts.legacy });
 };
 
 program
@@ -107,7 +108,7 @@ program
     "."
   )
   .option("-f, --force", "Overwrite existing pushwork setup", false)
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .action(async (url, path, opts) => {
     await trackAction(url, path, opts);
   });
@@ -118,8 +119,8 @@ program
   .argument("<url>")
   .argument("[path]", "", ".")
   .option("-f, --force", "", false)
-  .option("--sub", "", false)
-  .action(async (url: string, path: string, opts: { force: boolean; sub: boolean }) => {
+  .option("--legacy", "", false)
+  .action(async (url: string, path: string, opts: { force: boolean; legacy: boolean }) => {
     await trackAction(url, path, opts);
   });
 
@@ -135,20 +136,21 @@ program
   .option("-f, --force", "Overwrite existing directory", false)
   .option(
     "--sync-server <url> <storage-id...>",
-    "Custom sync server URL and storage ID"
+    "Custom sync server URL; storage ID only used with --legacy"
   )
-  .option("--sub", "Use Subduction sync backend", false)
+  .option("--legacy", "Use legacy WebSocket sync backend", false)
   .option("-v, --verbose", "Verbose output", false)
   .action(async (url, path, opts) => {
     const [syncServer, syncServerStorageId] = validateSyncServer(
-      opts.syncServer
+      opts.syncServer,
+      opts.legacy
     );
     await clone(url, path, {
       force: opts.force,
       verbose: opts.verbose,
       syncServer,
       syncServerStorageId,
-      sub: opts.sub,
+      legacy: opts.legacy,
     });
   });
 
@@ -431,23 +433,55 @@ compdef _pushwork pushwork
   console.log(completionScript);
 });
 
-// Helper to validate and extract sync server options
+// Helper to validate and extract sync server options.
+//
+// The storage ID is a legacy-WebSocket concept (used for getSyncInfo
+// delivery verification). Subduction — the default backend — does not
+// use one, so the accepted shape depends on the selected protocol:
+//
+//   --legacy:             --sync-server <url> <storage-id>   (id required)
+//   default (Subduction): --sync-server <url>                (id rejected)
+//
+// Supplying a storage ID without --legacy is a hard error rather than a
+// silent strip, so users aren't surprised when an id they passed is
+// ignored.
 function validateSyncServer(
-  syncServerOpt: string[] | undefined
+  syncServerOpt: string[] | undefined,
+  legacy: boolean
 ): [string | undefined, StorageId | undefined] {
-  if (!syncServerOpt) {
+  if (!syncServerOpt || syncServerOpt.length === 0) {
     return [undefined, undefined];
   }
 
-  if (syncServerOpt.length < 2) {
+  const [syncServer, syncServerStorageId] = syncServerOpt;
+
+  if (legacy) {
+    if (syncServerOpt.length < 2) {
+      console.error(
+        chalk.red(
+          "Error: --legacy --sync-server requires both a URL and a storage ID"
+        )
+      );
+      process.exit(1);
+    }
+    return [syncServer, syncServerStorageId as StorageId];
+  }
+
+  // Default (Subduction) mode: a storage ID is meaningless here.
+  if (syncServerOpt.length >= 2) {
     console.error(
-      chalk.red("Error: --sync-server requires both URL and storage ID")
+      chalk.red(
+        "Error: a storage ID is only valid with --legacy.\n" +
+          "Subduction (the default backend) does not use one — pass just the URL:\n" +
+          "  pushwork init --sync-server <url>\n" +
+          "or select the legacy backend:\n" +
+          "  pushwork init --legacy --sync-server <url> <storage-id>"
+      )
     );
     process.exit(1);
   }
 
-  const [syncServer, syncServerStorageId] = syncServerOpt;
-  return [syncServer, syncServerStorageId as StorageId];
+  return [syncServer, undefined];
 }
 
 process.on("unhandledRejection", (error) => {

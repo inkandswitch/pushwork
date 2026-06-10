@@ -2,7 +2,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { ConfigManager } from "../../src/core";
-import { DirectoryConfig } from "../../src/types";
+import { CONFIG_VERSION, DirectoryConfig } from "../../src/types";
 
 describe("Sync Flow Integration", () => {
   let tmpDir: string;
@@ -36,7 +36,11 @@ describe("Sync Flow Integration", () => {
       await configManager.save(testConfig);
 
       const loadedConfig = await configManager.load();
-      expect(loadedConfig).toEqual(testConfig);
+      // save() stamps the current schema version (config versioning, v1.4.0).
+      expect(loadedConfig).toEqual({
+        ...testConfig,
+        config_version: CONFIG_VERSION,
+      });
     });
 
     it("should merge global and local configurations", async () => {

@@ -18,10 +18,10 @@ import {
   DirectoryDocument,
   CommandOptions,
 } from "./types";
-import { DEFAULT_SUBDUCTION_SERVER } from "./types/config";
+import { DEFAULT_SUBDUCTION_SERVER, SyncProtocol } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
-import { ConfigManager } from "./core/config";
+import { ConfigManager, resolveProtocol } from "./core/config";
 import { createRepo } from "./utils/repo-factory";
 import { out } from "./utils/output";
 import { waitForSync } from "./utils/network-sync";
@@ -38,46 +38,69 @@ interface CommandContext {
 }
 
 /**
- * Initialize repository directory structure and configuration
- * Shared logic for init and clone commands
+ * Initialize repository directory structure and configuration.
+ * Shared logic for `init` and `clone`.
+ *
+ * `protocol` selects the sync backend:
+ *   - "subduction" (default)
+ *   - "legacy"
  */
 async function initializeRepository(
   resolvedPath: string,
   overrides: Partial<DirectoryConfig>,
-  sub: boolean = false
+  protocol: SyncProtocol = "subduction"
 ): Promise<{ config: DirectoryConfig; repo: Repo; syncEngine: SyncEngine }> {
   // Create .pushwork directory structure
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   await ensureDirectoryExists(syncToolDir);
   await ensureDirectoryExists(path.join(syncToolDir, "automerge"));
 
-  // Persist Subduction mode + server in config so subsequent commands pick
-  // them up. Without persisting sync_server here, `.pushwork/config.json`
-  // would retain the default WebSocket server even in --sub mode, and
-  // `pushwork config` / `status` would misreport the endpoint.
-  if (sub) {
-    const { sync_server_storage_id: _discarded, ...rest } = overrides;
-    overrides = {
-      ...rest,
-      subduction: true,
-      sync_server: rest.sync_server ?? DEFAULT_SUBDUCTION_SERVER,
-    };
+  // Build the overrides that `initializeWithOverrides` will merge over
+  // the protocol-appropriate defaults.
+  const effectiveOverrides: Partial<DirectoryConfig> = { ...overrides, protocol };
+
+  if (protocol === "subduction") {
+    // sync_server_storage_id is meaningless in Subduction mode; don't
+    // carry it through even if the caller passed one.
+    delete effectiveOverrides.sync_server_storage_id;
   }
 
-  // Create configuration with overrides
   const configManager = new ConfigManager(resolvedPath);
-  let config = await configManager.initializeWithOverrides(overrides);
+  const config = await configManager.initializeWithOverrides(effectiveOverrides);
 
-  if (sub && config.sync_server_storage_id !== undefined) {
-    config = { ...config, sync_server_storage_id: undefined };
-    await configManager.save(config);
-  }
-
-  // Create repository and sync engine
-  const repo = await createRepo(resolvedPath, config, sub);
+  const repo = await createRepo(resolvedPath, config, protocol);
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
 
   return { config, repo, syncEngine };
+}
+
+/**
+ * If the local config is v0, migrate it in place and print a
+ * multi-line info banner describing what happened. Called from the
+ * top of write-ish commands (init/clone/track don't need it — they
+ * create fresh configs; but sync/watch/commit do).
+ */
+async function migrateConfigIfNeeded(
+  configManager: ConfigManager
+): Promise<void> {
+  let result: Awaited<ReturnType<typeof configManager.migrateIfNeeded>>;
+  try {
+    result = await configManager.migrateIfNeeded();
+  } catch (error) {
+    // Migration is a convenience — `resolveProtocol` handles v0 configs
+    // transparently in memory on every command, so a failed migration
+    // (disk full, read-only filesystem, permission denied, etc.) is
+    // non-fatal. Warn loudly and carry on with in-memory v0 handling.
+    out.warn(
+      `Config migration failed (continuing with in-memory v0 handling): ${error}`
+    );
+    return;
+  }
+  if (result.migrated) {
+    out.info(`Upgraded ${result.configPath} to version 1`);
+    out.info(`  Detected backend: ${result.protocol}`);
+    out.info(`  Previous config backed up to: ${result.backupPath}`);
+  }
 }
 
 /**
@@ -102,33 +125,25 @@ async function setupCommandContext(
   const configManager = new ConfigManager(resolvedPath);
   let config: DirectoryConfig;
 
+  // Resolve protocol from the raw local config (handles both v0 and v1
+  // shapes). This is the single source of truth for backend selection.
+  const localConfig = await configManager.load();
+  const protocol = resolveProtocol(localConfig);
+
   if (options?.forceDefaults) {
-    // Force mode: use defaults, only preserving backend-selection keys from
-    // local config (root_directory_url, subduction flag, and the sync
-    // endpoint the user originally chose). Everything else (exclude
-    // patterns, artifact dirs, move threshold, etc.) is reset to defaults.
-    const localConfig = await configManager.load();
-    config = configManager.getDefaultDirectoryConfig();
+    // Force mode: start from protocol-appropriate defaults, then
+    // preserve only backend-selection keys (root_directory_url, custom
+    // sync_server/storage_id the user configured). Everything else
+    // (exclude patterns, artifact dirs, move threshold, etc.) is reset.
+    config = configManager.getDefaultDirectoryConfigForProtocol(protocol);
     if (localConfig?.root_directory_url) {
       config.root_directory_url = localConfig.root_directory_url;
     }
-    if (localConfig?.subduction) {
-      config.subduction = localConfig.subduction;
-      config.sync_server = localConfig.sync_server ?? DEFAULT_SUBDUCTION_SERVER;
-      // sync_server_storage_id is meaningless in Subduction mode; drop it
-      // so the in-memory config reflects reality.
-      config.sync_server_storage_id = undefined;
-    } else {
-      // WebSocket mode: preserve the user's custom server + storage id
-      // if they configured one. Without this, `pushwork sync` (default
-      // force mode) would silently reset a custom --sync-server back to
-      // DEFAULT_SYNC_SERVER on every run.
-      if (localConfig?.sync_server) {
-        config.sync_server = localConfig.sync_server;
-      }
-      if (localConfig?.sync_server_storage_id) {
-        config.sync_server_storage_id = localConfig.sync_server_storage_id;
-      }
+    if (localConfig?.sync_server) {
+      config.sync_server = localConfig.sync_server;
+    }
+    if (protocol === "legacy" && localConfig?.sync_server_storage_id) {
+      config.sync_server_storage_id = localConfig.sync_server_storage_id;
     }
   } else {
     config = await configManager.getMerged();
@@ -139,22 +154,20 @@ async function setupCommandContext(
     config = { ...config, sync_enabled: options.syncEnabled };
   }
 
-  const sub = config.subduction ?? false;
-  if (sub) {
-    // Default to the Subduction endpoint only if the user hasn't
-    // configured one. Respect any explicit sync_server value (including
-    // custom Subduction endpoints set via `init --sub --sync-server ...`).
+  // Enforce protocol-consistent in-memory shape.
+  config.protocol = protocol;
+  if (protocol === "subduction") {
+    // Storage-id is irrelevant for Subduction — strip it to keep the
+    // in-memory config honest about what waitForSync will actually use
+    // (head-stability polling, not getSyncInfo verification).
+    config.sync_server_storage_id = undefined;
     if (!config.sync_server) {
       config.sync_server = DEFAULT_SUBDUCTION_SERVER;
     }
-    // sync_server_storage_id is a WebSocket-mode concept; clear it so
-    // the in-memory config reflects what waitForSync actually uses
-    // (head-stability polling, not getSyncInfo verification).
-    config.sync_server_storage_id = undefined;
   }
 
   // Create repo with config
-  const repo = await createRepo(resolvedPath, config, sub);
+  const repo = await createRepo(resolvedPath, config, protocol);
 
   // Create sync engine
   const syncEngine = new SyncEngine(repo, resolvedPath, config);
@@ -224,11 +237,11 @@ export async function init(
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
-  const sub = options.sub ?? false;
+  const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
   out.task(`Initializing`);
-  if (sub) {
-    out.taskLine("Using Subduction sync backend", true);
+  if (protocol === "legacy") {
+    out.taskLine("Using legacy WebSocket sync backend", true);
   }
 
   await ensureDirectoryExists(resolvedPath);
@@ -242,10 +255,14 @@ export async function init(
 
   // Initialize repository with optional CLI overrides
   out.update("Setting up repository");
-  const { repo, syncEngine, config } = await initializeRepository(resolvedPath, {
-    sync_server: options.syncServer,
-    sync_server_storage_id: options.syncServerStorageId,
-  }, sub);
+  const { repo, syncEngine, config } = await initializeRepository(
+    resolvedPath,
+    {
+      sync_server: options.syncServer,
+      sync_server_storage_id: options.syncServerStorageId,
+    },
+    protocol
+  );
 
   // Create new root directory document
   out.update("Creating root directory");
@@ -264,7 +281,7 @@ export async function init(
   // Wait for root document to sync to server if sync is enabled.
   // With Subduction, we skip StorageId-based sync verification —
   // the SubductionSource handles sync internally.
-  if (config.sync_enabled && !sub) {
+  if (config.sync_enabled && protocol === "legacy") {
     if (config.sync_server_storage_id) {
       out.update("Syncing to server");
       const { failed } = await waitForSync([rootHandle], config.sync_server_storage_id);
@@ -273,8 +290,8 @@ export async function init(
         // Continue anyway - the document is created locally and will sync later
       }
     } else {
-      // WebSocket mode without a storage id can't verify delivery via
-      // getSyncInfo. Warn loudly so users don't silently end up with
+      // Legacy WebSocket mode without a storage id can't verify delivery
+      // via getSyncInfo. Warn loudly so users don't silently end up with
       // data that never reached the server.
       out.taskLine(
         "Warning: sync_server_storage_id is not set; skipping post-init sync verification",
@@ -285,7 +302,7 @@ export async function init(
 
   // Run initial sync to capture existing files
   out.update("Running initial sync");
-  const result = await syncEngine.sync({ sub });
+  const result = await syncEngine.sync({ protocol });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -314,13 +331,17 @@ export async function sync(
       : "Syncing"
   );
 
+  // Opportunistically migrate v0 configs on the most common
+  // command. Prints a banner if anything happened.
+  const resolvedPath = path.resolve(targetPath);
+  await migrateConfigIfNeeded(new ConfigManager(resolvedPath));
+
   const { repo, syncEngine, config } = await setupCommandContext(targetPath, {
     forceDefaults: !options.gentle,
   });
 
-  const sub = config.subduction ?? false;
-  if (sub) {
-    out.taskLine("Using Subduction sync backend (from config)", true);
+  if (config.protocol === "legacy") {
+    out.taskLine("Using legacy WebSocket sync backend (from config)", true);
   }
 
   if (options.nuclear) {
@@ -373,7 +394,7 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
-    const result = await syncEngine.sync({ sub });
+    const result = await syncEngine.sync({ protocol: config.protocol });
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo);
@@ -553,7 +574,7 @@ export async function status(
   statusInfo["Files"] = syncStatus.snapshot
     ? `${fileCount} tracked`
     : undefined;
-  statusInfo["Backend"] = config?.subduction ? "subduction" : "websocket";
+  statusInfo["Backend"] = config?.protocol ?? "subduction";
   statusInfo["Sync"] = config?.sync_server;
 
   // Add more detailed info in verbose mode
@@ -681,11 +702,11 @@ export async function clone(
 
   const resolvedPath = path.resolve(targetPath);
 
-  const sub = options.sub ?? false;
+  const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
   out.task(`Cloning ${rootUrl}`);
-  if (sub) {
-    out.taskLine("Using Subduction sync backend", true);
+  if (protocol === "legacy") {
+    out.taskLine("Using legacy WebSocket sync backend", true);
   }
 
   // Check if directory exists and handle --force
@@ -717,13 +738,13 @@ export async function clone(
       sync_server: options.syncServer,
       sync_server_storage_id: options.syncServerStorageId,
     },
-    sub
+    protocol
   );
 
   // Connect to existing root directory and download files
   out.update("Downloading files");
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
-  const result = await syncEngine.sync({ sub });
+  const result = await syncEngine.sync({ protocol });
 
   out.update("Writing to disk");
   await safeRepoShutdown(repo);
@@ -733,7 +754,7 @@ export async function clone(
   out.obj({
     Path: resolvedPath,
     Files: `${result.filesChanged} downloaded`,
-    Backend: config.subduction ? "subduction" : "websocket",
+    Backend: config.protocol ?? "subduction",
     Sync: config.sync_server,
   });
   out.successBlock("CLONED", rootUrl);
@@ -810,6 +831,9 @@ export async function commit(
   _options: CommandOptions = {}
 ): Promise<void> {
   out.task("Committing local changes");
+
+  const resolvedCommitPath = path.resolve(targetPath);
+  await migrateConfigIfNeeded(new ConfigManager(resolvedCommitPath));
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
 
@@ -917,10 +941,17 @@ export async function config(
       out.exit(1);
     }
   } else {
-    // Show basic config info
+    // Show basic config info. For the schema version display we read
+    // the *raw* local config so users can see whether their on-disk
+    // config has been migrated yet. `config.config_version` comes from
+    // `getMerged()`, which layers defaults (always v1) over the local
+    // file — so it would always report "1" even for an unmigrated v0
+    // file on disk.
+    const rawLocal = await configManager.load();
     out.infoBlock("CONFIGURATION");
     out.obj({
-      Backend: config.subduction ? "subduction" : "websocket",
+      "Config version": rawLocal?.config_version ?? "0 (pre-migration)",
+      Backend: config.protocol ?? "subduction",
       "Sync server": config.sync_server || "default",
       "Sync enabled": config.sync_enabled ? "yes" : "no",
       Exclusions: config.exclude_patterns?.length,
@@ -940,11 +971,14 @@ export async function watch(
   const script = options.script || "pnpm build";
   const watchDir = options.watchDir || "src"; // Default to watching 'src' directory
   const verbose = options.verbose || false;
+
+  // Migrate v0 configs if present.
+  const resolvedTargetPath = path.resolve(targetPath);
+  await migrateConfigIfNeeded(new ConfigManager(resolvedTargetPath));
+
   const { repo, syncEngine, config, workingDir } = await setupCommandContext(
     targetPath,
   );
-
-  const sub = config.subduction ?? false;
 
   const absoluteWatchDir = path.resolve(workingDir, watchDir);
 
@@ -960,8 +994,8 @@ export async function watch(
     "WATCHING",
     `${chalk.underline(formatRelativePath(watchDir))} for changes...`
   );
-  if (sub) {
-    out.info("Using Subduction sync backend (from config)");
+  if (config.protocol === "legacy") {
+    out.info("Using legacy WebSocket sync backend (from config)");
   }
   out.info(`Build script: ${script}`);
   out.info(`Working directory: ${workingDir}`);
@@ -1001,7 +1035,7 @@ export async function watch(
 
       // Run sync
       out.task("Syncing");
-      const result = await syncEngine.sync({ sub });
+      const result = await syncEngine.sync({ protocol: config.protocol });
 
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
@@ -1130,7 +1164,7 @@ async function runScript(
 export async function root(
   rootUrl: string,
   targetPath: string = ".",
-  options: { force?: boolean; sub?: boolean } = {}
+  options: { force?: boolean; legacy?: boolean } = {}
 ): Promise<void> {
   if (!rootUrl.startsWith("automerge:")) {
     out.error(
@@ -1142,7 +1176,7 @@ export async function root(
 
   const resolvedPath = path.resolve(targetPath);
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
-  const sub = options.sub ?? false;
+  const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
@@ -1165,26 +1199,16 @@ export async function root(
   };
   await fs.writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf-8");
 
-  // Ensure config exists. In Subduction mode, persist the backend choice
-  // and the correct server so subsequent `sync` runs use the right endpoint.
+  // Persist the backend choice so subsequent `sync` runs use the right
+  // endpoint. initializeWithOverrides builds protocol-appropriate
+  // defaults, so legacy gets storage_id + classic URL, Subduction gets
+  // the Subduction URL and nothing else.
   const configManager = new ConfigManager(resolvedPath);
-  if (sub) {
-    let cfg = await configManager.initializeWithOverrides({
-      subduction: true,
-      sync_server: DEFAULT_SUBDUCTION_SERVER,
-    });
-    // Strip dead-baggage storage_id that getDefaultDirectoryConfig seeded.
-    if (cfg.sync_server_storage_id !== undefined) {
-      cfg = { ...cfg, sync_server_storage_id: undefined };
-      await configManager.save(cfg);
-    }
-  } else {
-    await configManager.initializeWithOverrides({});
-  }
+  await configManager.initializeWithOverrides({ protocol });
 
   out.successBlock("ROOT SET", rootUrl);
-  if (sub) {
-    out.info("Using Subduction sync backend");
+  if (protocol === "legacy") {
+    out.info("Using legacy WebSocket sync backend");
   }
   process.exit();
 }
