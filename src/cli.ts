@@ -237,7 +237,7 @@ program
 
 // Log command
 program
-  .command("log")
+  .command("log", { hidden: true })
   .summary("Show sync history (experimental)")
   .argument(
     "[path]",
@@ -257,7 +257,7 @@ program
 
 // Checkout command
 program
-  .command("checkout")
+  .command("checkout", { hidden: true })
   .summary("Restore to previous sync (experimental)")
   .argument("<sync-id>", "Sync ID to restore to")
   .argument(

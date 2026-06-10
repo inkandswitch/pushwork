@@ -9,6 +9,7 @@
  * CJS/ESM Automerge dependency graph loads exactly as it would for a consumer.
  */
 
+import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
 
@@ -16,15 +17,26 @@ const ROOT = path.join(__dirname, "../..");
 const DIST_INDEX = path.join(ROOT, "dist/index.js");
 const DIST_CLI = path.join(ROOT, "dist/cli.js");
 
-function node(args: string[]): { stdout: string; status: number } {
+function node(
+  args: string[],
+  opts: { timeoutMs?: number } = {}
+): { stdout: string; status: number; timedOut: boolean } {
   try {
     const stdout = execFileSync("node", args, {
       encoding: "utf8",
       env: { ...process.env, NO_COLOR: "1" },
+      timeout: opts.timeoutMs,
     });
-    return { stdout, status: 0 };
+    return { stdout, status: 0, timedOut: false };
   } catch (err: any) {
-    return { stdout: String(err.stdout ?? ""), status: err.status ?? 1 };
+    // A timeout (the hang regression) surfaces as killed/SIGTERM with no
+    // numeric exit status — distinguish it from a clean non-zero exit.
+    const timedOut = err.killed === true || err.signal === "SIGTERM";
+    return {
+      stdout: String(err.stdout ?? "") + String(err.stderr ?? ""),
+      status: typeof err.status === "number" ? err.status : 1,
+      timedOut,
+    };
   }
 }
 
@@ -93,5 +105,32 @@ describe("public library API", () => {
     const { stdout, status } = node([DIST_CLI, "--version"]);
     expect(status).toBe(0);
     expect(stdout).toMatch(/pushwork \d+\.\d+\.\d+/);
+  });
+});
+
+describe("experimental command stubs", () => {
+  beforeAll(() => {
+    execFileSync("pnpm", ["build"], { cwd: ROOT, stdio: "pipe" });
+  });
+
+  it("checkout exits non-zero WITHOUT hanging (must not open a repo)", () => {
+    const { stdout, status, timedOut } = node(
+      [DIST_CLI, "checkout", "some-sync-id", os.tmpdir()],
+      { timeoutMs: 20000 }
+    );
+    expect(timedOut).toBe(false); // regression: it used to hang forever
+    expect(status).not.toBe(0); // exits non-zero so scripts can detect it
+    expect(stdout).toContain("NOT IMPLEMENTED");
+  });
+
+  it("hides experimental stubs (checkout, log) from --help", () => {
+    const { stdout, status } = node([DIST_CLI, "--help"]);
+    expect(status).toBe(0);
+    // Hidden commands must not appear in the command list...
+    expect(stdout).not.toMatch(/^\s*checkout\b/m);
+    expect(stdout).not.toMatch(/^\s*log\b/m);
+    // ...while real commands still do.
+    expect(stdout).toMatch(/^\s*sync\b/m);
+    expect(stdout).toMatch(/^\s*clone\b/m);
   });
 });

@@ -671,14 +671,21 @@ export async function checkout(
   targetPath = ".",
   _options: CheckoutOptions
 ): Promise<void> {
-  const { workingDir } = await setupCommandContext(targetPath);
+  // Experimental / not yet implemented.
+  //
+  // Importantly, do NOT call setupCommandContext here: it constructs a
+  // networked Automerge Repo, and with no matching shutdown the open
+  // connection keeps the Node process alive forever (the command appeared to
+  // hang). A stub must not open a repo. Just resolve the path for display and
+  // exit non-zero so scripts can detect the command isn't usable.
+  const workingDir = path.resolve(targetPath);
 
-  // TODO: Implement checkout functionality
-  out.warnBlock("NOT IMPLEMENTED", "Checkout not yet implemented");
+  out.warnBlock("NOT IMPLEMENTED", "Checkout is not yet implemented");
   out.obj({
     "Sync ID": syncId,
     Path: workingDir,
   });
+  out.exit(1);
 }
 
 /**
