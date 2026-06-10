@@ -106,7 +106,7 @@ Configuration is stored in `.pushwork/config.json`:
   "protocol": "subduction",
   "sync_server": "wss://subduction.sync.inkandswitch.com",
   "sync_enabled": true,
-  "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
+  "exclude_patterns": [".git", "node_modules", ".pnpm-store", "target", "__pycache__", ".venv", "*.tmp", ".pushwork"],
   "artifact_directories": ["dist"],
   "sync": {
     "move_detection_threshold": 0.7
@@ -123,13 +123,28 @@ A legacy-backend config looks like:
   "sync_server": "wss://sync3.automerge.org",
   "sync_server_storage_id": "3760df37-a4c6-4f66-9ecd-732039a9385d",
   "sync_enabled": true,
-  "exclude_patterns": [".git", "node_modules", "*.tmp", ".pushwork"],
+  "exclude_patterns": [".git", "node_modules", ".pnpm-store", "target", "__pycache__", ".venv", "*.tmp", ".pushwork"],
   "artifact_directories": ["dist"],
   "sync": {
     "move_detection_threshold": 0.7
   }
 }
 ```
+
+The `exclude_patterns` shown above are abbreviated. By default pushwork
+excludes version-control metadata and the large machine-generated
+directories of the common ecosystems — dependency stores (`node_modules`,
+`.pnpm-store`, `.yarn/cache`), build output (`target`, `dist-newstyle`,
+`_build`, `result`), and tool caches (`__pycache__`, `.venv`,
+`.pytest_cache`, `.gradle`, `.terraform`, …). Patterns use full
+`.gitignore` semantics, so a bare name like `target` matches at any depth.
+Set your own `exclude_patterns` to override the list entirely.
+
+> [!NOTE]
+> `pushwork sync` runs in _force mode_: it resets `exclude_patterns` (and
+> other non-backend settings) to the built-in defaults each run. To sync
+> with a customized exclude list, use `pushwork sync --gentle`, which
+> honors your `.pushwork/config.json`.
 
 ### Sync Backends
 

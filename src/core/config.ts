@@ -4,6 +4,8 @@ import * as os from "os";
 import {
   GlobalConfig,
   DirectoryConfig,
+  DEFAULT_ARTIFACT_DIRECTORIES,
+  DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_SYNC_SERVER,
   DEFAULT_SYNC_SERVER_STORAGE_ID,
   DEFAULT_SUBDUCTION_SERVER,
@@ -193,14 +195,8 @@ export class ConfigManager {
     // undefined; the per-directory config (or `resolveProtocol`'s
     // defaults) decides the endpoint. We seed the other fields.
     return {
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".DS_Store",
-        ".pushwork",
-      ],
-      artifact_directories: ["dist"],
+      exclude_patterns: [...DEFAULT_EXCLUDE_PATTERNS],
+      artifact_directories: [...DEFAULT_ARTIFACT_DIRECTORIES],
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -230,14 +226,8 @@ export class ConfigManager {
       config_version: CONFIG_VERSION,
       protocol,
       sync_enabled: true,
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".pushwork",
-        ".DS_Store",
-      ],
-      artifact_directories: ["dist"],
+      exclude_patterns: [...DEFAULT_EXCLUDE_PATTERNS],
+      artifact_directories: [...DEFAULT_ARTIFACT_DIRECTORIES],
       sync: {
         move_detection_threshold: 0.7,
       },

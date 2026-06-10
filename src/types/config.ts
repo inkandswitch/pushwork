@@ -9,6 +9,98 @@ export const DEFAULT_SYNC_SERVER_STORAGE_ID =
 export const DEFAULT_SUBDUCTION_SERVER = "wss://subduction.sync.inkandswitch.com";
 
 /**
+ * Default gitignore-style patterns excluded from sync.
+ *
+ * These are directories and files that are machine-generated,
+ * downloadable, or otherwise not worth syncing as CRDT documents —
+ * dependency stores, build output, and tool caches across the common
+ * language ecosystems. Each one can be hundreds of MB to multiple GB
+ * (pnpm's content-addressed `.pnpm-store`, Rust's `target`, a Python
+ * `.venv`, …), so syncing them is both pointless and a severe
+ * performance hazard: every file becomes an Automerge document.
+ *
+ * Matched with full `.gitignore` semantics (via the `ignore` library),
+ * so a bare name like `target` matches at any depth. Users can override
+ * the whole list per-directory via `exclude_patterns` in
+ * `.pushwork/config.json` (note: `sync` runs in force mode and resets to
+ * these defaults; use `sync --gentle` to honor a customized list).
+ */
+export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
+  // Version control
+  ".git",
+  ".hg",
+  ".jj",
+  ".svn",
+
+  // OS & editor cruft
+  "*.swp",
+  "*.tmp",
+  "*~",
+  ".DS_Store",
+  "Thumbs.db",
+
+  // pushwork's own metadata
+  ".pushwork",
+
+  // Node / JavaScript dependencies & caches
+  ".npm",
+  ".parcel-cache",
+  ".pnpm-store",
+  ".turbo",
+  ".yarn/cache",
+  ".yarn/unplugged",
+  "bower_components",
+  "node_modules",
+
+  // JS framework build caches
+  ".astro",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+
+  // Python
+  "*.egg-info",
+  "*.pyc",
+  ".ipynb_checkpoints",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".venv",
+  "__pycache__",
+  "venv",
+
+  // Rust & JVM (Maven `target`, Gradle `.gradle`)
+  ".gradle",
+  "target",
+
+  // Elixir / Erlang
+  "_build",
+
+  // Haskell
+  ".stack-work",
+  "dist-newstyle",
+
+  // Nix build results
+  "result",
+  "result-*",
+
+  // Misc tool caches
+  ".nyc_output",
+  ".terraform",
+];
+
+/**
+ * Default artifact directories.
+ *
+ * Unlike `exclude_patterns`, artifact directories *are* synced — but
+ * their files are treated as immutable snapshots (stored as RawString
+ * rather than collaborative text) and replaced wholesale rather than
+ * diffed. See CLAUDE.md "Performance pitfalls".
+ */
+export const DEFAULT_ARTIFACT_DIRECTORIES: readonly string[] = ["dist"];
+
+/**
  * Current schema version for persisted `.pushwork/config.json`.
  *
  * Bumped whenever the on-disk format changes in a way that needs

@@ -107,7 +107,7 @@ Key fields:
 - `sync_enabled: boolean` - Whether to do network sync
 - `sync_server: string` - WebSocket relay URL (default: `wss://sync3.automerge.org`)
 - `sync_server_storage_id: StorageId` - Server identity for sync verification
-- `exclude_patterns: string[]` - Gitignore-style patterns (default: `.git`, `node_modules`, `*.tmp`, `.pushwork`, `.DS_Store`)
+- `exclude_patterns: string[]` - Gitignore-style patterns. Defaults live in `DEFAULT_EXCLUDE_PATTERNS` (`src/types/config.ts`) and cover VCS metadata plus the large machine-generated dirs of common ecosystems (`node_modules`, `.pnpm-store`, `.yarn/cache`, `target`, `__pycache__`, `.venv`, `dist-newstyle`, `_build`, `result`, `.gradle`, `.terraform`, …). Both `getDefaultGlobalConfig` and `getDefaultDirectoryConfigForProtocol` spread this one constant (and `DEFAULT_ARTIFACT_DIRECTORIES`). NOTE: `sync` runs force-defaults, so it **resets `exclude_patterns` to these defaults** every run — a user's custom excludes only apply under `sync --gentle`. So expanding the defaults is what actually makes a new exclusion take effect for plain `sync`.
 - `sync.move_detection_threshold: number` - Similarity threshold for move detection (0-1, default 0.7)
 
 ## Network sync details
