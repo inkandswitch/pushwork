@@ -231,6 +231,52 @@ describe("backend selection integration (default: Subduction, --legacy opts out)
     }, 30000);
   });
 
+  describe("Automerge URL validation", () => {
+    it("rejects clone of a malformed Automerge URL (not just the prefix)", async () => {
+      // All fail at URL parsing before any fs/network work, so no empty
+      // clone directory is ever created.
+      for (const bad of [
+        "automerge:",
+        "automerge:garbage",
+        "automerge:!!!notbase58!!!",
+        "https://example.com/doc",
+      ]) {
+        const { code } = await pushworkExpectFailure([
+          "clone",
+          bad,
+          path.join(tmpDir, "clone-target"),
+        ]);
+        expect(code).not.toBe(0);
+      }
+    }, 30000);
+
+    it("rejects track of a malformed Automerge URL", async () => {
+      const { code, stderr } = await pushworkExpectFailure([
+        "track",
+        "automerge:garbage",
+        path.join(tmpDir, "track-target"),
+      ]);
+      expect(code).not.toBe(0);
+      expect(stderr).toMatch(/Invalid Automerge URL/i);
+    }, 30000);
+  });
+
+  describe("conflicting sync modes (W11)", () => {
+    it("rejects --gentle together with --nuclear", async () => {
+      // The conflict is detected before any repo/network work, so an
+      // uninitialized dir is fine for this assertion.
+      const { code, stderr } = await pushworkExpectFailure([
+        "sync",
+        tmpDir,
+        "--gentle",
+        "--nuclear",
+        "--dry-run",
+      ]);
+      expect(code).not.toBe(0);
+      expect(stderr).toMatch(/--gentle and --nuclear cannot be used together/i);
+    }, 30000);
+  });
+
   describe("url / status / diff", () => {
     it("url prints a valid automerge URL", async () => {
       await pushwork(["init", tmpDir]);

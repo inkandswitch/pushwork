@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
-import { Repo, AutomergeUrl } from "@automerge/automerge-repo";
+import { Repo, AutomergeUrl, isValidAutomergeUrl } from "@automerge/automerge-repo";
 import * as diffLib from "diff";
 import { spawn } from "child_process";
 import {
@@ -323,6 +323,17 @@ export async function sync(
   targetPath = ".",
   options: SyncOptions
 ): Promise<void> {
+  // Reject contradictory modes rather than silently letting one win.
+  if (options.gentle && options.nuclear) {
+    out.error(
+      "Conflicting options: --gentle and --nuclear cannot be used together.\n" +
+      "  --gentle  keeps local config and only syncs changed files\n" +
+      "  --nuclear recreates all Automerge documents from scratch\n" +
+      "Pick one."
+    );
+    out.exit(1);
+  }
+
   out.task(
     options.nuclear
       ? "Nuclear syncing"
@@ -696,11 +707,14 @@ export async function clone(
   targetPath: string,
   options: CloneOptions
 ): Promise<void> {
-  // Validate that rootUrl is actually an Automerge URL
-  if (!rootUrl.startsWith("automerge:")) {
+  // Validate that rootUrl is a well-formed Automerge document URL — not just
+  // the "automerge:" prefix. This parses the document id (and any heads) so a
+  // typo'd or garbage URL fails fast here instead of silently producing an
+  // empty clone.
+  if (!isValidAutomergeUrl(rootUrl)) {
     out.error(
       `Invalid Automerge URL: ${rootUrl}\n` +
-      `Expected format: automerge:XXXXX\n` +
+      `Expected a document URL like automerge:abc..789\n` +
       `Usage: pushwork clone <automerge-url> <path>`
     );
     out.exit(1);
@@ -1173,10 +1187,12 @@ export async function root(
   targetPath: string = ".",
   options: { force?: boolean; legacy?: boolean } = {}
 ): Promise<void> {
-  if (!rootUrl.startsWith("automerge:")) {
+  // Reject anything that isn't a well-formed Automerge document URL (parses
+  // the document id + heads), not merely the "automerge:" prefix.
+  if (!isValidAutomergeUrl(rootUrl)) {
     out.error(
       `Invalid Automerge URL: ${rootUrl}\n` +
-      `Expected format: automerge:XXXXX`
+      `Expected a document URL like automerge:abc...789`
     );
     out.exit(1);
   }

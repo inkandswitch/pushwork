@@ -524,6 +524,26 @@ program
 // rejection handler and parsing argv are side effects that must not fire on
 // `require("pushwork")`.
 if (require.main === module) {
+  // automerge-repo's leading-edge throttle occasionally calls setTimeout with
+  // a negative delay, which makes Node emit a benign "TimeoutNegativeWarning"
+  // (it just clamps the delay to 1ms). Filter out only that warning while
+  // preserving every other Node warning. (Library imports are unaffected —
+  // this whole block is guarded by require.main === module.)
+  const priorWarningListeners = process.listeners("warning");
+  process.removeAllListeners("warning");
+  process.on("warning", (warning) => {
+    if (warning.name === "TimeoutNegativeWarning") return;
+    if (priorWarningListeners.length > 0) {
+      for (const listener of priorWarningListeners) {
+        (listener as (w: Error) => void).call(process, warning);
+      }
+    } else {
+      process.stderr.write(
+        `(node:${process.pid}) ${warning.name}: ${warning.message}\n`
+      );
+    }
+  });
+
   process.on("unhandledRejection", (error) => {
     console.log(chalk.bgRed.white(" ERROR "));
     if (error instanceof Error && error.stack) {
