@@ -484,16 +484,6 @@ function validateSyncServer(
   return [syncServer, undefined];
 }
 
-process.on("unhandledRejection", (error) => {
-  console.log(chalk.bgRed.white(" ERROR "));
-  if (error instanceof Error && error.stack) {
-    console.log(chalk.red(error.stack));
-  } else {
-    console.error(chalk.red(error));
-  }
-  process.exit(1);
-});
-
 // Configure help colors using Commander v13's built-in color support
 program
   .configureHelp({
@@ -529,4 +519,20 @@ program
     )
   );
 
-program.parseAsync();
+// Only run the CLI when this module is executed directly (i.e. as the
+// `pushwork` bin), never when imported as a library. Registering the global
+// rejection handler and parsing argv are side effects that must not fire on
+// `require("pushwork")`.
+if (require.main === module) {
+  process.on("unhandledRejection", (error) => {
+    console.log(chalk.bgRed.white(" ERROR "));
+    if (error instanceof Error && error.stack) {
+      console.log(chalk.red(error.stack));
+    } else {
+      console.error(chalk.red(error));
+    }
+    process.exit(1);
+  });
+
+  program.parseAsync();
+}
