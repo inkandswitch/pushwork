@@ -2,7 +2,7 @@ import { type Repo, type RepoConfig, type NetworkAdapterInterface } from "@autom
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { DirectoryConfig } from "../types";
+import { DirectoryConfig, SyncProtocol } from "../types";
 
 /**
  * Perform a real ESM dynamic import that tsc won't rewrite to require().
@@ -34,6 +34,7 @@ const dynamicImport = new Function("specifier", "return import(specifier)") as (
  * so they share the same module graph as the Repo's internal /slim imports.
  */
 let cachedRepoClass: typeof Repo | undefined;
+let cachedSetSubductionLogLevel: ((level: string) => void) | undefined;
 
 async function getRepoClass(): Promise<typeof Repo> {
   if (cachedRepoClass) return cachedRepoClass;
@@ -48,7 +49,44 @@ async function getRepoClass(): Promise<typeof Repo> {
   const repoMod = await dynamicImport("@automerge/automerge-repo");
   await repoMod.initSubduction();
   cachedRepoClass = repoMod.Repo as typeof Repo;
+
+  // Grab Subduction's log-level control from the SAME `/slim` entry the Repo
+  // uses (Wasm is now initialized), so we can quiet it synchronously later.
+  // Cached here so createRepo doesn't import on every call.
+  try {
+    const slim = await dynamicImport("@automerge/automerge-subduction/slim");
+    if (typeof slim.setSubductionLogLevel === "function") {
+      cachedSetSubductionLogLevel = slim.setSubductionLogLevel;
+    }
+  } catch {
+    // Best-effort: logging config must never block repo construction.
+  }
+
   return cachedRepoClass;
+}
+
+/**
+ * Lower Subduction's Rust `tracing` level so WARN-level transport chatter
+ * (e.g. "connection closed, removing conn ...") doesn't leak to the user's
+ * terminal during normal sync.
+ *
+ * Synchronous: the `/slim` module (the same one the Repo uses, so the same
+ * Wasm instance) is preloaded in getRepoClass. Must be called AFTER `new Repo()`
+ * because the SubductionSource constructor sets the level to "warn" itself.
+ * Opt back into verbose Subduction logging with `DEBUG=...subduction...` or
+ * `globalThis.__SUBDUCTION_DEBUG`.
+ */
+function setQuietSubductionLogs(): void {
+  if (!cachedSetSubductionLogLevel) return;
+  const debugRequested =
+    !!(globalThis as { __SUBDUCTION_DEBUG?: unknown }).__SUBDUCTION_DEBUG ||
+    /subduction/i.test(process.env.DEBUG ?? "");
+  if (debugRequested) return;
+  try {
+    cachedSetSubductionLogLevel("error");
+  } catch {
+    // Best-effort.
+  }
 }
 
 /**
@@ -79,18 +117,18 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
 /**
  * Create an Automerge repository with configuration-based setup.
  *
- * When `sub` is true, uses the Subduction sync backend built into
- * automerge-repo. The Repo manages its own SubductionSource internally —
- * we just pass `subductionWebsocketEndpoints` and the Repo handles
- * connection management, sync, and retries.
- *
- * When `sub` is false (default), uses the traditional WebSocket network
- * adapter for sync via the automerge sync server.
+ * `protocol` selects the sync backend:
+ *   - "subduction" (default) — uses the Subduction sync backend built
+ *     into automerge-repo. The Repo manages its own SubductionSource
+ *     internally; we just pass `subductionWebsocketEndpoints` and the
+ *     Repo handles connection management, sync, and retries.
+ *   - "legacy" — uses the traditional WebSocket network adapter for
+ *     sync via the classic automerge sync server.
  */
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig,
-  sub: boolean = false
+  protocol: SyncProtocol = "subduction"
 ): Promise<Repo> {
   const RepoClass = await getRepoClass();
 
@@ -108,19 +146,21 @@ export async function createRepo(
 
   const storage = new NodeFSStorageAdapter(automergeDir);
 
-  if (sub) {
+  if (protocol === "subduction") {
     const endpoints: string[] = [];
     if (config.sync_enabled && config.sync_server) {
       endpoints.push(config.sync_server);
     }
 
-    return new RepoClass({
+    const repo = new RepoClass({
       storage,
       subductionWebsocketEndpoints: endpoints,
     });
+    setQuietSubductionLogs();
+    return repo;
   }
 
-  // Default: WebSocket sync adapter
+  // Legacy: classic WebSocket sync adapter.
   const repoConfig: RepoConfig = { storage };
 
   if (config.sync_enabled && config.sync_server) {
@@ -138,5 +178,9 @@ export async function createRepo(
     repoConfig.network = [networkAdapter];
   }
 
-  return new RepoClass(repoConfig);
+  // The Repo constructor always creates a SubductionSource internally (even
+  // in legacy mode), so quiet its logging here too.
+  const repo = new RepoClass(repoConfig);
+  setQuietSubductionLogs();
+  return repo;
 }

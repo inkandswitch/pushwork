@@ -9,6 +9,29 @@ export const DEFAULT_SYNC_SERVER_STORAGE_ID =
 export const DEFAULT_SUBDUCTION_SERVER = "wss://subduction.sync.inkandswitch.com";
 
 /**
+ * Current schema version for persisted `.pushwork/config.json`.
+ *
+ * Bumped whenever the on-disk format changes in a way that needs
+ * explicit migration. The migration logic lives in `core/config.ts`
+ * (`resolveProtocol`, `migrateIfNeeded`). See CLAUDE.md for history.
+ *
+ * Versions:
+ *   - v0 (absent field): pre-Subduction-default configs. Had a
+ *     `subduction?: boolean` field (opt-in flag). Absence of that
+ *     field meant legacy WebSocket sync.
+ *   - v1: Subduction is the default backend. The field is now
+ *     `protocol: "subduction" | "legacy"`, always written explicitly.
+ *     `--legacy` opts into classic WebSocket sync.
+ */
+export const CONFIG_VERSION = 1;
+
+/**
+ * Sync protocol identifier. Extensible: future protocols can be added
+ * as additional string literals (e.g. `"bluesky"`).
+ */
+export type SyncProtocol = "subduction" | "legacy";
+
+/**
  * Global configuration options
  */
 export interface GlobalConfig {
@@ -25,7 +48,23 @@ export interface GlobalConfig {
  * Per-directory configuration
  */
 export interface DirectoryConfig extends GlobalConfig {
+  /**
+   * Config schema version. Absent ⇒ v0 (pre-flip). Written explicitly
+   * as `CONFIG_VERSION` on any config this pushwork creates.
+   */
+  config_version?: number;
   root_directory_url?: string;
+  /**
+   * Which sync backend this directory uses. Always present on v1
+   * configs. On v0 configs this is absent — use `resolveProtocol()`
+   * (which also inspects the legacy `subduction` field) to derive it.
+   */
+  protocol?: SyncProtocol;
+  /**
+   * @deprecated v0-only field. On v1 configs, use `protocol` instead.
+   * Kept in the type only to let `resolveProtocol()` inspect v0
+   * configs during migration.
+   */
   subduction?: boolean;
   sync_enabled: boolean;
 }
@@ -44,7 +83,11 @@ export interface CloneOptions extends CommandOptions {
   force?: boolean; // Overwrite existing directory
   syncServer?: string; // Custom sync server URL
   syncServerStorageId?: StorageId; // Custom sync server storage ID
-  sub?: boolean;
+  /**
+   * Use the legacy WebSocket sync backend. When absent or false,
+   * Subduction (the default) is used.
+   */
+  legacy?: boolean;
 }
 
 /**
@@ -86,7 +129,11 @@ export interface CheckoutOptions extends CommandOptions {
 export interface InitOptions extends CommandOptions {
   syncServer?: string;
   syncServerStorageId?: StorageId;
-  sub?: boolean;
+  /**
+   * Use the legacy WebSocket sync backend. When absent or false,
+   * Subduction (the default) is used.
+   */
+  legacy?: boolean;
 }
 
 /**

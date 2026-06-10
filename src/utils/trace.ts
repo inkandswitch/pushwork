@@ -45,7 +45,7 @@ export function span<T>(
       const duration = performance.now() - start;
       out.taskLine(`${name} (${formatDuration(duration)})`, true);
       return value;
-    }) as T;
+    });
   }
 
   // Sync case

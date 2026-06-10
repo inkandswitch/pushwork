@@ -5,7 +5,7 @@ import {glob} from "glob"
 import * as mimeTypes from "mime-types"
 import * as ignore from "ignore"
 import {FileSystemEntry, FileType} from "../types"
-import {isEnhancedTextFile} from "./mime-types"
+import {isEnhancedTextFile, isLikelyUtf8Text} from "./mime-types"
 
 /**
  * Check if a path exists
@@ -67,8 +67,9 @@ export async function isTextFile(filePath: string): Promise<boolean> {
 		await handle.read(buffer, 0, buffer.length, 0)
 		await handle.close()
 
-		// Check for null bytes which indicate binary content
-		return !buffer.includes(0)
+		// Treat as text only if the sample is valid UTF-8 (not merely
+		// null-byte-free) — see isLikelyUtf8Text.
+		return isLikelyUtf8Text(buffer)
 	} catch {
 		return false
 	}
@@ -80,14 +81,20 @@ export async function isTextFile(filePath: string): Promise<boolean> {
 export async function readFileContent(
 	filePath: string
 ): Promise<string | Uint8Array> {
-	const isText = await isEnhancedTextFile(filePath)
+	const buffer = await fs.readFile(filePath)
 
-	if (isText) {
-		return await fs.readFile(filePath, "utf8")
-	} else {
-		const buffer = await fs.readFile(filePath)
-		return new Uint8Array(buffer)
+	// Return text only when the file is classified as text AND its bytes
+	// survive a UTF-8 round-trip without loss. This is the safety net that
+	// makes binary corruption unrepresentable: even if classification is
+	// wrong, content that would be mangled by a UTF-8 decode is kept as bytes.
+	if (await isEnhancedTextFile(filePath)) {
+		const text = buffer.toString("utf8")
+		if (Buffer.from(text, "utf8").equals(buffer)) {
+			return text
+		}
 	}
+
+	return new Uint8Array(buffer)
 }
 
 /**
