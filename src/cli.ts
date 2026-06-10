@@ -535,7 +535,7 @@ if (require.main === module) {
     if (warning.name === "TimeoutNegativeWarning") return;
     if (priorWarningListeners.length > 0) {
       for (const listener of priorWarningListeners) {
-        (listener as (w: Error) => void).call(process, warning);
+        (listener).call(process, warning);
       }
     } else {
       process.stderr.write(
@@ -545,14 +545,22 @@ if (require.main === module) {
   });
 
   process.on("unhandledRejection", (error) => {
-    console.log(chalk.bgRed.white(" ERROR "));
-    if (error instanceof Error && error.stack) {
-      console.log(chalk.red(error.stack));
+    // Render errors as a clean, single-line message on stderr. The full
+    // internal stack trace is shown only when DEBUG is set, so ordinary user
+    // errors (e.g. "Directory not initialized") don't look like a crash.
+    console.error(chalk.bgRed.white(" ERROR "));
+    if (error instanceof Error) {
+      console.error(chalk.red(error.message));
+      if (process.env.DEBUG && error.stack) {
+        console.error(chalk.dim(error.stack));
+      }
     } else {
-      console.error(chalk.red(error));
+      console.error(chalk.red(String(error)));
     }
     process.exit(1);
   });
 
-  program.parseAsync();
+  // Errors surface via the unhandledRejection handler above; explicitly mark
+  // the top-level promise as intentionally not awaited.
+  void program.parseAsync();
 }

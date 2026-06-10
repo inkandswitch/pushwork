@@ -24,7 +24,7 @@ export function isContentEqual(
     return content1 === content2;
   } else {
     // Compare Uint8Array using native Buffer.equals() for better performance
-    const buf1 = content1 as Uint8Array;
+    const buf1 = content1;
     const buf2 = content2 as Uint8Array;
 
     if (buf1.length !== buf2.length) return false;

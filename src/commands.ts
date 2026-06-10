@@ -428,8 +428,7 @@ export async function sync(
 
     if (result.success) {
       out.done("Synced");
-      if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-      } else {
+      if (result.filesChanged !== 0 || result.directoriesChanged !== 0) {
         out.successBlock(
           "SYNCED",
           `${result.filesChanged} ${plural("file", result.filesChanged)}`
@@ -1073,7 +1072,7 @@ export async function watch(
         }
         isProcessing = false;
         if (pendingChange) {
-          setImmediate(() => runBuildAndSync());
+          setImmediate(() => void runBuildAndSync());
         }
         return;
       }
@@ -1124,7 +1123,7 @@ export async function watch(
 
       // If changes occurred while we were processing, run again
       if (pendingChange) {
-        setImmediate(() => runBuildAndSync());
+        setImmediate(() => void runBuildAndSync());
       }
     }
   };
@@ -1135,7 +1134,7 @@ export async function watch(
     { recursive: true },
     (_eventType, filename) => {
       if (filename) {
-        runBuildAndSync();
+        void runBuildAndSync();
       }
     }
   );
@@ -1150,8 +1149,8 @@ export async function watch(
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   // Run initial build and sync
   await runBuildAndSync();

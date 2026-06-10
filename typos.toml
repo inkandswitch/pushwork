@@ -1,0 +1,13 @@
+# Configuration for `typos` (https://github.com/crate-ci/typos).
+# Maps "words that look like typos but are correct" to themselves.
+
+[default.extend-words]
+# `.styl` is the Stylus stylesheet file extension (text/stylus MIME type).
+styl = "styl"
+# Test fixture in binary-roundtrip.test.ts: "caf" followed by raw byte 0xE9 is
+# latin-1 "café" (a deliberately non-UTF-8 byte sequence).
+caf = "caf"
+
+[files]
+# Generated lockfiles — package names / hashes are not prose.
+extend-exclude = ["pnpm-lock.yaml", "flake.lock"]

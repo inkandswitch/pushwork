@@ -4,7 +4,7 @@
   inputs = {
     command-utils.url = "git+https://codeberg.org/expede/nix-command-utils";
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
   };
 
   outputs = {
@@ -49,7 +49,8 @@
         nativeBuildInputs =
           [
             nodejs
-            pkgs.nodePackages.vscode-langservers-extracted
+            pkgs.typos
+            pkgs.vscode-langservers-extracted
             pkgs.typescript
             pkgs.typescript-language-server
             pnpm-pkg

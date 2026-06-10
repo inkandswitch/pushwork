@@ -232,7 +232,7 @@ export class SyncEngine {
 	 * Used by --force to re-sync every file.
 	 */
 	async resetSnapshot(): Promise<void> {
-		let snapshot = await this.snapshotManager.load()
+		const snapshot = await this.snapshotManager.load()
 		if (!snapshot) return
 		this.snapshotManager.clear(snapshot)
 		await this.snapshotManager.save(snapshot)
@@ -244,7 +244,7 @@ export class SyncEngine {
 	 * documents. The root directory document itself is preserved.
 	 */
 	async nuclearReset(): Promise<void> {
-		let snapshot = await this.snapshotManager.load()
+		const snapshot = await this.snapshotManager.load()
 		if (!snapshot) return
 
 		// Clear the root directory document's entries
@@ -922,7 +922,7 @@ export class SyncEngine {
 					} else {
 						// Update existing file
 						const contentSize = typeof change.localContent === "string"
-							? `${change.localContent!.length} chars`
+							? `${change.localContent.length} chars`
 							: `${(change.localContent as Uint8Array).length} bytes`
 						debug(`push: [${filesProcessed}/${totalFiles}] update ${change.path} (${contentSize})`)
 						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] updating ${change.path}`)
@@ -1578,38 +1578,34 @@ export class SyncEngine {
 			parentDirUrl = existingDir.url
 		}
 
-		try {
-			// Use plain URL for mutable handle
-			const dirHandle = await this.repo.find<DirectoryDocument>(
-				getPlainUrl(parentDirUrl)
+		// Use plain URL for mutable handle
+		const dirHandle = await this.repo.find<DirectoryDocument>(
+			getPlainUrl(parentDirUrl)
+		)
+
+		// Track this handle for network sync waiting
+		this.handlesByPath.set(directoryPath, dirHandle)
+		const snapshotEntry = snapshot.directories.get(directoryPath)
+		const heads = snapshotEntry?.head
+		let didChange = false
+
+		changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
+			const indexToRemove = doc.docs.findIndex(
+				entry => entry.name === fileName && entry.type === "file"
 			)
-
-			// Track this handle for network sync waiting
-			this.handlesByPath.set(directoryPath, dirHandle)
-			const snapshotEntry = snapshot.directories.get(directoryPath)
-			const heads = snapshotEntry?.head
-			let didChange = false
-
-			changeWithOptionalHeads(dirHandle, heads, (doc: DirectoryDocument) => {
-				const indexToRemove = doc.docs.findIndex(
-					entry => entry.name === fileName && entry.type === "file"
+			if (indexToRemove !== -1) {
+				doc.docs.splice(indexToRemove, 1)
+				didChange = true
+				out.taskLine(
+					`Removed ${fileName} from ${
+						formatRelativePath(directoryPath) || "root"
+					}`
 				)
-				if (indexToRemove !== -1) {
-					doc.docs.splice(indexToRemove, 1)
-					didChange = true
-					out.taskLine(
-						`Removed ${fileName} from ${
-							formatRelativePath(directoryPath) || "root"
-						}`
-					)
-				}
-			})
-
-			if (didChange && snapshotEntry) {
-				snapshotEntry.head = dirHandle.heads()
 			}
-		} catch (error) {
-			throw error
+		})
+
+		if (didChange && snapshotEntry) {
+			snapshotEntry.head = dirHandle.heads()
 		}
 	}
 
