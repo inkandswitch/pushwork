@@ -176,7 +176,7 @@ program
 	.command("clone")
 	.description("Clone an automerge URL into a directory")
 	.argument("<url>", "automerge: URL")
-	.argument("[dir]", "Target directory", ".")
+	.argument("<dir>", "Target directory")
 	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
 	.option("--legacy", "Alias for --no-sub")
 	.option(
