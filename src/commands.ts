@@ -237,6 +237,22 @@ export async function init(
 ): Promise<void> {
   const resolvedPath = path.resolve(targetPath);
 
+  // If the target path already exists, it must be a directory. Without this
+  // check, pointing init at a file fails deep inside with a raw ENOTDIR stack
+  // trace when it tries to mkdir `<file>/.pushwork`.
+  try {
+    const stat = await fs.stat(resolvedPath);
+    if (!stat.isDirectory()) {
+      out.error(
+        `Not a directory: ${resolvedPath}\n` +
+        `pushwork init expects a directory path.`
+      );
+      out.exit(1);
+    }
+  } catch {
+    // Path doesn't exist yet — ensureDirectoryExists will create it below.
+  }
+
   const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
   out.task(`Initializing`);
@@ -800,8 +816,18 @@ export async function url(targetPath: string = "."): Promise<void> {
     out.exit(1);
   }
 
-  const snapshotData = await fs.readFile(snapshotPath, "utf-8");
-  const snapshot = JSON.parse(snapshotData);
+  let snapshot: { rootDirectoryUrl?: string };
+  try {
+    const snapshotData = await fs.readFile(snapshotPath, "utf-8");
+    snapshot = JSON.parse(snapshotData);
+  } catch (error) {
+    out.error(
+      `Could not read snapshot (${snapshotPath} may be corrupt): ` +
+      (error instanceof Error ? error.message : String(error))
+    );
+    out.exit(1);
+    return;
+  }
 
   if (snapshot.rootDirectoryUrl) {
     // Output just the URL for easy use in scripts

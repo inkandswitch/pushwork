@@ -18,7 +18,7 @@ pnpm run build
 pnpm link --global
 ```
 
-Requires: Node.js 18+, pnpm 8.15.0+
+Requires: Node.js 24+, pnpm 8+
 
 ## Quick Start
 
@@ -47,7 +47,6 @@ pushwork url
 
 - `--sync-server <url> [storage-id]` - Custom sync server URL. A storage ID is only valid with `--legacy`; passing one in the default Subduction mode is an error.
 - `--legacy` - Use the legacy WebSocket sync backend (Subduction is default)
-- `--debug` - Export performance flame graphs
 
 **`clone <url> <path>`** - Clone an existing synced directory
 
@@ -58,17 +57,15 @@ pushwork url
 **`sync [path]`** - Run bidirectional synchronization
 
 - `--dry-run` - Preview changes without applying
+- `--gentle` - Use config files and only sync changed files (instead of the default full resync)
+- `--nuclear` - Recreate all Automerge documents from scratch
 - `--verbose` - Show detailed progress
-- `--debug` - Export performance flame graphs
 
 **`status [path]`** - Show sync status and repository info
 
 - `--verbose` - Show detailed status including all tracked files
 
-**`commit [path]`** - Commit local changes without network sync
-
-- `--dry-run` - Preview what would be committed
-- `--debug` - Export performance flame graphs
+**`commit [path]`** - Commit local changes to Automerge documents without network sync
 
 ### Utility Commands
 
@@ -80,7 +77,7 @@ pushwork url
 
 **`ls [path]`** - List tracked files
 
-- `--long` - Show Automerge URLs
+- `-v, --verbose` - Show Automerge URLs
 
 **`config [path]`** - View or edit configuration
 
@@ -232,12 +229,12 @@ pnpm run test:watch   # Watch mode for tests
 
 ```
 src/
-├── cli/        # Command-line interface
-├── core/       # Core sync engine
-├── config/     # Configuration management
-├── tracing/    # Performance tracing
-├── types/      # TypeScript type definitions
-└── utils/      # Shared utilities
+├── cli.ts        # CLI entry point (Commander.js)
+├── commands.ts   # Command implementations
+├── index.ts      # Public library API
+├── core/         # Sync engine, change/move detection, snapshot, config
+├── types/        # TypeScript type definitions
+└── utils/        # Filesystem, MIME, network sync, output, repo factory, ...
 ```
 
 ### Testing
@@ -251,7 +248,6 @@ pnpm test                                              # Unit tests
 ### Profiling
 
 ```bash
-pushwork sync --debug                                  # Export flame graphs
 clinic flame --collect-only -- node --enable-source-maps --prof $(pnpm root -g)/pushwork/dist/cli.js sync
 ```
 

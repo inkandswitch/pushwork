@@ -11,6 +11,7 @@ import {
   SyncProtocol,
 } from "../types";
 import { pathExists, ensureDirectoryExists } from "../utils";
+import { out } from "../utils/output";
 
 /**
  * Determine which sync protocol a (possibly v0) config specifies.
@@ -145,7 +146,15 @@ export class ConfigManager {
       const content = await fs.readFile(configPath, "utf8");
       return JSON.parse(content) as DirectoryConfig;
     } catch (error) {
-      // Failed to load local config
+      // The file exists (checked above) but couldn't be read/parsed — i.e.
+      // it's corrupt. Warn loudly instead of silently falling back to
+      // defaults, so the user isn't unknowingly running with a config that
+      // doesn't reflect their on-disk file.
+      out.warn(
+        `Warning: ${this.getLocalConfigPath()} could not be parsed and was ` +
+        `ignored (using defaults): ` +
+        (error instanceof Error ? error.message : String(error))
+      );
       return null;
     }
   }
