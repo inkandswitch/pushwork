@@ -216,6 +216,27 @@ function isBinaryMimeType(mimeType: string): boolean {
 }
 
 /**
+ * Heuristic: do these bytes look like UTF-8 text?
+ *
+ * A NUL byte means binary (text files don't contain NULs). Otherwise the bytes
+ * must be valid UTF-8 — checked with a *streaming* fatal decoder so a multibyte
+ * sequence split at the sample boundary is treated as "incomplete" rather than
+ * "invalid" (avoids false-negatives on large text files). Crucially this
+ * rejects arbitrary binary (e.g. a null-free run of high bytes), which the old
+ * "no NUL byte" test wrongly accepted as text — leading to lossy UTF-8 decoding
+ * and data corruption.
+ */
+export function isLikelyUtf8Text(buffer: Buffer | Uint8Array): boolean {
+  if (buffer.includes(0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer, { stream: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Content-based text detection (fallback method)
  */
 async function isTextByContent(filePath: string): Promise<boolean> {
@@ -236,8 +257,7 @@ async function isTextByContent(filePath: string): Promise<boolean> {
     await handle.read(buffer, 0, sampleSize, 0);
     await handle.close();
 
-    // Check for null bytes which indicate binary content
-    return !buffer.includes(0);
+    return isLikelyUtf8Text(buffer);
   } catch {
     return false;
   }
