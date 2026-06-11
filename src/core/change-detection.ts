@@ -24,6 +24,8 @@ import {
 } from "../utils"
 import {isContentEqual, contentHash} from "../utils/content"
 import {out} from "../utils/output"
+import {profileAsync} from "../utils/profile"
+import {mapWithConcurrency, IO_CONCURRENCY} from "../utils/concurrency"
 
 const isDebug = !!process.env.DEBUG
 function debug(...args: any[]) {
@@ -55,22 +57,38 @@ export class ChangeDetector {
 	/**
 	 * Detect all changes between local filesystem and snapshot
 	 */
-	async detectChanges(snapshot: SyncSnapshot, excludePaths?: Set<string>): Promise<DetectedChange[]> {
+	async detectChanges(
+		snapshot: SyncSnapshot,
+		excludePaths?: Set<string>,
+		precomputedFiles?: Map<string, {content: string | Uint8Array; type: FileType}>
+	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
-		// Get current filesystem state
-		const currentFiles = await this.getCurrentFilesystemState()
+		// Get current filesystem state (reuse a caller-provided scan when
+		// given — the local FS doesn't change between the pre-push and
+		// post-network detect passes).
+		const currentFiles =
+			precomputedFiles ??
+			(await profileAsync("detect:fs-scan", () =>
+				this.getCurrentFilesystemState()
+			))
 
 		// Check for local changes (new, modified, deleted files)
-		const localChanges = await this.detectLocalChanges(snapshot, currentFiles)
+		const localChanges = await profileAsync("detect:local", () =>
+			this.detectLocalChanges(snapshot, currentFiles)
+		)
 		changes.push(...localChanges)
 
 		// Check for remote changes (changes in Automerge documents)
-		const remoteChanges = await this.detectRemoteChanges(snapshot)
+		const remoteChanges = await profileAsync("detect:remote", () =>
+			this.detectRemoteChanges(snapshot)
+		)
 		changes.push(...remoteChanges)
 
 		// Check for new remote documents not in snapshot (critical for clone scenarios)
-		const newRemoteDocuments = await this.detectNewRemoteDocuments(snapshot, excludePaths)
+		const newRemoteDocuments = await profileAsync("detect:new-remote", () =>
+			this.detectNewRemoteDocuments(snapshot, excludePaths)
+		)
 		changes.push(...newRemoteDocuments)
 
 		return changes
@@ -495,9 +513,14 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Get current filesystem state as a map
+	 * Get current filesystem state as a map.
+	 *
+	 * Public so callers (sync) can scan once and pass the result to
+	 * multiple `detectChanges` passes — re-scanning is expensive once
+	 * `.pushwork/automerge` is populated (the glob enumerates every
+	 * storage file before excluding it).
 	 */
-	private async getCurrentFilesystemState(): Promise<
+	async getCurrentFilesystemState(): Promise<
 		Map<string, {content: string | Uint8Array; type: FileType}>
 	> {
 		const fileMap = new Map<
@@ -516,14 +539,14 @@ export class ChangeDetector {
 				entry => entry.type !== FileType.DIRECTORY
 			)
 
-			await Promise.all(
-				fileEntries.map(async entry => {
-					const relativePath = getRelativePath(this.rootPath, entry.path)
-					const content = await readFileContent(entry.path)
+			// Bounded so a huge tree doesn't read every file into memory at
+			// once (content is buffered until detection finishes).
+			await mapWithConcurrency(fileEntries, IO_CONCURRENCY, async entry => {
+				const relativePath = getRelativePath(this.rootPath, entry.path)
+				const content = await readFileContent(entry.path)
 
-					fileMap.set(relativePath, {content, type: entry.type})
-				})
-			)
+				fileMap.set(relativePath, {content, type: entry.type})
+			})
 		} catch (error) {
 			out.taskLine(`Failed to scan filesystem: ${error}`, true)
 			// Log more details about the error

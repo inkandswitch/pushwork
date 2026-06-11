@@ -1,5 +1,6 @@
 import * as A from "@automerge/automerge"
 import * as diffLib from "diff"
+import { profileSync, count } from "./profile"
 
 /**
  * Read content from an Automerge document, normalizing legacy ImmutableString
@@ -83,7 +84,11 @@ export function spliceText(
 		return
 	}
 
-	const changes = diffLib.diffChars(oldContent, newContent)
+	count("text.diffChars.calls")
+	count("text.diffChars.chars", oldContent.length + newContent.length)
+	const changes = profileSync("text:diffChars", () =>
+		diffLib.diffChars(oldContent, newContent)
+	)
 
 	let pos = 0
 	for (const part of changes) {

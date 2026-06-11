@@ -25,6 +25,13 @@ import { ConfigManager, resolveProtocol } from "./core/config";
 import { createRepo } from "./utils/repo-factory";
 import { out } from "./utils/output";
 import { waitForSync } from "./utils/network-sync";
+import {
+  isProfilingEnabled,
+  printProfileReport,
+  resetProfile,
+  startDriftProbe,
+  stopDriftProbe,
+} from "./utils/profile";
 import chalk from "chalk";
 
 /**
@@ -421,7 +428,15 @@ export async function sync(
     out.log("");
     out.log("Run without --dry-run to apply these changes");
   } else {
+    if (isProfilingEnabled()) {
+      resetProfile();
+      startDriftProbe();
+    }
     const result = await syncEngine.sync({ protocol: config.protocol });
+    if (isProfilingEnabled()) {
+      stopDriftProbe();
+      printProfileReport("sync");
+    }
 
     out.taskLine("Writing to disk");
     await safeRepoShutdown(repo);

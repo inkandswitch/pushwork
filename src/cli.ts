@@ -19,6 +19,7 @@ import {
   config,
   watch,
 } from "./commands";
+import { setProfilingEnabled } from "./utils/profile";
 
 const pkg = require("../package.json");
 const version = pkg.version;
@@ -193,13 +194,20 @@ program
   )
   .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
   .option("-v, --verbose", "Verbose output", false)
+  .option(
+    "--profile",
+    "Print timing + event-loop drift profile to stderr (also via PUSHWORK_PROFILE=1)",
+    false
+  )
   .action(async (path, opts) => {
+    if (opts.profile) setProfilingEnabled(true);
     await sync(path, {
       dryRun: opts.dryRun,
       force: opts.force,
       gentle: opts.gentle,
       nuclear: opts.nuclear,
       verbose: opts.verbose,
+      profile: opts.profile,
     });
   });
 

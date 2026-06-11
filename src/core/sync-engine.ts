@@ -38,6 +38,8 @@ import {SnapshotManager} from "./snapshot"
 import {ChangeDetector} from "./change-detection"
 import {MoveDetector} from "./move-detection"
 import {out} from "../utils/output"
+import {profileAsync, profileSync, count} from "../utils/profile"
+import {makeYielder} from "../utils/concurrency"
 import * as path from "path"
 
 const isDebug = !!process.env.DEBUG
@@ -497,14 +499,16 @@ export class SyncEngine {
 				debug("sync: waiting for initial bidirectional sync")
 				out.update("Waiting for initial sync from server")
 				try {
-					await waitForBidirectionalSync(
-						this.repo,
-						snapshot.rootDirectoryUrl,
-						{
-							timeoutMs: 5000, // Increased timeout for initial sync
-							pollIntervalMs: 100,
-							stableChecksRequired: 3,
-						}
+					await profileAsync("net:initial-wait", () =>
+						waitForBidirectionalSync(
+							this.repo,
+							snapshot.rootDirectoryUrl!,
+							{
+								timeoutMs: 5000, // Increased timeout for initial sync
+								pollIntervalMs: 100,
+								stableChecksRequired: 3,
+							}
+						)
 					)
 				} catch (error) {
 					out.taskLine(`Initial sync: ${error}`, true)
@@ -514,24 +518,33 @@ export class SyncEngine {
 			// Detect all changes
 			debug("sync: detecting changes")
 			out.update("Detecting local and remote changes")
+			// Scan the local filesystem once and reuse it for both detect
+			// passes. The local tree doesn't change during sync (pushwork
+			// is the only writer; the pull phase runs after both passes),
+			// and re-scanning after push is expensive — the glob would
+			// enumerate every freshly-written .pushwork/automerge file.
+			const currentFiles = await profileAsync("detect:fs-scan-once", () =>
+				this.changeDetector.getCurrentFilesystemState()
+			)
+
 			// Capture pre-push snapshot file paths to detect deletions after push
 			const prePushFilePaths = new Set(snapshot.files.keys())
-			const changes = await this.changeDetector.detectChanges(snapshot)
+			const changes = await profileAsync("detect:pre-push", () =>
+				this.changeDetector.detectChanges(snapshot, undefined, currentFiles)
+			)
 
 			// Detect moves
-			const {moves, remainingChanges} = await this.moveDetector.detectMoves(
-				changes,
-				snapshot
+			const {moves, remainingChanges} = await profileAsync(
+				"detect:moves",
+				() => this.moveDetector.detectMoves(changes, snapshot)
 			)
 
 			debug(`sync: detected ${changes.length} changes, ${moves.length} moves, ${remainingChanges.length} remaining`)
 
 			// Phase 1: Push local changes to remote
 			debug("sync: phase 1 - pushing local changes")
-			const phase1Result = await this.pushLocalChanges(
-				remainingChanges,
-				moves,
-				snapshot
+			const phase1Result = await profileAsync("phase1:push", () =>
+				this.pushLocalChanges(remainingChanges, moves, snapshot)
 			)
 
 			result.filesChanged += phase1Result.filesChanged
@@ -569,9 +582,8 @@ export class SyncEngine {
 						const handlePaths = Array.from(this.handlesByPath.keys())
 						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
 						out.update(`Uploading ${allHandles.length} documents to sync server`)
-						const {failed} = await waitForSync(
-							allHandles,
-							storageId
+						const {failed} = await profileAsync("net:upload", () =>
+							waitForSync(allHandles, storageId)
 						)
 
 						// Recreate failed documents and retry once.
@@ -614,15 +626,17 @@ export class SyncEngine {
 					const changedHandles = Array.from(this.handlesByPath.values())
 					debug(`sync: waiting for bidirectional sync to stabilize (${changedHandles.length} tracked handles)`)
 					out.update("Waiting for bidirectional sync to stabilize")
-					await waitForBidirectionalSync(
-						this.repo,
-						snapshot.rootDirectoryUrl,
-						{
-							timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
-							pollIntervalMs: 100,
-							stableChecksRequired: 3,
-							handles: changedHandles.length > 0 ? changedHandles : undefined,
-						}
+					await profileAsync("net:stabilize", () =>
+						waitForBidirectionalSync(
+							this.repo,
+							snapshot.rootDirectoryUrl!,
+							{
+								timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
+								pollIntervalMs: 100,
+								stableChecksRequired: 3,
+								handles: changedHandles.length > 0 ? changedHandles : undefined,
+							}
+						)
 					)
 
 					// Touch root directory AFTER all docs are synced and stable.
@@ -673,7 +687,9 @@ export class SyncEngine {
 				debug(`sync: excluding ${deletedPaths.size} deleted paths from re-detection`)
 			}
 			debug("sync: re-detecting changes after network sync")
-			const freshChanges = await this.changeDetector.detectChanges(snapshot, deletedPaths)
+			const freshChanges = await profileAsync("detect:post", () =>
+				this.changeDetector.detectChanges(snapshot, deletedPaths, currentFiles)
+			)
 			const freshRemoteChanges = freshChanges.filter(
 				c =>
 					c.changeType === ChangeType.REMOTE_ONLY ||
@@ -685,9 +701,8 @@ export class SyncEngine {
 				out.update(`Pulling ${freshRemoteChanges.length} remote changes`)
 			}
 			// Phase 2: Pull remote changes to local using fresh detection
-			const phase2Result = await this.pullRemoteChanges(
-				freshRemoteChanges,
-				snapshot
+			const phase2Result = await profileAsync("phase2:pull", () =>
+				this.pullRemoteChanges(freshRemoteChanges, snapshot)
 			)
 			result.filesChanged += phase2Result.filesChanged
 			result.directoriesChanged += phase2Result.directoriesChanged
@@ -703,6 +718,7 @@ export class SyncEngine {
 			// stale ones, causing changeAt() to fork from the wrong point
 			// on the next sync (e.g. an empty directory state where deletions
 			// can't find the entries to splice out).
+			await profileAsync("snapshot:head-update", async () => {
 			for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
 				try {
 					const handle = await this.repo.find(getPlainUrl(snapshotEntry.url))
@@ -735,9 +751,12 @@ export class SyncEngine {
 					// Handle might not exist if directory was deleted
 				}
 			}
+			})
 
 			// Save updated snapshot if not dry run
-			await this.snapshotManager.save(snapshot)
+			await profileAsync("snapshot:save", () =>
+				this.snapshotManager.save(snapshot)
+			)
 
 			result.success = result.errors.length === 0
 			return result
@@ -773,6 +792,11 @@ export class SyncEngine {
 			warnings: [],
 		}
 
+		// Periodically hand the event loop a turn so libuv runs the poll
+		// phase — Subduction's socket read + keepalive pong — instead of
+		// being starved across thousands of synchronous Automerge calls.
+		const maybeYield = makeYielder()
+
 		// Process moves first - all detected moves are applied
 		if (moves.length > 0) {
 			debug(`push: processing ${moves.length} moves`)
@@ -794,6 +818,8 @@ export class SyncEngine {
 					recoverable: true,
 				})
 			}
+
+			await maybeYield()
 		}
 
 		// Filter to local changes only
@@ -865,8 +891,16 @@ export class SyncEngine {
 
 			// Ensure directory document exists
 			if (snapshot.rootDirectoryUrl) {
-				await this.ensureDirectoryDocument(snapshot, dirPath)
+				await profileAsync("push:ensureDir", () =>
+					this.ensureDirectoryDocument(snapshot, dirPath)
+				)
 			}
+
+			// Hand the event loop a turn (time-budgeted) so creating many
+			// directory documents doesn't starve Subduction's socket. The
+			// per-file loop below yields too, but directories with no direct
+			// file changes (intermediate nodes) would otherwise never yield.
+			await maybeYield()
 
 			// Process all file changes in this directory
 			const newEntries: {name: string; url: AutomergeUrl}[] = []
@@ -956,6 +990,11 @@ export class SyncEngine {
 						recoverable: true,
 					})
 				}
+
+				// Hand the event loop a turn (time-budgeted) so Subduction's
+				// socket gets read and its keepalive pong flushed instead of
+				// being starved across thousands of synchronous files.
+				await maybeYield()
 			}
 
 			// Collect subdirectory URL updates for child dirs already processed
@@ -988,13 +1027,15 @@ export class SyncEngine {
 				subdirUpdates.length > 0
 			if (hasChanges && snapshot.rootDirectoryUrl) {
 				debug(`push: batch-updating directory "${dirLabel}" (+${newEntries.length} new, ~${updatedEntries.length} updated, -${deletedNames.length} deleted, ${subdirUpdates.length} subdir URL updates)`)
-				await this.batchUpdateDirectory(
-					snapshot,
-					dirPath,
-					newEntries,
-					updatedEntries,
-					deletedNames,
-					subdirUpdates
+				await profileAsync("push:dirUpdate", () =>
+					this.batchUpdateDirectory(
+						snapshot,
+						dirPath,
+						newEntries,
+						updatedEntries,
+						deletedNames,
+						subdirUpdates
+					)
 				)
 				modifiedDirs.add(dirPath)
 				result.directoriesChanged++
@@ -1240,13 +1281,18 @@ export class SyncEngine {
 			},
 		}
 
-		const handle = this.repo.create(fileDoc)
+		const handle = profileSync("push:repo.create", () =>
+			this.repo.create(fileDoc)
+		)
+		count("push:docs.created")
 
 		// For non-artifact text files, splice in the content so it's stored as collaborative text
 		if (isText && !isArtifact && typeof change.localContent === "string") {
-			handle.change((doc: FileDocument) => {
-				updateTextContent(doc, ["content"], change.localContent as string)
-			})
+			profileSync("push:splice-new", () =>
+				handle.change((doc: FileDocument) => {
+					updateTextContent(doc, ["content"], change.localContent as string)
+				})
+			)
 		}
 
 		// Always track newly created files for network sync

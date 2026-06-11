@@ -8,6 +8,7 @@ import * as A from "@automerge/automerge";
 import { out } from "./output";
 import { DirectoryDocument } from "../types";
 import { getPlainUrl } from "./directory";
+import { mapWithConcurrency, IO_CONCURRENCY } from "./concurrency";
 
 const isDebug = !!process.env.DEBUG;
 function debug(...args: any[]) {
@@ -165,22 +166,26 @@ async function collectHeadsRecursive(
       return;
     }
 
-    // Process all entries in the directory concurrently
-    await Promise.all(doc.docs.map(async (entry: { type: string; url: AutomergeUrl; name: string }) => {
-      if (entry.type === "folder") {
-        // Recurse into subdirectory (entry.url may have stale heads)
-        await collectHeadsRecursive(repo, entry.url, heads);
-      } else if (entry.type === "file") {
-        // Get file document heads (strip heads from entry.url)
-        try {
-          const fileUrl = getPlainUrl(entry.url);
-          const fileHandle = await repo.find(fileUrl);
-          heads.set(fileUrl, JSON.stringify(fileHandle.heads()));
-        } catch {
-          // File document may not exist yet
+    // Bounded fan-out is a memory guard (don't open the whole tree at once).
+    await mapWithConcurrency(
+      doc.docs,
+      IO_CONCURRENCY,
+      async (entry: { type: string; url: AutomergeUrl; name: string }) => {
+        if (entry.type === "folder") {
+          // Recurse into subdirectory (entry.url may have stale heads)
+          await collectHeadsRecursive(repo, entry.url, heads);
+        } else if (entry.type === "file") {
+          // Get file document heads (strip heads from entry.url)
+          try {
+            const fileUrl = getPlainUrl(entry.url);
+            const fileHandle = await repo.find(fileUrl);
+            heads.set(fileUrl, JSON.stringify(fileHandle.heads()));
+          } catch {
+            // File document may not exist yet
+          }
         }
       }
-    }));
+    );
   } catch {
     // Directory may not exist yet
   }
