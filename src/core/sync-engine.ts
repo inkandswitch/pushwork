@@ -144,10 +144,9 @@ export class SyncEngine {
 	// Map from path to handle for leaf-first sync ordering
 	// Path depth determines sync order (deepest first)
 	private handlesByPath: Map<string, DocHandle<unknown>> = new Map()
-	// Paths pushed by shard-ingest workers this run (shared-nothing
-	// experiment). These docs were created, persisted, and uploaded in
-	// worker-owned repos; the main thread must NOT materialize them —
-	// detect:post and the snapshot head-update loop skip these paths.
+	// Paths handled by worker-owned repos this run (shard mode). The main
+	// thread must NOT materialize these docs — detect:post and the snapshot
+	// head-update loop skip them; their reported heads are already current.
 	private workerPushedPaths: Set<string> = new Set()
 	private config: DirectoryConfig
 
@@ -549,9 +548,7 @@ export class SyncEngine {
 					undefined,
 					currentFiles,
 					undefined,
-					// Shared-nothing experiment: don't materialize new remote
-					// file docs during discovery; shard-pull workers fetch them.
-					parallelIngestMode() === "shard"
+					parallelIngestMode() === "shard" // defer remote fetches to workers
 				)
 			)
 
@@ -709,24 +706,16 @@ export class SyncEngine {
 				debug(`sync: excluding ${deletedPaths.size} deleted paths from re-detection`)
 			}
 			debug("sync: re-detecting changes after network sync")
-			// Shared-nothing experiment: paths pushed via worker-owned repos
-			// must not be re-checked here — that would repo.find (and thus
-			// materialize) every doc on the main thread, reinstating the
-			// serial cost the workers exist to avoid. Their snapshot heads
-			// were written from worker reports moments ago; genuinely
-			// concurrent remote edits get picked up on the next sync.
 			const freshChanges = await profileAsync("detect:post", () =>
 				this.changeDetector.detectChanges(
 					snapshot,
 					deletedPaths,
 					currentFiles,
+					// Skip worker-pushed paths (see workerPushedPaths).
 					this.workerPushedPaths.size > 0
 						? this.workerPushedPaths
 						: undefined,
-					// Shared-nothing experiment: emit deferred (URL-only)
-					// changes for new remote files; pull routes them to
-					// shard-pull workers.
-					parallelIngestMode() === "shard"
+					parallelIngestMode() === "shard" // defer remote fetches to workers
 				)
 			)
 			const freshRemoteChanges = freshChanges.filter(
@@ -759,9 +748,7 @@ export class SyncEngine {
 			// can't find the entries to splice out).
 			await profileAsync("snapshot:head-update", async () => {
 			for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
-				// Shared-nothing experiment: worker-pushed docs aren't (and
-				// must not be) materialized on the main thread; their heads
-				// were recorded from the worker reports and are current.
+				// Worker-pushed heads are already current (see workerPushedPaths).
 				if (this.workerPushedPaths.has(filePath)) continue
 				try {
 					const handle = await this.repo.find(getPlainUrl(snapshotEntry.url))
@@ -883,16 +870,11 @@ export class SyncEngine {
 		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 		out.update(`Pushing ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 
-		// EXPERIMENT (PUSHWORK_PARALLEL_INGEST=2, "shard"): build + persist +
-		// upload the docs for NEW files in worker-owned repos (darn-style
-		// parallel leaf phase), then proceed with the normal serial directory
-		// phase below. Workers own full repos (own Wasm/storage-writes/
-		// socket); the main thread never materializes the docs, only records
-		// {url, heads}. Files whose worker failed aren't in the map and fall
-		// back to main-thread creation in the per-file loop.
-		// (The "import" variant — workers shipping doc bytes for main-thread
-		// repo.import — was measured wall-neutral and removed; see
-		// .ignore/PARALLEL_INGEST_EXPERIMENT.md.)
+		// Shard mode (PUSHWORK_PARALLEL_INGEST=2): NEW files are built,
+		// persisted, and uploaded by worker-owned repos; the serial directory
+		// phase below stitches the reported {url, heads} in. Files whose
+		// worker failed are absent from the map and fall back to main-thread
+		// creation. See ingestNewFilesInShardedRepos.
 		const ingestMode = newFiles.length > 1 ? parallelIngestMode() : null
 		let shardResults = new Map<string, {url: AutomergeUrl; heads: UrlHeads}>()
 		if (ingestMode === "shard") {
@@ -1168,10 +1150,8 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
-		// EXPERIMENT (shared-nothing clone): deferred changes carry only
-		// an entry URL — fetch + materialize + write them in shard-pull
-		// workers. Failed paths fall back to the normal serial loop by
-		// re-fetching content on the main thread.
+		// Deferred changes (shard mode) carry only an entry URL; shard-pull
+		// workers fetch + write them. Failures fall back to the serial loop.
 		const deferred = remoteChanges.filter(c => c.deferredFetch)
 		const immediate = remoteChanges.filter(c => !c.deferredFetch)
 		let fallbackPaths: Set<string> | undefined
@@ -1230,14 +1210,13 @@ export class SyncEngine {
 	}
 
 	/**
-	 * EXPERIMENT (shared-nothing clone): pull deferred remote files in
-	 * worker-owned repos. Workers download/load + materialize the docs
-	 * with their own Wasm instances, write the local files themselves,
-	 * and report `{url, heads, contentHash}`; the main thread records
-	 * snapshot entries without ever materializing the documents.
+	 * Shard-mode pull: fetch deferred remote files in worker-owned repos.
+	 * Workers materialize the docs with their own Wasm instances, write the
+	 * local files themselves, and report `{url, heads, contentHash}`; the
+	 * main thread records snapshot entries without materializing anything.
 	 *
-	 * Returns the set of paths the workers could NOT handle (caller runs
-	 * the main-thread fallback for those).
+	 * Returns the paths the workers could not handle (caller runs the
+	 * main-thread fallback for those).
 	 */
 	private async pullRemoteFilesInShardedRepos(
 		deferred: DetectedChange[],
@@ -1507,18 +1486,18 @@ export class SyncEngine {
 	}
 
 	/**
-	 * EXPERIMENT (shared-nothing): ingest new files in worker-owned repos.
+	 * Shard-mode push: ingest new files in worker-owned repos.
 	 *
-	 * Workers build, persist (shared storage directory, disjoint doc
-	 * keys), and upload their shard with their OWN Repo + Wasm + socket,
-	 * reporting only `{url, heads}`. The main thread never materializes
-	 * these docs; the per-file loop stitches the URLs into directory
-	 * entries and the snapshot.
+	 * Workers build, persist (shared storage directory, disjoint doc keys),
+	 * and upload their shard with their own Repo + Wasm + socket, reporting
+	 * only `{url, heads}`. The main thread never materializes these docs;
+	 * the per-file loop stitches the URLs into directory entries and the
+	 * snapshot.
 	 *
 	 * Paths that failed or did not converge to the server are absent from
 	 * the returned map, so the per-file loop falls back to main-thread
-	 * `createRemoteFile` for them (the worker's copy becomes an
-	 * unreferenced orphan in storage, same class as deleted-file orphans).
+	 * `createRemoteFile` (the worker's copy becomes an unreferenced storage
+	 * orphan, same class as deleted-file orphans).
 	 */
 	private async ingestNewFilesInShardedRepos(
 		newFiles: DetectedChange[],

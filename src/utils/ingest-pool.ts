@@ -1,15 +1,12 @@
 /**
- * Worker pools for the shared-nothing parallel-ingest experiment
+ * Worker pools for shared-nothing parallel ingest
  * (PUSHWORK_PARALLEL_INGEST=2 / "shard"): workers own full Repos (own
  * Wasm, own storage writes, own socket) and report only {relPath, url,
- * heads}; the main thread never materializes the docs.
+ * heads}; the main thread never materializes the docs. Background and
+ * measurements: .ignore/PARALLEL_INGEST_EXPERIMENT.md.
  *
  * Worker scripts run as compiled CommonJS, so a build (`npm run build`)
  * must exist even when the engine itself runs from src via tsx.
- *
- * (A second variant — "import" mode, workers shipping doc bytes for the
- * main thread to repo.import — was measured wall-neutral and deleted
- * 2026-06-12; see .ignore/PARALLEL_INGEST_EXPERIMENT.md.)
  */
 
 import * as fs from "node:fs"
@@ -30,10 +27,7 @@ export interface IngestTask {
 
 export type ParallelIngestMode = "shard" | null
 
-/**
- * PUSHWORK_PARALLEL_INGEST=2 (or "shard") enables shared-nothing shard
- * ingest. ("1"/"import" was the refuted repo.import variant, removed.)
- */
+/** PUSHWORK_PARALLEL_INGEST=2 (or "shard") enables shard ingest. */
 export function parallelIngestMode(): ParallelIngestMode {
 	switch (process.env.PUSHWORK_PARALLEL_INGEST) {
 		case "2":
@@ -91,9 +85,7 @@ export async function runShardIngest(
 	protocol: SyncProtocol,
 	tasks: IngestTask[],
 	workerCount = ingestWorkerCount(),
-	// Test seam: inject a stub worker script (e.g. one that exits without
-	// reporting) to exercise the pool's failure paths without Wasm.
-	workerScript?: string
+	workerScript?: string // test seam: stub script exercising failure paths
 ): Promise<ShardRunOutcome> {
 	const script = workerScript ?? resolveShardWorkerScript()
 	const count = Math.min(workerCount, tasks.length)
@@ -241,10 +233,7 @@ export async function runShardPull(
 					resolve()
 				})
 				worker.on("exit", () => {
-					// Exit-before-report is a failure regardless of exit code: a
-					// worker that process.exit(0)s without posting still lost its
-					// shard. (fail() is a no-op once the report has arrived, which
-					// covers the eager-terminate exit after a successful report.)
+					// Exit-before-report = failure (see runShardIngest).
 					fail()
 					resolve()
 				})

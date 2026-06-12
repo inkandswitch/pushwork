@@ -241,9 +241,6 @@ export async function movePath(
 	await fs.rename(sourcePath, destPath)
 }
 
-// (calculateContentHash removed 2026-06-12: it was an unused duplicate of
-// utils/content.ts's contentHash — use that.)
-
 /**
  * Get MIME type for file
  */

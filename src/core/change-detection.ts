@@ -55,7 +55,15 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Detect all changes between local filesystem and snapshot
+	 * Detect all changes between local filesystem and snapshot.
+	 *
+	 * Shard-mode (PUSHWORK_PARALLEL_INGEST=2) params:
+	 * - `freshPaths`: paths just pushed by worker-owned repos. Their snapshot
+	 *   heads are already current; materializing their docs on the main
+	 *   thread would reinstate the serial cost the workers exist to avoid,
+	 *   so both local and remote detection skip them for this run.
+	 * - `deferRemoteContent`: emit URL-only changes for new remote files
+	 *   (no doc materialization); shard-pull workers fetch them.
 	 */
 	async detectChanges(
 		snapshot: SyncSnapshot,
@@ -110,9 +118,7 @@ export class ChangeDetector {
 		await Promise.all(
 			Array.from(currentFiles.entries()).map(
 				async ([relativePath, fileInfo]) => {
-					// Paths just written by this run with known-current heads
-					// (shared-nothing worker ingest). Reading their docs here
-					// would materialize them on the main thread for no signal.
+					// Worker-pushed this run; see detectChanges docs.
 					if (freshPaths?.has(relativePath)) return
 
 					const snapshotEntry = snapshot.files.get(relativePath)
@@ -290,10 +296,8 @@ export class ChangeDetector {
 		await Promise.all(
 			Array.from(snapshot.files.entries()).map(
 				async ([relativePath, snapshotEntry]) => {
-					// Paths just pushed via shared-nothing worker repos: heads
-					// in the snapshot are current, and materializing the doc
-					// here would defeat the experiment. Concurrent remote
-					// edits are deferred to the next sync.
+					// Worker-pushed this run; see detectChanges docs. Genuinely
+					// concurrent remote edits surface on the next sync.
 					if (freshPaths?.has(relativePath)) return
 
 					// Find the file's current entry in the remote directory hierarchy
@@ -461,12 +465,10 @@ export class ChangeDetector {
 						// This is a remote file not in our snapshot
 						const localContent = await this.getLocalContent(entryPath)
 
-						// EXPERIMENT (shared-nothing clone): when deferring,
-						// don't materialize the file doc here — emit a
-						// deferred change carrying only the entry URL, to be
-						// fetched + written by a shard-pull worker. Only the
-						// clean clone case (no local copy) is deferrable;
-						// local/remote coexistence needs content to compare.
+						// Deferred fetch (shard mode): emit a URL-only change for
+						// a shard-pull worker. Only the clean case (no local
+						// copy) is deferrable — coexistence needs content here
+						// to compare.
 						if (deferRemoteContent && localContent === null) {
 							changes.push({
 								path: entryPath,

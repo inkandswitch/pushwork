@@ -89,11 +89,9 @@ export interface DetectedChange {
 	/** New remote URL when the remote document was replaced (artifact URL change) */
 	remoteUrl?: AutomergeUrl
 	/**
-	 * EXPERIMENT (shared-nothing clone): the remote document was NOT
-	 * materialized during discovery — `remoteContent`/`remoteHead` are
-	 * unset and `remoteUrl` carries the directory entry URL. These
-	 * changes are routed to shard-pull workers instead of the normal
-	 * pull loop.
+	 * Shard mode: the remote doc was not materialized during discovery —
+	 * `remoteContent`/`remoteHead` are unset, `remoteUrl` carries the entry
+	 * URL, and the change is routed to a shard-pull worker.
 	 */
 	deferredFetch?: boolean
 }

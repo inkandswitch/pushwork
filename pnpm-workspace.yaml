@@ -1,7 +1,5 @@
-# pnpm settings (pnpm ≥10.30 reads these from here, NOT from the
-# package.json "pnpm" field — overrides silently moved during the
-# 2026-06-12 git-dependency migration after we noticed the old location
-# was being ignored).
+# pnpm settings. They must live here: pnpm ≥10.3x silently ignores the
+# package.json "pnpm" field.
 
 # ADR-021: force a single @automerge/automerge so the CJS and ESM module
 # graphs share one Wasm instance. Two copies = two Wasm heaps = documents
