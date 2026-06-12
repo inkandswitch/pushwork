@@ -265,6 +265,12 @@ export async function runShardIngest(
 					reported = true
 					outcome.results.push(...(report.results as ShardFileOutcome[]))
 					outcome.unsynced.push(...report.unsynced)
+					// The report is sent only after the worker's repo.shutdown()
+					// has flushed storage, so nothing of value remains in the
+					// thread. Terminate eagerly: online, a leftover Subduction
+					// sync timer (60s) otherwise keeps the thread's event loop
+					// alive long after shutdown, stalling the whole pool.
+					void worker.terminate()
 				})
 
 				let failed = false
@@ -359,6 +365,9 @@ export async function runShardPull(
 				worker.on("message", (report: {results: ClonePullOutcome[]}) => {
 					reported = true
 					outcome.results.push(...report.results)
+					// Report arrives only after the worker's repo.shutdown();
+					// terminate eagerly (see runShardIngest for rationale).
+					void worker.terminate()
 				})
 
 				const fail = () => {

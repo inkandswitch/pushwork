@@ -131,9 +131,26 @@ export class ChangeDetector {
 						// Skip remote doc content reads — compare local hash against
 						// stored hash to detect local changes, and check heads for remote.
 						const localHash = contentHash(fileInfo.content)
-						const localChanged = snapshotEntry.contentHash
-							? localHash !== snapshotEntry.contentHash
-							: true // No stored hash = first sync with hash support, assume changed
+						let localChanged: boolean
+						if (snapshotEntry.contentHash) {
+							localChanged = localHash !== snapshotEntry.contentHash
+						} else {
+							// No stored hash (snapshot written by an older version or a
+							// code path that missed it). Do NOT assume changed: a phantom
+							// local edit replaces the artifact doc wholesale and churns
+							// the directory entries, which CRDT-merges into duplicated /
+							// resurrected entries on peers. Fall back to one remote
+							// content read, then backfill the hash so this is one-time.
+							const remoteContent = await this.getCurrentRemoteContent(
+								snapshotEntry.url
+							)
+							localChanged =
+								remoteContent === null ||
+								!isContentEqual(fileInfo.content, remoteContent)
+							if (!localChanged) {
+								snapshotEntry.contentHash = localHash
+							}
+						}
 
 						const remoteHead = await this.getCurrentRemoteHead(
 							snapshotEntry.url

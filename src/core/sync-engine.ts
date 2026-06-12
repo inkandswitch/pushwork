@@ -1198,6 +1198,11 @@ export class SyncEngine {
 
 		for (const change of sortedChanges) {
 			try {
+				debug(
+					`pull: applying ${change.path} (${change.changeType}, ` +
+						`content=${change.remoteContent === null ? "null(delete)" : typeof change.remoteContent}` +
+						`${change.remoteUrl ? ", urlReplaced" : ""})`
+				)
 				await this.applyRemoteChangeToLocal(change, snapshot)
 				result.filesChanged++
 			} catch (error) {
@@ -1358,11 +1363,23 @@ export class SyncEngine {
 		// Create or update local file
 		await writeFileContent(localPath, change.remoteContent)
 
+		// Artifact change detection compares the local file's hash against
+		// the snapshot's `contentHash` — a missing or stale hash makes the
+		// next sync see a phantom local edit and replace the artifact doc
+		// wholesale, polluting the shared tree (the directory-entry churn
+		// then CRDT-merges into duplicate/resurrected entries on peers).
+		const artifactHash = this.isArtifactPath(change.path)
+			? {contentHash: contentHash(change.remoteContent)}
+			: {}
+
 		// Update or create snapshot entry for this file
 		const snapshotEntry = snapshot.files.get(change.path)
 		if (snapshotEntry) {
 			// Update existing entry
 			snapshotEntry.head = change.remoteHead
+			if (this.isArtifactPath(change.path)) {
+				snapshotEntry.contentHash = contentHash(change.remoteContent)
+			}
 			// If the remote document was replaced (new URL), update the snapshot URL
 			if (change.remoteUrl) {
 				const fileHandle = await this.repo.find<FileDocument>(change.remoteUrl)
@@ -1388,6 +1405,7 @@ export class SyncEngine {
 							head: change.remoteHead,
 							extension: getFileExtension(change.path),
 							mimeType: getEnhancedMimeType(change.path),
+							...artifactHash,
 						})
 					}
 				} catch (error) {

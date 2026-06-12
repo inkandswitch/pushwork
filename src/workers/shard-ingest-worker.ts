@@ -123,7 +123,16 @@ async function run(): Promise<void> {
 	}
 
 	// Flush pending storage writes (and close the socket) before reporting.
+	const shutdownStart = Date.now()
+	if (process.env.DEBUG) {
+		console.error(`[pushwork:shard-worker] shutdown starting t=${Date.now()}`)
+	}
 	await repo.shutdown()
+	if (process.env.DEBUG) {
+		console.error(
+			`[pushwork:shard-worker] shutdown took ${Date.now() - shutdownStart}ms`
+		)
+	}
 
 	const report: ShardWorkerReport = {results, unsynced}
 	parentPort!.postMessage(report)
