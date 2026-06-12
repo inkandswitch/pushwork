@@ -17,13 +17,13 @@ importers:
         version: 3.3.0-fragments.1
       '@automerge/automerge-repo':
         specifier: github:automerge/automerge-repo#feed-macrotasks&path:packages/automerge-repo
-        version: https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo
+        version: https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo
       '@automerge/automerge-repo-network-websocket':
         specifier: 2.6.0-subduction.29
         version: 2.6.0-subduction.29
       '@automerge/automerge-repo-storage-nodefs':
         specifier: github:automerge/automerge-repo#feed-macrotasks&path:packages/automerge-repo-storage-nodefs
-        version: https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo-storage-nodefs
+        version: https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo-storage-nodefs
       '@automerge/automerge-subduction':
         specifier: 0.15.0
         version: 0.15.0
@@ -127,13 +127,13 @@ packages:
   '@automerge/automerge-repo-network-websocket@2.6.0-subduction.29':
     resolution: {integrity: sha512-M44FxVH01ihg2bLhwuEqnzkLd69I5LRROvRsS2Nf/7kvo4Smxkwr38ATKRc9cEzIF9Hla++6Gsf4Jj7vFgpzug==}
 
-  '@automerge/automerge-repo-storage-nodefs@https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo-storage-nodefs':
-    resolution: {path: packages/automerge-repo-storage-nodefs, tarball: https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc}
+  '@automerge/automerge-repo-storage-nodefs@https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo-storage-nodefs':
+    resolution: {path: packages/automerge-repo-storage-nodefs, tarball: https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136}
     version: 2.6.0-subduction.29
     engines: {node: '>=22.13'}
 
-  '@automerge/automerge-repo@https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo':
-    resolution: {path: packages/automerge-repo, tarball: https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc}
+  '@automerge/automerge-repo@https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo':
+    resolution: {path: packages/automerge-repo, tarball: https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136}
     version: 2.6.0-subduction.29
     engines: {node: '>=22.13'}
 
@@ -2779,7 +2779,7 @@ snapshots:
 
   '@automerge/automerge-repo-network-websocket@2.6.0-subduction.29':
     dependencies:
-      '@automerge/automerge-repo': https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo
+      '@automerge/automerge-repo': https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo
       cbor-x: 1.6.4
       debug: 4.4.3
       eventemitter3: 5.0.4
@@ -2789,15 +2789,15 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo-storage-nodefs@https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo-storage-nodefs':
+  '@automerge/automerge-repo-storage-nodefs@https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo-storage-nodefs':
     dependencies:
-      '@automerge/automerge-repo': https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo
+      '@automerge/automerge-repo': https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo
     transitivePeerDependencies:
       - bufferutil
       - supports-color
       - utf-8-validate
 
-  '@automerge/automerge-repo@https://codeload.github.com/automerge/automerge-repo/tar.gz/6a83aad3a6f8d20c4c0ca9add67df4f6099692dc#path:packages/automerge-repo':
+  '@automerge/automerge-repo@https://codeload.github.com/automerge/automerge-repo/tar.gz/2e8eeb26c4d901b9cd5a995bdea32ff443f25136#path:packages/automerge-repo':
     dependencies:
       '@automerge/automerge': 3.3.0-fragments.1
       '@automerge/automerge-subduction': 0.15.0
