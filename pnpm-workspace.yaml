@@ -1,0 +1,26 @@
+# pnpm settings (pnpm ≥10.30 reads these from here, NOT from the
+# package.json "pnpm" field — overrides silently moved during the
+# 2026-06-12 git-dependency migration after we noticed the old location
+# was being ignored).
+
+# ADR-021: force a single @automerge/automerge so the CJS and ESM module
+# graphs share one Wasm instance. Two copies = two Wasm heaps = documents
+# can't be shared across them.
+overrides:
+  "@automerge/automerge": 3.3.0-fragments.1
+  # The storage-nodefs git dependency declares its automerge-repo dep by
+  # version (rewritten from workspace:*); redirect it to the same git ref
+  # the top-level dependency uses so there is exactly one repo copy.
+  "@automerge/automerge-repo": github:automerge/automerge-repo#feed-macrotasks&path:packages/automerge-repo
+
+# The am-repo git dependencies compile themselves on install (their
+# `prepare: tsc` — dist/ is gitignored upstream). pnpm blocks dependency
+# build scripts unless allowlisted.
+onlyBuiltDependencies:
+  - "@automerge/automerge-repo"
+  - "@automerge/automerge-repo-storage-nodefs"
+
+# The override above makes a git URL appear as a *sub*dependency
+# (storage-nodefs → automerge-repo), which pnpm's supply-chain guard
+# blocks by default. We intentionally trust this specific monorepo.
+blockExoticSubdeps: false

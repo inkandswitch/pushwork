@@ -518,7 +518,7 @@ export class SyncEngine {
 					await profileAsync("net:initial-wait", () =>
 						waitForBidirectionalSync(
 							this.repo,
-							snapshot.rootDirectoryUrl!,
+							snapshot.rootDirectoryUrl,
 							{
 								timeoutMs: 5000, // Increased timeout for initial sync
 								pollIntervalMs: 100,
@@ -653,7 +653,7 @@ export class SyncEngine {
 					await profileAsync("net:stabilize", () =>
 						waitForBidirectionalSync(
 							this.repo,
-							snapshot.rootDirectoryUrl!,
+							snapshot.rootDirectoryUrl,
 							{
 								timeoutMs: BIDIRECTIONAL_SYNC_TIMEOUT_MS,
 								pollIntervalMs: 100,

@@ -51,4 +51,24 @@ export default tseslint.config(
       "prefer-const": ["error", { ignoreReadBeforeAssign: true }],
     },
   },
+  {
+    // Tests and benches: same correctness lints, but without the type-aware
+    // promise rules (jest/fast-check idioms trip them constantly) and with
+    // test-pragmatic allowances.
+    files: ["test/**/*.ts", "bench/**/*.ts"],
+    extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-require-imports": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrors: "none",
+        },
+      ],
+      "no-empty": ["error", { allowEmptyCatch: true }],
+    },
+  },
 );
