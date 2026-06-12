@@ -4,6 +4,8 @@ import * as os from "os";
 import {
   GlobalConfig,
   DirectoryConfig,
+  DEFAULT_ARTIFACT_DIRECTORIES,
+  DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_SYNC_SERVER,
   DEFAULT_SYNC_SERVER_STORAGE_ID,
   DEFAULT_SUBDUCTION_SERVER,
@@ -193,14 +195,8 @@ export class ConfigManager {
     // undefined; the per-directory config (or `resolveProtocol`'s
     // defaults) decides the endpoint. We seed the other fields.
     return {
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".DS_Store",
-        ".pushwork",
-      ],
-      artifact_directories: ["dist"],
+      exclude_patterns: [...DEFAULT_EXCLUDE_PATTERNS],
+      artifact_directories: [...DEFAULT_ARTIFACT_DIRECTORIES],
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -230,14 +226,8 @@ export class ConfigManager {
       config_version: CONFIG_VERSION,
       protocol,
       sync_enabled: true,
-      exclude_patterns: [
-        ".git",
-        "node_modules",
-        "*.tmp",
-        ".pushwork",
-        ".DS_Store",
-      ],
-      artifact_directories: ["dist"],
+      exclude_patterns: [...DEFAULT_EXCLUDE_PATTERNS],
+      artifact_directories: [...DEFAULT_ARTIFACT_DIRECTORIES],
       sync: {
         move_detection_threshold: 0.7,
       },
@@ -296,8 +286,16 @@ export class ConfigManager {
   async initializeWithOverrides(
     overrides: Partial<DirectoryConfig> = {}
   ): Promise<DirectoryConfig> {
+    // Fresh-config semantics: this writes a brand-new v1 config, so the
+    // default is Subduction. `resolveProtocol`'s "no fields = legacy"
+    // rule is for *on-disk* v0 configs (pre-flip installs) and must not
+    // apply to a bare overrides object — only an explicit legacy signal
+    // (`protocol: "legacy"` or v0-style `subduction: false`) opts out.
     const protocol =
-      overrides.protocol ?? resolveProtocol(overrides) ?? "subduction";
+      overrides.protocol ??
+      (overrides.subduction === undefined
+        ? "subduction"
+        : resolveProtocol(overrides));
     const base = this.getDefaultDirectoryConfigForProtocol(protocol);
     const config = this.mergeConfigs(base, overrides);
 

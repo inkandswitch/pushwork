@@ -19,6 +19,7 @@ import {
   config,
   watch,
 } from "./commands";
+import { setProfilingEnabled } from "./utils/profile";
 
 const pkg = require("../package.json");
 const version = pkg.version;
@@ -193,13 +194,20 @@ program
   )
   .addOption(new Option("-f, --force", "Accepted for backwards compatibility").default(false).hideHelp())
   .option("-v, --verbose", "Verbose output", false)
+  .option(
+    "--profile",
+    "Print timing + event-loop drift profile to stderr (also via PUSHWORK_PROFILE=1)",
+    false
+  )
   .action(async (path, opts) => {
+    if (opts.profile) setProfilingEnabled(true);
     await sync(path, {
       dryRun: opts.dryRun,
       force: opts.force,
       gentle: opts.gentle,
       nuclear: opts.nuclear,
       verbose: opts.verbose,
+      profile: opts.profile,
     });
   });
 
@@ -469,12 +477,22 @@ function validateSyncServer(
 
   // Default (Subduction) mode: a storage ID is meaningless here.
   if (syncServerOpt.length >= 2) {
+    // The variadic option swallows trailing positionals, so a misplaced
+    // directory path often lands here as a bogus "storage ID".
+    const extra = syncServerOpt[1];
+    const looksLikePath =
+      extra.includes("/") || extra.startsWith(".") || extra.startsWith("~");
     console.error(
       chalk.red(
-        "Error: a storage ID is only valid with --legacy.\n" +
-          "Subduction (the default backend) does not use one — pass just the URL:\n" +
-          "  pushwork init --sync-server <url>\n" +
-          "or select the legacy backend:\n" +
+        `Error: unexpected extra value after --sync-server URL: "${extra}"\n` +
+          (looksLikePath
+            ? "This looks like a directory path. --sync-server consumes the " +
+              "arguments that follow it,\nso put the path BEFORE the option:\n" +
+              `  pushwork init ${extra} --sync-server ${syncServer}\n`
+            : "A storage ID is only valid with --legacy.\n" +
+              "Subduction (the default backend) does not use one — pass just the URL:\n" +
+              "  pushwork init --sync-server <url>\n") +
+          "To select the legacy backend instead:\n" +
           "  pushwork init --legacy --sync-server <url> <storage-id>"
       )
     );

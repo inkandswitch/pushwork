@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, reliability]
   pull_request:
 
 permissions:
@@ -12,6 +12,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# NOTE: no formatter check by design. This codebase deliberately mixes
+# tabs/spaces per file (see CLAUDE.md "Code style" and the header of
+# eslint.config.mjs) — a repo-wide prettier pass would churn every file
+# and erase that intent. ESLint covers correctness lints instead.
 jobs:
   check:
     name: Build · Typecheck · Lint · Package · Unit tests
@@ -37,16 +41,29 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Lint
+      - name: Lint (src + test + bench)
         run: pnpm run lint
 
       - name: Validate package (exports + types)
         run: pnpm run check:package
 
       - name: Unit tests
-        # Offline unit suite only. The integration tests talk to a live
-        # Subduction relay (network) and are run separately, not in CI.
-        run: pnpm exec jest test/unit --testPathIgnorePatterns repo-factory
+        # Offline unit suite only. The integration tests (test/integration,
+        # including the network-dependent repo-factory suite that used to
+        # live in test/unit) talk to a live Subduction relay and are run
+        # manually, not in CI. The event-loop starvation bench guard
+        # (PUSHWORK_BENCH=1) is also excluded: it asserts wall-clock drift
+        # bounds that flake on shared runners.
+        run: pnpm exec jest test/unit
+
+  workflow-lint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
 
   typos:
     name: Typos

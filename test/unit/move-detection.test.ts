@@ -2,8 +2,7 @@
  * Move/rename detection (src/core/move-detection.ts) — pushwork's own logic:
  * pair a deleted file with a created file when their content is similar enough,
  * subject to a configurable threshold, a >50%-size-difference early-exit, and a
- * binary short-circuit. Previously the class was `new`-ed and discarded by two
- * test files without a single method call.
+ * binary short-circuit.
  */
 
 import { MoveDetector } from "../../src/core/move-detection";

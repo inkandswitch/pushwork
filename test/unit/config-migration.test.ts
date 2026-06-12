@@ -284,3 +284,42 @@ describe("ConfigManager.migrateIfNeeded", () => {
     expect(migrated.sync_server_storage_id).toBeUndefined();
   });
 });
+
+describe("ConfigManager.initializeWithOverrides", () => {
+  let tmpDir: string;
+  let cleanup: () => void;
+
+  beforeEach(async () => {
+    const tmpObj = tmp.dirSync({ unsafeCleanup: true });
+    tmpDir = tmpObj.name;
+    cleanup = tmpObj.removeCallback;
+    await fs.mkdir(path.join(tmpDir, ".pushwork"), { recursive: true });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("bare call defaults to Subduction (fresh-config semantics)", async () => {
+    // resolveProtocol({}) returns "legacy" (v0 on-disk rule); a fresh
+    // overrides object must NOT inherit that — new installs are Subduction.
+    const mgr = new ConfigManager(tmpDir);
+    const config = await mgr.initializeWithOverrides();
+    expect(config.protocol).toBe("subduction");
+    expect(config.config_version).toBe(1);
+  });
+
+  it("explicit protocol override wins", async () => {
+    const mgr = new ConfigManager(tmpDir);
+    const config = await mgr.initializeWithOverrides({ protocol: "legacy" });
+    expect(config.protocol).toBe("legacy");
+  });
+
+  it("v0-style subduction:false override still selects legacy", async () => {
+    const mgr = new ConfigManager(tmpDir);
+    const config = await mgr.initializeWithOverrides({ subduction: false });
+    expect(config.protocol).toBe("legacy");
+    // The legacy v0 field must not leak into the written v1 shape
+    expect(config.subduction).toBeUndefined();
+  });
+});

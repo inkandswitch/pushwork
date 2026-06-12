@@ -1,6 +1,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
+import * as fc from "fast-check";
 import {
   pathExists,
   getFileSystemEntry,
@@ -10,7 +11,6 @@ import {
   ensureDirectoryExists,
   removePath,
   listDirectory,
-  calculateContentHash,
   getMimeType,
   getFileExtension,
   normalizePath,
@@ -256,6 +256,26 @@ describe("File System Utilities", () => {
 
       expect(await pathExists(nonExistentPath)).toBe(false);
     });
+
+    it("handles filenames with spaces, dashes, and multiple dots", async () => {
+      for (const name of [
+        "file with spaces.txt",
+        "file-with-dashes.txt",
+        "file.with.multiple.dots.txt",
+      ]) {
+        const p = path.join(tmpDir, name);
+        await writeFileContent(p, "x");
+        await removePath(p);
+        expect(await pathExists(p)).toBe(false);
+      }
+    });
+
+    it("tolerates concurrent removal of the same path", async () => {
+      const p = path.join(tmpDir, "concurrent.txt");
+      await writeFileContent(p, "x");
+      await Promise.all([removePath(p), removePath(p), removePath(p)]);
+      expect(await pathExists(p)).toBe(false);
+    });
   });
 
   describe("listDirectory", () => {
@@ -288,37 +308,7 @@ describe("File System Utilities", () => {
     });
   });
 
-  describe("calculateContentHash", () => {
-    it("should generate consistent hashes for string content", async () => {
-      const content = "test content";
-
-      const hash1 = await calculateContentHash(content);
-      const hash2 = await calculateContentHash(content);
-
-      expect(hash1).toBe(hash2);
-      expect(hash1).toHaveLength(64); // SHA-256 hex string
-    });
-
-    it("should generate consistent hashes for binary content", async () => {
-      const content = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
-
-      const hash1 = await calculateContentHash(content);
-      const hash2 = await calculateContentHash(content);
-
-      expect(hash1).toBe(hash2);
-      expect(hash1).toHaveLength(64);
-    });
-
-    it("should generate different hashes for different content", async () => {
-      const content1 = "content1";
-      const content2 = "content2";
-
-      const hash1 = await calculateContentHash(content1);
-      const hash2 = await calculateContentHash(content2);
-
-      expect(hash1).not.toBe(hash2);
-    });
-  });
+  // Content hashing is covered by the oracle property in content.test.ts.
 
   describe("getMimeType", () => {
     it("should return correct MIME type for text files", () => {
@@ -338,6 +328,16 @@ describe("File System Utilities", () => {
       expect(getFileExtension("archive.tar.gz")).toBe("gz");
       expect(getFileExtension("noextension")).toBe("");
     });
+
+    it("property: extension of `name.ext` is `ext` for dot-free parts", () => {
+      const part = fc.stringMatching(/^[a-zA-Z0-9_-]{1,12}$/);
+      fc.assert(
+        fc.property(part, part, (name, ext) => {
+          return getFileExtension(`${name}.${ext}`) === ext;
+        }),
+        { numRuns: 200 }
+      );
+    });
   });
 
   describe("normalizePath", () => {
@@ -345,6 +345,27 @@ describe("File System Utilities", () => {
       expect(normalizePath("path\\to\\file")).toBe("path/to/file");
       expect(normalizePath("path/to/file")).toBe("path/to/file");
       expect(normalizePath("path//to//file")).toBe("path/to/file");
+    });
+
+    it("property: idempotent, and output never contains \\\\ or //", () => {
+      // Inputs shaped like real relative paths with mixed/duplicated separators.
+      const seg = fc.stringMatching(/^[a-zA-Z0-9._-]{1,10}$/);
+      const sep = fc.constantFrom("/", "\\", "//", "\\\\");
+      const messyPath = fc
+        .tuple(seg, fc.array(fc.tuple(sep, seg), { maxLength: 4 }))
+        .map(([first, rest]) => first + rest.map(([s, p]) => s + p).join(""));
+
+      fc.assert(
+        fc.property(messyPath, (p) => {
+          const once = normalizePath(p);
+          return (
+            normalizePath(once) === once &&
+            !once.includes("\\") &&
+            !once.includes("//")
+          );
+        }),
+        { numRuns: 300 }
+      );
     });
   });
 
@@ -361,6 +382,20 @@ describe("File System Utilities", () => {
       const target = "/home/user/project";
 
       expect(getRelativePath(base, target)).toBe(".");
+    });
+
+    it("property: resolving base + relative recovers the target", () => {
+      const seg = fc.stringMatching(/^[a-z0-9]{1,8}$/);
+      const segments = fc.array(seg, { minLength: 1, maxLength: 4 });
+      fc.assert(
+        fc.property(segments, (segs) => {
+          const base = tmpDir;
+          const target = path.join(base, ...segs);
+          const rel = getRelativePath(base, target);
+          return path.resolve(base, rel) === path.resolve(target);
+        }),
+        { numRuns: 200 }
+      );
     });
   });
 });

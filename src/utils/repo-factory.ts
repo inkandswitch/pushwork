@@ -128,7 +128,15 @@ async function hasCorruptStorage(dir: string): Promise<boolean> {
 export async function createRepo(
   workingDir: string,
   config: DirectoryConfig,
-  protocol: SyncProtocol = "subduction"
+  protocol: SyncProtocol = "subduction",
+  opts?: {
+    /**
+     * Skip the corrupt-storage scan/wipe. Used by shard-ingest workers,
+     * which share the storage directory with the main process: the main
+     * repo already ran the scan, and concurrent wipes would race.
+     */
+    skipCorruptScan?: boolean;
+  }
 ): Promise<Repo> {
   const RepoClass = await getRepoClass();
 
@@ -138,7 +146,7 @@ export async function createRepo(
   // Detect and recover from corrupt local storage (0-byte files left by
   // incomplete writes from a previous run). Wipe the cache so the Repo
   // hydrates cleanly from the sync server.
-  if (await hasCorruptStorage(automergeDir)) {
+  if (!opts?.skipCorruptScan && (await hasCorruptStorage(automergeDir))) {
     console.warn("[pushwork] Corrupt local storage detected, clearing cache...");
     await fs.rm(automergeDir, { recursive: true, force: true });
     await fs.mkdir(automergeDir, { recursive: true });

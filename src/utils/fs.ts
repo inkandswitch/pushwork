@@ -1,11 +1,11 @@
 import * as fs from "fs/promises"
 import * as path from "path"
-import * as crypto from "crypto"
 import {glob} from "glob"
 import * as mimeTypes from "mime-types"
 import * as ignore from "ignore"
 import {FileSystemEntry, FileType} from "../types"
 import {isEnhancedTextFile, isLikelyUtf8Text} from "./mime-types"
+import {mapWithConcurrency, IO_CONCURRENCY} from "./concurrency"
 
 /**
  * Check if a path exists
@@ -145,23 +145,26 @@ export async function removePath(filePath: string): Promise<void> {
 }
 
 /**
- * Check if a path matches any of the exclude patterns using the ignore library
- * Supports proper gitignore-style patterns (e.g., "node_modules", "*.tmp", ".git")
+ * Build a reusable exclude predicate from gitignore-style patterns.
+ *
+ * The `ignore` matcher is compiled ONCE here and closed over, instead of
+ * being rebuilt for every path (the old `isExcluded` recompiled the
+ * matcher on each call — O(paths × patterns) wasted work on large trees).
  */
-function isExcluded(
-	filePath: string,
+function buildExcludeFilter(
 	basePath: string,
 	excludePatterns: string[]
-): boolean {
-	if (excludePatterns.length === 0) return false
+): (filePath: string) => boolean {
+	if (excludePatterns.length === 0) return () => false
 
-	const relativePath = path.relative(basePath, filePath)
-
-	// Use the ignore library which implements proper .gitignore semantics
-	// This is the same library used by ESLint and other major tools
+	// Same library used by ESLint et al. for proper .gitignore semantics.
 	const ig = ignore.default().add(excludePatterns)
 
-	return ig.ignores(relativePath)
+	return (filePath: string): boolean => {
+		const relativePath = path.relative(basePath, filePath)
+		// `ignore` rejects an empty path; the root itself is never excluded.
+		return relativePath !== "" && ig.ignores(relativePath)
+	}
 }
 
 /**
@@ -189,18 +192,21 @@ export async function listDirectory(
 			dot: true,
 		})
 
-		// Parallelize all stat calls for better performance
-		const allEntries = await Promise.all(
-			paths.map(async filePath => {
-				// Filter using proper gitignore semantics from the ignore library
-				if (isExcluded(filePath, dirPath, excludePatterns)) {
-					return null
-				}
-				return await getFileSystemEntry(filePath)
-			})
+		// Compile the exclude matcher once, then drop excluded paths before
+		// stat'ing — so excluded trees (e.g. .pushwork, node_modules) cost
+		// only a string match, not a filesystem stat.
+		const isExcluded = buildExcludeFilter(dirPath, excludePatterns)
+		const kept = paths.filter(filePath => !isExcluded(filePath))
+
+		// Stat with bounded concurrency so a huge tree doesn't open tens of
+		// thousands of file descriptors (or buffer everything) at once.
+		const allEntries = await mapWithConcurrency(
+			kept,
+			IO_CONCURRENCY,
+			filePath => getFileSystemEntry(filePath)
 		)
 
-		// Filter out null entries (excluded files or files that couldn't be read)
+		// Filter out null entries (files that couldn't be stat'd)
 		entries.push(...allEntries.filter((e): e is FileSystemEntry => e !== null))
 	} catch {
 		// Return empty array if directory doesn't exist or can't be read
@@ -233,17 +239,6 @@ export async function movePath(
 ): Promise<void> {
 	await ensureDirectoryExists(path.dirname(destPath))
 	await fs.rename(sourcePath, destPath)
-}
-
-/**
- * Calculate content hash for change detection
- */
-export async function calculateContentHash(
-	content: string | Uint8Array
-): Promise<string> {
-	const hash = crypto.createHash("sha256")
-	hash.update(content)
-	return hash.digest("hex")
 }
 
 /**

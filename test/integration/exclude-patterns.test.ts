@@ -141,4 +141,45 @@ describe("Exclude Patterns", () => {
     expect(filePaths).not.toContain("secret.env");
     expect(filePaths).not.toContain(".pushwork/snapshot.json");
   });
+
+  it("excludes common ecosystem build/dependency dirs by default", async () => {
+    // Real source files that SHOULD sync
+    const included = [
+      "src/main.rs",
+      "README.md",
+      ".yarn/releases/yarn.cjs", // committed yarn release — not under cache/
+    ];
+    // Machine-generated junk that should NOT sync
+    const excluded = [
+      "node_modules/dep/index.js",
+      ".pnpm-store/v3/files/ab/cd",
+      ".yarn/cache/pkg-npm-1.0.0.zip", // path-anchored: .yarn/cache excluded...
+      "target/debug/build.o", // Rust target at root
+      "crates/inner/target/debug/x.o", // ...and `target` matches at any depth
+      "__pycache__/mod.pyc",
+      ".venv/bin/python",
+      "dist-newstyle/build/x", // Haskell
+      "result/bin/app", // Nix build symlink dir
+    ];
+
+    for (const rel of [...included, ...excluded]) {
+      const abs = path.join(tmpDir, rel);
+      await ensureDirectoryExists(path.dirname(abs));
+      await writeFileContent(abs, "x");
+    }
+
+    const defaults =
+      configManager.getDefaultDirectoryConfig().exclude_patterns;
+    const entries = await listDirectory(tmpDir, true, defaults);
+    const filePaths = entries.map((entry) =>
+      path.relative(tmpDir, entry.path)
+    );
+
+    for (const rel of included) {
+      expect(filePaths).toContain(rel);
+    }
+    for (const rel of excluded) {
+      expect(filePaths).not.toContain(rel);
+    }
+  });
 });

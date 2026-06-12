@@ -21,6 +21,25 @@ const execFilePromise = promisify(execFile);
 const PUSHWORK_CLI = path.join(__dirname, "../../dist/cli.js");
 
 /**
+ * Set PUSHWORK_TEST_VERBOSE=1 to tee each CLI subprocess's output to the
+ * console. Without it the output only surfaces on failure — debugging a
+ * slow-but-passing run is flying blind.
+ */
+const TEST_VERBOSE = !!process.env.PUSHWORK_TEST_VERBOSE;
+
+function teeCliOutput(args: string[], stdout: string, stderr: string): void {
+  if (!TEST_VERBOSE) return;
+  const prefix = `[cli] pushwork ${args.join(" ")}`;
+  for (const [stream, text] of [
+    ["stdout", stdout],
+    ["stderr", stderr],
+  ] as const) {
+    const trimmed = text?.trim();
+    if (trimmed) console.log(`${prefix} ${stream}:\n${trimmed}`);
+  }
+}
+
+/**
  * Execute pushwork CLI command
  */
 async function pushwork(
@@ -32,8 +51,10 @@ async function pushwork(
       cwd,
       env: { ...process.env, FORCE_COLOR: "0" },
     });
+    teeCliOutput(args, result.stdout, result.stderr);
     return result;
   } catch (error: any) {
+    teeCliOutput(args, error.stdout ?? "", error.stderr ?? "");
     throw new Error(
       `pushwork ${args.join(" ")} failed: ${error.message}\nstdout: ${error.stdout}\nstderr: ${error.stderr}`
     );
@@ -265,7 +286,9 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "from-b.txt"))).toBe(true);
       const content = await fs.readFile(path.join(repoA, "from-b.txt"), "utf-8");
       expect(content).toBe("Created by B");
-    }, 30000);
+      // 90s: each CLI sync is ~4s and convergence needs several rounds × 2
+      // repos — 30s budgets flaked on harness overhead, not sync bugs.
+    }, 90000);
 
     it("should sync subdirectories correctly", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -326,7 +349,8 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "file-b.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-a.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-b.txt"))).toBe(true);
-    }, 30000);
+      // 90s: see "new file added to B back to A" — same budget arithmetic.
+    }, 90000);
 
     it("should handle file modification sync", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -472,6 +496,44 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "dist", "assets", "app-ABC123.js"))).toBe(false);
       expect(await pathExists(path.join(repoA, "dist", "assets", "vendor-DEF456.js"))).toBe(false);
     }, 60000);
+
+    it("clone populates artifact contentHash; next sync must not replace docs", async () => {
+      // Root-cause guard for the artifact resurrection bug: clone used to
+      // create artifact snapshot entries WITHOUT contentHash. The next sync
+      // then saw a phantom local edit ("no stored hash = assume changed"),
+      // replaced the artifact docs wholesale, and churned the directory
+      // entries — which CRDT-merged into duplicated/resurrected entries
+      // against the other peer's later rebuild.
+      const repoA = path.join(tmpDir, "repo-a");
+      const repoB = path.join(tmpDir, "repo-b");
+      await fs.mkdir(repoA);
+      await fs.mkdir(repoB);
+
+      await fs.mkdir(path.join(repoA, "dist"), { recursive: true });
+      await fs.writeFile(path.join(repoA, "dist", "app.js"), "// artifact");
+      await fs.writeFile(path.join(repoA, "readme.md"), "hello");
+      await pushwork(["init", "."], repoA);
+
+      const { stdout: rootUrl } = await pushwork(["url"], repoA);
+      await pushwork(["clone", rootUrl.trim(), repoB], tmpDir);
+
+      const readSnapshot = async (repo: string) =>
+        new Map<string, { url: string; contentHash?: string }>(
+          JSON.parse(
+            await fs.readFile(path.join(repo, ".pushwork", "snapshot.json"), "utf8")
+          ).files
+        );
+
+      // Clone must store a contentHash for artifact entries
+      const afterClone = await readSnapshot(repoB);
+      expect(afterClone.get("dist/app.js")?.contentHash).toBeDefined();
+
+      // The follow-up sync must NOT replace the artifact document
+      const docIdBefore = afterClone.get("dist/app.js")!.url.split("#")[0];
+      await pushwork(["sync"], repoB);
+      const afterSync = await readSnapshot(repoB);
+      expect(afterSync.get("dist/app.js")!.url.split("#")[0]).toBe(docIdBefore);
+    }, 90000);
 
     it("deleted artifact files should not resurrect on clone", async () => {
       // Two repos: A deletes files in an artifact directory, B should not

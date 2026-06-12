@@ -24,8 +24,8 @@
 		"test:bail": "jest --bail",
 		"test:watch": "jest --watch",
 		"test:coverage": "jest --coverage",
-		"lint": "eslint src",
-		"lint:fix": "eslint src --fix",
+		"lint": "eslint src test bench",
+		"lint:fix": "eslint src test bench --fix",
 		"check:package": "publint --strict && attw --pack .",
 		"clean": "rm -rf dist",
 		"prepack": "pnpm run build",
@@ -48,9 +48,9 @@
 	"license": "MIT",
 	"dependencies": {
 		"@automerge/automerge": "3.3.0-fragments.1",
-		"@automerge/automerge-repo": "2.6.0-subduction.29",
+		"@automerge/automerge-repo": "github:automerge/automerge-repo#feed-macrotasks&path:packages/automerge-repo",
 		"@automerge/automerge-repo-network-websocket": "2.6.0-subduction.29",
-		"@automerge/automerge-repo-storage-nodefs": "2.6.0-subduction.29",
+		"@automerge/automerge-repo-storage-nodefs": "github:automerge/automerge-repo#feed-macrotasks&path:packages/automerge-repo-storage-nodefs",
 		"@automerge/automerge-subduction": "0.15.0",
 		"@commander-js/extra-typings": "^14.0.0",
 		"chalk": "^5.3.0",
@@ -108,11 +108,6 @@
 		"transform": {
 			"^.+\\.tsx?$": "ts-jest",
 			"^.+\\.jsx?$": "babel-jest"
-		}
-	},
-	"pnpm": {
-		"overrides": {
-			"@automerge/automerge": "3.3.0-fragments.1"
 		}
 	}
 }
