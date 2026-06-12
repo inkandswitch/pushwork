@@ -60,7 +60,9 @@ export class ChangeDetector {
 	async detectChanges(
 		snapshot: SyncSnapshot,
 		excludePaths?: Set<string>,
-		precomputedFiles?: Map<string, {content: string | Uint8Array; type: FileType}>
+		precomputedFiles?: Map<string, {content: string | Uint8Array; type: FileType}>,
+		freshPaths?: Set<string>,
+		deferRemoteContent?: boolean
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -75,19 +77,19 @@ export class ChangeDetector {
 
 		// Check for local changes (new, modified, deleted files)
 		const localChanges = await profileAsync("detect:local", () =>
-			this.detectLocalChanges(snapshot, currentFiles)
+			this.detectLocalChanges(snapshot, currentFiles, freshPaths)
 		)
 		changes.push(...localChanges)
 
 		// Check for remote changes (changes in Automerge documents)
 		const remoteChanges = await profileAsync("detect:remote", () =>
-			this.detectRemoteChanges(snapshot)
+			this.detectRemoteChanges(snapshot, freshPaths)
 		)
 		changes.push(...remoteChanges)
 
 		// Check for new remote documents not in snapshot (critical for clone scenarios)
 		const newRemoteDocuments = await profileAsync("detect:new-remote", () =>
-			this.detectNewRemoteDocuments(snapshot, excludePaths)
+			this.detectNewRemoteDocuments(snapshot, excludePaths, deferRemoteContent)
 		)
 		changes.push(...newRemoteDocuments)
 
@@ -99,7 +101,8 @@ export class ChangeDetector {
 	 */
 	private async detectLocalChanges(
 		snapshot: SyncSnapshot,
-		currentFiles: Map<string, {content: string | Uint8Array; type: FileType}>
+		currentFiles: Map<string, {content: string | Uint8Array; type: FileType}>,
+		freshPaths?: Set<string>
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -107,6 +110,11 @@ export class ChangeDetector {
 		await Promise.all(
 			Array.from(currentFiles.entries()).map(
 				async ([relativePath, fileInfo]) => {
+					// Paths just written by this run with known-current heads
+					// (shared-nothing worker ingest). Reading their docs here
+					// would materialize them on the main thread for no signal.
+					if (freshPaths?.has(relativePath)) return
+
 					const snapshotEntry = snapshot.files.get(relativePath)
 
 					if (!snapshotEntry) {
@@ -257,13 +265,20 @@ export class ChangeDetector {
 	 * Detect changes in remote Automerge documents compared to snapshot
 	 */
 	private async detectRemoteChanges(
-		snapshot: SyncSnapshot
+		snapshot: SyncSnapshot,
+		freshPaths?: Set<string>
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
 		await Promise.all(
 			Array.from(snapshot.files.entries()).map(
 				async ([relativePath, snapshotEntry]) => {
+					// Paths just pushed via shared-nothing worker repos: heads
+					// in the snapshot are current, and materializing the doc
+					// here would defeat the experiment. Concurrent remote
+					// edits are deferred to the next sync.
+					if (freshPaths?.has(relativePath)) return
+
 					// Find the file's current entry in the remote directory hierarchy
 					const remoteEntry = await this.findInRemoteDirectory(
 						snapshot.rootDirectoryUrl,
@@ -361,7 +376,8 @@ export class ChangeDetector {
 	 */
 	private async detectNewRemoteDocuments(
 		snapshot: SyncSnapshot,
-		excludePaths?: Set<string>
+		excludePaths?: Set<string>,
+		deferRemoteContent?: boolean
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -377,7 +393,8 @@ export class ChangeDetector {
 				"",
 				snapshot,
 				changes,
-				excludePaths
+				excludePaths,
+				deferRemoteContent
 			)
 		} catch (error) {
 			out.taskLine(`Failed to discover remote documents: ${error}`, true)
@@ -394,7 +411,8 @@ export class ChangeDetector {
 		currentPath: string,
 		snapshot: SyncSnapshot,
 		changes: DetectedChange[],
-		excludePaths?: Set<string>
+		excludePaths?: Set<string>,
+		deferRemoteContent?: boolean
 	): Promise<void> {
 		try {
 			// Find and wait for document to be available (retries on "unavailable")
@@ -425,6 +443,26 @@ export class ChangeDetector {
 					if (!existingEntry) {
 						// This is a remote file not in our snapshot
 						const localContent = await this.getLocalContent(entryPath)
+
+						// EXPERIMENT (shared-nothing clone): when deferring,
+						// don't materialize the file doc here — emit a
+						// deferred change carrying only the entry URL, to be
+						// fetched + written by a shard-pull worker. Only the
+						// clean clone case (no local copy) is deferrable;
+						// local/remote coexistence needs content to compare.
+						if (deferRemoteContent && localContent === null) {
+							changes.push({
+								path: entryPath,
+								changeType: ChangeType.REMOTE_ONLY,
+								fileType: FileType.TEXT, // resolved by the worker
+								localContent: null,
+								remoteContent: null,
+								remoteUrl: entry.url,
+								deferredFetch: true,
+							})
+							continue
+						}
+
 						const remoteContent = await this.getCurrentRemoteContent(entry.url)
 						const remoteHead = await this.getCurrentRemoteHead(entry.url)
 
@@ -503,7 +541,8 @@ export class ChangeDetector {
 						entryPath,
 						snapshot,
 						changes,
-						excludePaths
+						excludePaths,
+						deferRemoteContent
 					)
 				}
 			}

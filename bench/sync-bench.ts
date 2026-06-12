@@ -51,6 +51,7 @@ interface Args {
   keep: boolean;
   online: boolean;
   clone: string;
+  cloneLocal: boolean;
 }
 
 function parseArgs(): Args {
@@ -71,6 +72,11 @@ function parseArgs(): Args {
     // --clone <url> ⇒ pull the given root URL into a fresh dir (online),
     // measuring the pull path instead of generating + uploading a tree.
     clone: get("--clone", ""),
+    // --clone-local ⇒ fully offline clone: generate + ingest a tree in a
+    // source dir (untimed), copy its automerge storage into a fresh dir,
+    // then measure the pull-everything sync from local storage. Isolates
+    // the clone path's CPU (doc materialization) deterministically.
+    cloneLocal: a.includes("--clone-local"),
   };
 }
 
@@ -121,7 +127,7 @@ async function main(): Promise<void> {
 
     // Generate a tree only when uploading; clone pulls an existing root.
     let genMs = 0;
-    if (!cloneMode) {
+    if (!cloneMode && !args.cloneLocal) {
       const genStart = performance.now();
       await generateTree(root, args);
       genMs = Math.round(performance.now() - genStart);
@@ -133,6 +139,53 @@ async function main(): Promise<void> {
     const config = new ConfigManager(root).getDefaultDirectoryConfig();
     config.sync_enabled = cloneMode || args.online;
 
+    // --clone-local setup (untimed): ingest the tree in a SOURCE dir with
+    // its own engine, then copy its automerge storage into `root` so the
+    // measured sync pulls everything from local storage.
+    let localCloneSourceUrl: string | undefined;
+    if (args.cloneLocal) {
+      const srcRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), "pushwork-bench-src-")
+      );
+      try {
+        await fs.mkdir(path.join(srcRoot, ".pushwork", "automerge"), {
+          recursive: true,
+        });
+        await generateTree(srcRoot, args);
+        const srcConfig = new ConfigManager(
+          srcRoot
+        ).getDefaultDirectoryConfig();
+        srcConfig.sync_enabled = false;
+        const srcRepo = await createRepo(srcRoot, srcConfig, "subduction");
+        const srcEngine = new SyncEngine(srcRepo, srcRoot, srcConfig);
+        const dirName = path.basename(srcRoot);
+        const srcRootHandle = srcRepo.create({
+          "@patchwork": { type: "folder" },
+          name: dirName,
+          title: dirName,
+          docs: [],
+        } as DirectoryDocument);
+        localCloneSourceUrl = getPlainUrl(srcRootHandle.url);
+        await srcEngine.setRootDirectoryUrl(localCloneSourceUrl as AutomergeUrl);
+        // Source ingest must NOT use worker modes — keep the measured side
+        // the only variable.
+        const savedMode = process.env.PUSHWORK_PARALLEL_INGEST;
+        delete process.env.PUSHWORK_PARALLEL_INGEST;
+        const srcResult = await srcEngine.sync({ protocol: "subduction" });
+        if (savedMode !== undefined)
+          process.env.PUSHWORK_PARALLEL_INGEST = savedMode;
+        if (!srcResult.success) throw new Error("clone-local source ingest failed");
+        await srcRepo.shutdown();
+        await fs.cp(
+          path.join(srcRoot, ".pushwork", "automerge"),
+          path.join(root, ".pushwork", "automerge"),
+          { recursive: true }
+        );
+      } finally {
+        await fs.rm(srcRoot, { recursive: true, force: true });
+      }
+    }
+
     const repo = await createRepo(root, config, "subduction");
     const engine = new SyncEngine(repo, root, config);
 
@@ -140,6 +193,9 @@ async function main(): Promise<void> {
     if (cloneMode) {
       // Pull an existing remote tree into this fresh dir.
       rootUrl = getPlainUrl(args.clone as AutomergeUrl);
+      await engine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
+    } else if (args.cloneLocal) {
+      rootUrl = localCloneSourceUrl!;
       await engine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
     } else {
       // Mirror `init`'s root directory document.
@@ -174,13 +230,21 @@ async function main(): Promise<void> {
     printProfileReport(
       cloneMode
         ? `CLONE(prod) pulled=${result.filesChanged}`
-        : `${args.online ? "ONLINE(prod)" : "offline"} files=${args.files} ` +
-            `size=${args.size}B text=${args.text}`
+        : args.cloneLocal
+          ? `CLONE(local) pulled=${result.filesChanged} files=${args.files} size=${args.size}B`
+          : `${args.online ? "ONLINE(prod)" : "offline"} files=${args.files} ` +
+              `size=${args.size}B text=${args.text}`
     );
 
     const summary = {
       config: args,
-      mode: cloneMode ? "clone" : args.online ? "online" : "offline",
+      mode: cloneMode
+        ? "clone"
+        : args.cloneLocal
+          ? "clone-local"
+          : args.online
+            ? "online"
+            : "offline",
       rootUrl,
       genMs,
       syncMs,

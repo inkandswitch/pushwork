@@ -3,6 +3,7 @@ import {
 	Repo,
 	DocHandle,
 	UrlHeads,
+	generateAutomergeUrl,
 	parseAutomergeUrl,
 	stringifyAutomergeUrl,
 } from "@automerge/automerge-repo"
@@ -40,6 +41,15 @@ import {MoveDetector} from "./move-detection"
 import {out} from "../utils/output"
 import {profileAsync, profileSync, count} from "../utils/profile"
 import {makeYielder} from "../utils/concurrency"
+import {
+	ClonePullTask,
+	IngestTask,
+	ingestWorkerCount,
+	parallelIngestMode,
+	runIngestPool,
+	runShardIngest,
+	runShardPull,
+} from "../utils/ingest-pool"
 import * as path from "path"
 
 const isDebug = !!process.env.DEBUG
@@ -136,6 +146,11 @@ export class SyncEngine {
 	// Map from path to handle for leaf-first sync ordering
 	// Path depth determines sync order (deepest first)
 	private handlesByPath: Map<string, DocHandle<unknown>> = new Map()
+	// Paths pushed by shard-ingest workers this run (shared-nothing
+	// experiment). These docs were created, persisted, and uploaded in
+	// worker-owned repos; the main thread must NOT materialize them —
+	// detect:post and the snapshot head-update loop skip these paths.
+	private workerPushedPaths: Set<string> = new Set()
 	private config: DirectoryConfig
 
 	constructor(
@@ -455,6 +470,7 @@ export class SyncEngine {
 
 		// Reset tracked handles for sync
 		this.handlesByPath = new Map()
+		this.workerPushedPaths = new Set()
 
 		try {
 			// Load current snapshot
@@ -530,7 +546,15 @@ export class SyncEngine {
 			// Capture pre-push snapshot file paths to detect deletions after push
 			const prePushFilePaths = new Set(snapshot.files.keys())
 			const changes = await profileAsync("detect:pre-push", () =>
-				this.changeDetector.detectChanges(snapshot, undefined, currentFiles)
+				this.changeDetector.detectChanges(
+					snapshot,
+					undefined,
+					currentFiles,
+					undefined,
+					// Shared-nothing experiment: don't materialize new remote
+					// file docs during discovery; shard-pull workers fetch them.
+					parallelIngestMode() === "shard"
+				)
 			)
 
 			// Detect moves
@@ -687,8 +711,25 @@ export class SyncEngine {
 				debug(`sync: excluding ${deletedPaths.size} deleted paths from re-detection`)
 			}
 			debug("sync: re-detecting changes after network sync")
+			// Shared-nothing experiment: paths pushed via worker-owned repos
+			// must not be re-checked here — that would repo.find (and thus
+			// materialize) every doc on the main thread, reinstating the
+			// serial cost the workers exist to avoid. Their snapshot heads
+			// were written from worker reports moments ago; genuinely
+			// concurrent remote edits get picked up on the next sync.
 			const freshChanges = await profileAsync("detect:post", () =>
-				this.changeDetector.detectChanges(snapshot, deletedPaths, currentFiles)
+				this.changeDetector.detectChanges(
+					snapshot,
+					deletedPaths,
+					currentFiles,
+					this.workerPushedPaths.size > 0
+						? this.workerPushedPaths
+						: undefined,
+					// Shared-nothing experiment: emit deferred (URL-only)
+					// changes for new remote files; pull routes them to
+					// shard-pull workers.
+					parallelIngestMode() === "shard"
+				)
 			)
 			const freshRemoteChanges = freshChanges.filter(
 				c =>
@@ -720,6 +761,10 @@ export class SyncEngine {
 			// can't find the entries to splice out).
 			await profileAsync("snapshot:head-update", async () => {
 			for (const [filePath, snapshotEntry] of snapshot.files.entries()) {
+				// Shared-nothing experiment: worker-pushed docs aren't (and
+				// must not be) materialized on the main thread; their heads
+				// were recorded from the worker reports and are current.
+				if (this.workerPushedPaths.has(filePath)) continue
 				try {
 					const handle = await this.repo.find(getPlainUrl(snapshotEntry.url))
 					const currentHeads = handle.heads()
@@ -840,6 +885,28 @@ export class SyncEngine {
 		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 		out.update(`Pushing ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 
+		// EXPERIMENT (PUSHWORK_PARALLEL_INGEST): build the Automerge docs
+		// for NEW files in a worker pool (darn-style parallel leaf phase),
+		// then proceed with the normal serial directory phase below. Files
+		// whose worker build failed simply aren't in the maps and fall back
+		// to main-thread creation in the per-file loop.
+		//   mode "import": workers ship doc bytes, main repo.imports them
+		//   mode "shard":  shared-nothing — workers own full repos (own
+		//                  Wasm/storage-writes/socket); main never
+		//                  materializes the docs, only records {url, heads}
+		const ingestMode = newFiles.length > 1 ? parallelIngestMode() : null
+		let prebuiltHandles = new Map<string, DocHandle<FileDocument>>()
+		let shardResults = new Map<string, {url: AutomergeUrl; heads: UrlHeads}>()
+		if (ingestMode === "import") {
+			prebuiltHandles = await profileAsync("push:worker-ingest", () =>
+				this.buildNewFileDocsInWorkers(newFiles)
+			)
+		} else if (ingestMode === "shard") {
+			shardResults = await profileAsync("push:shard-ingest", () =>
+				this.ingestNewFilesInShardedRepos(newFiles, result)
+			)
+		}
+
 		// Group changes by parent directory path
 		const changesByDir = new Map<string, DetectedChange[]>()
 		for (const change of localChanges) {
@@ -929,7 +996,48 @@ export class SyncEngine {
 						// New file
 						debug(`push: [${filesProcessed}/${totalFiles}] create ${change.path} (${change.fileType})`)
 						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] creating ${change.path}`)
-						const handle = await this.createRemoteFile(change)
+
+						// Shared-nothing path: the doc already exists in
+						// storage and on the server (worker-owned repo).
+						// Record its URL/heads without materializing it.
+						const shardResult = shardResults.get(change.path)
+						if (shardResult) {
+							const entryUrl = this.isArtifactPath(change.path)
+								? stringifyAutomergeUrl({
+										documentId: parseAutomergeUrl(
+											getPlainUrl(shardResult.url)
+										).documentId,
+										heads: shardResult.heads,
+									})
+								: shardResult.url
+							newEntries.push({name: fileName, url: entryUrl})
+							this.snapshotManager.updateFileEntry(
+								snapshot,
+								change.path,
+								{
+									path: joinAndNormalizePath(
+										this.rootPath,
+										change.path
+									),
+									url: entryUrl,
+									head: shardResult.heads,
+									extension: getFileExtension(change.path),
+									mimeType: getEnhancedMimeType(change.path),
+									...(this.isArtifactPath(change.path) && change.localContent
+										? {contentHash: contentHash(change.localContent)}
+										: {}),
+								}
+							)
+							this.workerPushedPaths.add(change.path)
+							result.filesChanged++
+							debug(`push: shard-created ${change.path} -> ${shardResult.url}`)
+							await maybeYield()
+							continue
+						}
+
+						const handle =
+							prebuiltHandles.get(change.path) ??
+							(await this.createRemoteFile(change))
 						if (handle) {
 							const entryUrl = this.getEntryUrl(handle, change.path)
 							newEntries.push({name: fileName, url: entryUrl})
@@ -1068,8 +1176,25 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
+		// EXPERIMENT (shared-nothing clone): deferred changes carry only
+		// an entry URL — fetch + materialize + write them in shard-pull
+		// workers. Failed paths fall back to the normal serial loop by
+		// re-fetching content on the main thread.
+		const deferred = remoteChanges.filter(c => c.deferredFetch)
+		const immediate = remoteChanges.filter(c => !c.deferredFetch)
+		let fallbackPaths: Set<string> | undefined
+		if (deferred.length > 1) {
+			fallbackPaths = await profileAsync("pull:shard-pull", () =>
+				this.pullRemoteFilesInShardedRepos(deferred, snapshot, result)
+			)
+		} else if (deferred.length === 1) {
+			// Worker startup (~1.5 s of Wasm + Repo init) isn't worth it for
+			// a single file — materialize on the main thread directly.
+			fallbackPaths = new Set([deferred[0].path])
+		}
+
 		// Sort changes by dependency order (parents before children)
-		const sortedChanges = this.sortChangesByDependency(remoteChanges)
+		const sortedChanges = this.sortChangesByDependency(immediate)
 
 		for (const change of sortedChanges) {
 			try {
@@ -1085,7 +1210,126 @@ export class SyncEngine {
 			}
 		}
 
+		// Main-thread fallback for any shard-pull failures: materialize
+		// the doc here (the slow path) so the clone still completes.
+		if (fallbackPaths && fallbackPaths.size > 0) {
+			for (const change of deferred) {
+				if (!fallbackPaths.has(change.path)) continue
+				try {
+					await this.applyDeferredChangeOnMainThread(change, snapshot)
+					result.filesChanged++
+				} catch (error) {
+					result.errors.push({
+						path: change.path,
+						operation: "remote-to-local",
+						error: error as Error,
+						recoverable: true,
+					})
+				}
+			}
+		}
+
 		return result
+	}
+
+	/**
+	 * EXPERIMENT (shared-nothing clone): pull deferred remote files in
+	 * worker-owned repos. Workers download/load + materialize the docs
+	 * with their own Wasm instances, write the local files themselves,
+	 * and report `{url, heads, contentHash}`; the main thread records
+	 * snapshot entries without ever materializing the documents.
+	 *
+	 * Returns the set of paths the workers could NOT handle (caller runs
+	 * the main-thread fallback for those).
+	 */
+	private async pullRemoteFilesInShardedRepos(
+		deferred: DetectedChange[],
+		snapshot: SyncSnapshot,
+		result: SyncResult
+	): Promise<Set<string>> {
+		const fallback = new Set<string>()
+		const tasks: ClonePullTask[] = []
+		for (const change of deferred) {
+			if (!change.remoteUrl) {
+				fallback.add(change.path)
+				continue
+			}
+			tasks.push({relPath: change.path, url: change.remoteUrl})
+		}
+		if (tasks.length === 0) return fallback
+
+		const workers = ingestWorkerCount()
+		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
+		debug(`pull: shard-pulling ${tasks.length} remote files across ${workers} worker repos`)
+		out.update(`Fetching ${tasks.length} files in ${workers} worker repos`)
+
+		const outcome = await runShardPull(
+			this.rootPath,
+			this.config,
+			protocol,
+			tasks,
+			workers
+		)
+
+		for (const r of outcome.results) {
+			if (!r.ok) {
+				debug(`pull: shard fetch failed for ${r.relPath}: ${r.error} (main-thread fallback)`)
+				fallback.add(r.relPath)
+				continue
+			}
+			const isArtifact = this.isArtifactPath(r.relPath)
+			const entryUrl = isArtifact
+				? stringifyAutomergeUrl({
+						documentId: parseAutomergeUrl(r.url as AutomergeUrl).documentId,
+						heads: r.heads as UrlHeads,
+					})
+				: (r.url as AutomergeUrl)
+			this.snapshotManager.updateFileEntry(snapshot, r.relPath, {
+				path: joinAndNormalizePath(this.rootPath, r.relPath),
+				url: entryUrl,
+				head: r.heads as UrlHeads,
+				extension: getFileExtension(r.relPath),
+				mimeType: getEnhancedMimeType(r.relPath),
+				...(isArtifact ? {contentHash: r.contentHash} : {}),
+			})
+			this.workerPushedPaths.add(r.relPath)
+			result.filesChanged++
+		}
+		for (const p of outcome.failedPaths) {
+			debug(`pull: shard worker crashed for ${p}; main-thread fallback`)
+			fallback.add(p)
+		}
+
+		count("pull:docs.shard-pulled", tasks.length - fallback.size)
+		debug(`pull: shard pull handled ${tasks.length - fallback.size}/${tasks.length} files`)
+		return fallback
+	}
+
+	/**
+	 * Main-thread fallback for a deferred change whose worker failed:
+	 * materialize the doc, read content, and run the normal apply path.
+	 */
+	private async applyDeferredChangeOnMainThread(
+		change: DetectedChange,
+		snapshot: SyncSnapshot
+	): Promise<void> {
+		const handle = await this.repo.find<FileDocument>(
+			getPlainUrl(change.remoteUrl!)
+		)
+		const doc = handle.doc()
+		const content = readDocContent(doc?.content)
+		if (content === null) {
+			throw new Error(`deferred remote file ${change.path} has no readable content`)
+		}
+		await this.applyRemoteChangeToLocal(
+			{
+				...change,
+				deferredFetch: false,
+				remoteContent: content,
+				remoteHead: handle.heads(),
+			},
+			snapshot
+		)
 	}
 
 	/**
@@ -1255,6 +1499,136 @@ export class SyncEngine {
 	/**
 	 * Create new remote file document
 	 */
+	/**
+	 * EXPERIMENT: build documents for new files in a worker_threads pool.
+	 *
+	 * Workers run `A.from` + text splice (the expensive CRDT construction)
+	 * with their own Wasm instances and return serialized doc bytes; the
+	 * main thread re-materializes each with `repo.import` (an `A.load`,
+	 * much cheaper than building) so the live handle exists for Subduction
+	 * sync exactly as if `createRemoteFile` had made it.
+	 *
+	 * Returns a map of path -> handle for successfully built docs. Failed
+	 * paths are simply absent (callers fall back to main-thread creation).
+	 */
+	private async buildNewFileDocsInWorkers(
+		newFiles: DetectedChange[]
+	): Promise<Map<string, DocHandle<FileDocument>>> {
+		const prebuilt = new Map<string, DocHandle<FileDocument>>()
+		const tasks: IngestTask[] = newFiles
+			.filter(c => c.localContent !== null)
+			.map(c => ({
+				relPath: c.path,
+				content: c.localContent!,
+				isArtifact: this.isArtifactPath(c.path),
+			}))
+		if (tasks.length === 0) return prebuilt
+
+		const workers = ingestWorkerCount()
+		debug(`push: building ${tasks.length} new file docs in ${workers} workers`)
+		out.update(`Building ${tasks.length} file documents in ${workers} workers`)
+
+		const maybeYield = makeYielder()
+		let imported = 0
+		for await (const result of runIngestPool(tasks, workers)) {
+			if (!result.ok) {
+				debug(
+					`push: worker build failed for ${result.relPath}: ${result.error} (will fall back to main thread)`
+				)
+				continue
+			}
+			const {documentId} = parseAutomergeUrl(generateAutomergeUrl())
+			const handle = profileSync("push:repo.import", () =>
+				this.repo.import<FileDocument>(result.bytes, {docId: documentId})
+			)
+			count("push:docs.imported")
+			prebuilt.set(result.relPath, handle)
+			this.handlesByPath.set(result.relPath, handle)
+			imported++
+			if (imported % 100 === 0) {
+				out.update(`Importing built documents [${imported}/${tasks.length}]`)
+			}
+			await maybeYield()
+		}
+
+		debug(`push: worker ingest imported ${imported}/${tasks.length} docs`)
+		return prebuilt
+	}
+
+	/**
+	 * EXPERIMENT (shared-nothing): ingest new files in worker-owned repos.
+	 *
+	 * Workers build, persist (shared storage directory, disjoint doc
+	 * keys), and upload their shard with their OWN Repo + Wasm + socket,
+	 * reporting only `{url, heads}`. The main thread never materializes
+	 * these docs; the per-file loop stitches the URLs into directory
+	 * entries and the snapshot.
+	 *
+	 * Paths that failed or did not converge to the server are absent from
+	 * the returned map, so the per-file loop falls back to main-thread
+	 * `createRemoteFile` for them (the worker's copy becomes an
+	 * unreferenced orphan in storage, same class as deleted-file orphans).
+	 */
+	private async ingestNewFilesInShardedRepos(
+		newFiles: DetectedChange[],
+		result: SyncResult
+	): Promise<Map<string, {url: AutomergeUrl; heads: UrlHeads}>> {
+		const shardResults = new Map<string, {url: AutomergeUrl; heads: UrlHeads}>()
+		const tasks: IngestTask[] = newFiles
+			.filter(c => c.localContent !== null)
+			.map(c => ({
+				relPath: c.path,
+				content: c.localContent!,
+				isArtifact: this.isArtifactPath(c.path),
+			}))
+		if (tasks.length === 0) return shardResults
+
+		const workers = ingestWorkerCount()
+		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
+		debug(`push: shard-ingesting ${tasks.length} new files across ${workers} worker repos`)
+		out.update(`Ingesting ${tasks.length} files in ${workers} worker repos`)
+
+		const outcome = await runShardIngest(
+			this.rootPath,
+			this.config,
+			protocol,
+			tasks,
+			workers
+		)
+
+		const unsynced = new Set(outcome.unsynced)
+		for (const r of outcome.results) {
+			if (!r.ok) {
+				debug(`push: shard build failed for ${r.relPath}: ${r.error} (will fall back to main thread)`)
+				continue
+			}
+			if (unsynced.has(r.relPath)) {
+				// Created but not confirmed on the server — and the worker
+				// repo that owned it is gone, so nothing would retry the
+				// upload. Fall back to main-thread creation instead.
+				debug(`push: shard doc for ${r.relPath} did not converge; falling back to main thread`)
+				continue
+			}
+			shardResults.set(r.relPath, {
+				url: r.url as AutomergeUrl,
+				heads: r.heads as UrlHeads,
+			})
+		}
+
+		for (const p of outcome.failedPaths) {
+			debug(`push: shard worker crashed for ${p}; falling back to main thread`)
+		}
+		if (outcome.unsynced.length > 0) {
+			result.warnings.push(
+				`${outcome.unsynced.length} worker-ingested document(s) did not converge to the server; recreated on the main thread`
+			)
+		}
+
+		count("push:docs.shard-created", shardResults.size)
+		debug(`push: shard ingest produced ${shardResults.size}/${tasks.length} docs`)
+		return shardResults
+	}
+
 	private async createRemoteFile(
 		change: DetectedChange
 	): Promise<DocHandle<FileDocument> | null> {
