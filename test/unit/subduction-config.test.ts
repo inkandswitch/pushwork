@@ -27,12 +27,9 @@ describe("Sync backend configuration", () => {
   });
 
   describe("Default servers", () => {
-    it("Subduction default endpoint", () => {
-      expect(DEFAULT_SUBDUCTION_SERVER).toBe(
-        "wss://subduction.sync.inkandswitch.com"
-      );
-    });
-
+    // (Removed: an assertion restating the DEFAULT_SUBDUCTION_SERVER constant
+    // verbatim — a tautology. The cross-constant invariant below is the only
+    // real check: the two backends must not silently share an endpoint.)
     it("Subduction differs from legacy WebSocket server", () => {
       expect(DEFAULT_SUBDUCTION_SERVER).not.toBe(DEFAULT_SYNC_SERVER);
     });

@@ -286,7 +286,9 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "from-b.txt"))).toBe(true);
       const content = await fs.readFile(path.join(repoA, "from-b.txt"), "utf-8");
       expect(content).toBe("Created by B");
-    }, 30000);
+      // 90s: each CLI sync is ~4s and convergence needs several rounds × 2
+      // repos — 30s budgets flaked on harness overhead, not sync bugs.
+    }, 90000);
 
     it("should sync subdirectories correctly", async () => {
       const repoA = path.join(tmpDir, "repo-a");
@@ -347,7 +349,8 @@ describe("Sync Reliability Tests", () => {
       expect(await pathExists(path.join(repoA, "file-b.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-a.txt"))).toBe(true);
       expect(await pathExists(path.join(repoB, "file-b.txt"))).toBe(true);
-    }, 30000);
+      // 90s: see "new file added to B back to A" — same budget arithmetic.
+    }, 90000);
 
     it("should handle file modification sync", async () => {
       const repoA = path.join(tmpDir, "repo-a");

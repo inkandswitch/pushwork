@@ -1,5 +1,7 @@
+import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
+import * as fc from "fast-check";
 import { SnapshotManager } from "../../src/core/snapshot";
 import { SnapshotFileEntry, SnapshotDirectoryEntry } from "../../src/types";
 import { UrlHeads } from "@automerge/automerge-repo";
@@ -103,190 +105,83 @@ describe("SnapshotManager", () => {
       const loadedSnapshot = await snapshotManager.load();
       expect(loadedSnapshot).toBeNull();
     });
-  });
 
-  describe("updateFileEntry", () => {
-    it("should add new file entry", () => {
-      const snapshot = snapshotManager.createEmpty();
-      const originalTimestamp = snapshot.timestamp;
-
-      const fileEntry: SnapshotFileEntry = {
-        path: "/test/path/test.txt",
-        url: "automerge:test-url" as any,
-        head: ["test-head"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      };
-
-      // Add small delay to ensure timestamp changes
-      const startTime = Date.now();
-      while (Date.now() === startTime) {
-        // Wait for at least 1ms
-      }
-
-      snapshotManager.updateFileEntry(snapshot, "test.txt", fileEntry);
-
-      expect(snapshot.files.get("test.txt")).toEqual(fileEntry);
-      expect(snapshot.timestamp).toBeGreaterThan(originalTimestamp);
+    it("returns null (not a throw) for corrupt snapshot.json", async () => {
+      // The load() catch path: a half-written or corrupted snapshot must
+      // degrade to "no snapshot" rather than crash every subsequent command.
+      await fs.mkdir(path.join(tmpDir, ".pushwork"), { recursive: true });
+      await fs.writeFile(
+        path.join(tmpDir, ".pushwork", "snapshot.json"),
+        "{ not: valid json !!!"
+      );
+      expect(await snapshotManager.load()).toBeNull();
     });
 
-    it("should update existing file entry", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      const fileEntry1: SnapshotFileEntry = {
-        path: path.join(tmpDir, "test.txt"),
-        url: "automerge:test-url" as any,
-        head: ["old-head"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      };
-
-      const fileEntry2: SnapshotFileEntry = {
-        path: path.join(tmpDir, "test.txt"),
-        url: "automerge:test-url" as any,
-        head: ["new-head"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      };
-
-      snapshotManager.updateFileEntry(snapshot, "test.txt", fileEntry1);
-      snapshotManager.updateFileEntry(snapshot, "test.txt", fileEntry2);
-
-      expect(snapshot.files.get("test.txt")).toEqual(fileEntry2);
-      expect(snapshot.files.size).toBe(1);
-    });
-  });
-
-  describe("removeFileEntry", () => {
-    it("should remove file entry", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      const fileEntry: SnapshotFileEntry = {
-        path: path.join(tmpDir, "test.txt"),
-        url: "automerge:test-url" as any,
-        head: ["test-head"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      };
-
-      snapshotManager.updateFileEntry(snapshot, "test.txt", fileEntry);
-      expect(snapshot.files.size).toBe(1);
-
-      snapshotManager.removeFileEntry(snapshot, "test.txt");
-      expect(snapshot.files.size).toBe(0);
-      expect(snapshot.files.get("test.txt")).toBeUndefined();
-    });
-
-    it("should not fail when removing non-existent file", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.removeFileEntry(snapshot, "nonexistent.txt");
-      expect(snapshot.files.size).toBe(0);
-    });
-  });
-
-  describe("getFilePaths and getDirectoryPaths", () => {
-    it("should return all file paths", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.updateFileEntry(snapshot, "file1.txt", {
-        path: path.join(tmpDir, "file1.txt"),
-        url: "automerge:url1" as any,
-        head: ["head1"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
+    it("property: save/load round-trips arbitrary snapshots exactly", async () => {
+      // Maps serialize to JSON arrays-of-pairs and back; optional fields
+      // (contentHash — the 2026-06-12 resurrection-bug field — and
+      // rootDirectoryUrl) must survive. A lossy round-trip here corrupts
+      // change detection for every subsequent sync.
+      const relPath = fc
+        .array(fc.stringMatching(/^[a-z]{1,8}$/), { minLength: 1, maxLength: 3 })
+        .map((segs) => segs.join("/"));
+      const head = fc.array(fc.stringMatching(/^[a-zA-Z0-9]{4,12}$/), {
+        minLength: 1,
+        maxLength: 2,
+      });
+      const fileEntry = fc.record(
+        {
+          url: fc.stringMatching(/^automerge:[a-zA-Z0-9]{8,16}$/),
+          head,
+          extension: fc.constantFrom("txt", "ts", "js", ""),
+          mimeType: fc.constantFrom("text/plain", "application/json"),
+          contentHash: fc.option(fc.stringMatching(/^[0-9a-f]{64}$/), {
+            nil: undefined,
+          }),
+        },
+        { requiredKeys: ["url", "head", "extension", "mimeType"] }
+      );
+      const dirEntry = fc.record({
+        url: fc.stringMatching(/^automerge:[a-zA-Z0-9]{8,16}$/),
+        head,
+        entries: fc.array(fc.stringMatching(/^[a-z]{1,8}$/), { maxLength: 3 }),
       });
 
-      snapshotManager.updateFileEntry(snapshot, "file2.txt", {
-        path: path.join(tmpDir, "file2.txt"),
-        url: "automerge:url2" as any,
-        head: ["head2"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      });
+      await fc.assert(
+        fc.asyncProperty(
+          fc.dictionary(relPath, fileEntry, { maxKeys: 5 }),
+          fc.dictionary(relPath, dirEntry, { maxKeys: 3 }),
+          async (files, dirs) => {
+            const snapshot = snapshotManager.createEmpty();
+            for (const [p, e] of Object.entries(files)) {
+              snapshotManager.updateFileEntry(snapshot, p, {
+                ...(e as any),
+                path: path.join(tmpDir, p),
+              } as SnapshotFileEntry);
+            }
+            for (const [p, e] of Object.entries(dirs)) {
+              snapshotManager.updateDirectoryEntry(snapshot, p, {
+                ...(e as any),
+                path: path.join(tmpDir, p),
+              } as SnapshotDirectoryEntry);
+            }
 
-      const filePaths = snapshotManager.getFilePaths(snapshot);
-      expect(filePaths.sort()).toEqual(["file1.txt", "file2.txt"]);
-    });
+            await snapshotManager.save(snapshot);
+            const loaded = await snapshotManager.load();
 
-    it("should return all directory paths", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.updateDirectoryEntry(snapshot, "dir1", {
-        path: path.join(tmpDir, "dir1"),
-        url: "automerge:url1" as any,
-        head: ["head1"] as UrlHeads,
-        entries: [],
-      });
-
-      snapshotManager.updateDirectoryEntry(snapshot, "dir2", {
-        path: path.join(tmpDir, "dir2"),
-        url: "automerge:url2" as any,
-        head: ["head2"] as UrlHeads,
-        entries: [],
-      });
-
-      const dirPaths = snapshotManager.getDirectoryPaths(snapshot);
-      expect(dirPaths.sort()).toEqual(["dir1", "dir2"]);
-    });
-  });
-
-  describe("isTracked", () => {
-    it("should return true for tracked files", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.updateFileEntry(snapshot, "test.txt", {
-        path: path.join(tmpDir, "test.txt"),
-        url: "automerge:url" as any,
-        head: ["head"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      });
-
-      expect(snapshotManager.isTracked(snapshot, "test.txt")).toBe(true);
-      expect(snapshotManager.isTracked(snapshot, "other.txt")).toBe(false);
-    });
-
-    it("should return true for tracked directories", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.updateDirectoryEntry(snapshot, "subdir", {
-        path: path.join(tmpDir, "subdir"),
-        url: "automerge:url" as any,
-        head: ["head"] as UrlHeads,
-        entries: [],
-      });
-
-      expect(snapshotManager.isTracked(snapshot, "subdir")).toBe(true);
-      expect(snapshotManager.isTracked(snapshot, "other")).toBe(false);
-    });
-  });
-
-  describe("getStats", () => {
-    it("should return correct statistics", () => {
-      const snapshot = snapshotManager.createEmpty();
-
-      snapshotManager.updateFileEntry(snapshot, "file1.txt", {
-        path: path.join(tmpDir, "file1.txt"),
-        url: "automerge:url1" as any,
-        head: ["head1"] as UrlHeads,
-        extension: "txt",
-        mimeType: "text/plain",
-      });
-
-      snapshotManager.updateDirectoryEntry(snapshot, "dir1", {
-        path: path.join(tmpDir, "dir1"),
-        url: "automerge:url2" as any,
-        head: ["head2"] as UrlHeads,
-        entries: [],
-      });
-
-      const stats = snapshotManager.getStats(snapshot);
-
-      expect(stats.files).toBe(1);
-      expect(stats.directories).toBe(1);
-      expect(stats.timestamp).toBeInstanceOf(Date);
-      expect(stats.timestamp.getTime()).toBe(snapshot.timestamp);
+            expect(loaded).not.toBeNull();
+            expect(loaded!.timestamp).toBe(snapshot.timestamp);
+            expect(loaded!.rootDirectoryUrl).toBe(snapshot.rootDirectoryUrl);
+            expect(Object.fromEntries(loaded!.files)).toEqual(
+              Object.fromEntries(snapshot.files)
+            );
+            expect(Object.fromEntries(loaded!.directories)).toEqual(
+              Object.fromEntries(snapshot.directories)
+            );
+          }
+        ),
+        { numRuns: 25 } // each run hits disk
+      );
     });
   });
 

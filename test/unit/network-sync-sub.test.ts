@@ -1,5 +1,14 @@
-import { waitForSync } from "../../src/utils/network-sync";
-import { DocHandle, StorageId } from "@automerge/automerge-repo";
+import {
+  waitForSync,
+  waitForBidirectionalSync,
+} from "../../src/utils/network-sync";
+import {
+  AutomergeUrl,
+  DocHandle,
+  generateAutomergeUrl,
+  Repo,
+  StorageId,
+} from "@automerge/automerge-repo";
 
 /**
  * Create a mock DocHandle with controllable heads.
@@ -141,4 +150,76 @@ describe("waitForSync (WebSocket / StorageId mode)", () => {
     const result = await waitForSync([handle], storageId, 5000);
     expect(result.failed).toHaveLength(0);
   });
+});
+
+describe("waitForBidirectionalSync (handles mode)", () => {
+  // With `handles` provided, the function never touches the repo (the tree
+  // scan is skipped), so a bare object suffices. The dynamic timeout has a
+  // 5s floor — max(timeoutMs, 5000 + docs*50) — which the timeout test
+  // must respect.
+  const fakeRepo = {} as Repo;
+  const ROOT = "automerge:fakeroot" as AutomergeUrl;
+
+  function mockHandle(headSequence: string[][]): DocHandle<unknown> {
+    let callCount = 0;
+    return {
+      // getHandleHeads normalizes via getPlainUrl, which parses the URL —
+      // it must be a real (generated) Automerge URL, not an arbitrary string.
+      url: generateAutomergeUrl(),
+      heads: () => {
+        const idx = Math.min(callCount++, headSequence.length - 1);
+        return headSequence[idx];
+      },
+    } as unknown as DocHandle<unknown>;
+  }
+
+  it("returns immediately when rootDirectoryUrl is undefined (reads nothing)", async () => {
+    const trap = {
+      url: generateAutomergeUrl(),
+      heads: () => {
+        throw new Error("heads() must not be called");
+      },
+    } as unknown as DocHandle<unknown>;
+
+    await waitForBidirectionalSync(fakeRepo, undefined, { handles: [trap] });
+  });
+
+  it("converges quickly when handle heads are stable", async () => {
+    const start = Date.now();
+    await waitForBidirectionalSync(fakeRepo, ROOT, {
+      handles: [mockHandle([["h1"]]), mockHandle([["h2"]])],
+      pollIntervalMs: 20,
+    });
+    // 3 stable checks at 20ms — convergence, not the 5s timeout floor.
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("resets stability when heads change, then converges once stable", async () => {
+    const start = Date.now();
+    await waitForBidirectionalSync(fakeRepo, ROOT, {
+      handles: [mockHandle([["a"], ["b"], ["c"], ["c"], ["c"], ["c"]])],
+      pollIntervalMs: 20,
+    });
+    const elapsed = Date.now() - start;
+    // Took some polls to stabilize, but converged well before the 5s floor.
+    expect(elapsed).toBeLessThan(3000);
+  });
+
+  it("times out WITHOUT throwing when heads never stabilize", async () => {
+    let n = 0;
+    const neverStable = {
+      url: generateAutomergeUrl(),
+      heads: () => [`h-${n++}`],
+    } as unknown as DocHandle<unknown>;
+
+    const start = Date.now();
+    // Must resolve (warn-and-continue contract), not reject — and only
+    // after the dynamic timeout floor (~5s for one doc).
+    await waitForBidirectionalSync(fakeRepo, ROOT, {
+      handles: [neverStable],
+      timeoutMs: 100, // floor wins: max(100, 5000 + 1*50)
+      pollIntervalMs: 50,
+    });
+    expect(Date.now() - start).toBeGreaterThanOrEqual(5000);
+  }, 15000);
 });

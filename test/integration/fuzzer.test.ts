@@ -109,6 +109,38 @@ describe("Pushwork Fuzzer", () => {
   }
 
   /**
+   * Sync both repos alternately until their directory hashes match, or fail
+   * after `maxRounds`. Convergence-based (like in-memory-sync.test.ts's
+   * helper) rather than fixed sleeps: stops as soon as state matches and
+   * gives a diagnosable error when it genuinely doesn't.
+   */
+  async function syncUntilConverged(
+    repoA: string,
+    repoB: string,
+    options: { maxRounds?: number } = {}
+  ): Promise<{ rounds: number; hashA: string; hashB: string }> {
+    const { maxRounds = 5 } = options;
+
+    for (let round = 1; round <= maxRounds; round++) {
+      await pushwork(["sync", "--gentle"], repoA);
+      await pushwork(["sync", "--gentle"], repoB);
+
+      const hashA = await hashDirectory(repoA);
+      const hashB = await hashDirectory(repoB);
+      if (hashA === hashB) {
+        return { rounds: round, hashA, hashB };
+      }
+    }
+
+    const hashA = await hashDirectory(repoA);
+    const hashB = await hashDirectory(repoB);
+    throw new Error(
+      `Failed to converge after ${maxRounds} sync rounds. ` +
+        `hashA=${hashA.slice(0, 8)}, hashB=${hashB.slice(0, 8)}`
+    );
+  }
+
+  /**
    * Helper: Recursively get all files in a directory
    */
   async function getAllFiles(
@@ -735,36 +767,13 @@ describe("Pushwork Fuzzer", () => {
 
               await applyOperations(repoB, opsB);
 
-              // Multiple sync rounds for convergence
-              // Need enough time for network propagation between CLI invocations
-              // Round 1: A pushes changes
-              await pushwork(["sync", "--gentle"], repoA);
-              await wait(1000);
-
-              // Round 2: B pushes changes and pulls A's changes
-              await pushwork(["sync", "--gentle"], repoB);
-              await wait(1000);
-
-              // Round 3: A pulls B's changes
-              await pushwork(["sync", "--gentle"], repoA);
-              await wait(1000);
-
-              // Round 4: B confirms convergence
-              await pushwork(["sync", "--gentle"], repoB);
-              await wait(1000);
-
-              // Round 5: Final convergence check
-              await pushwork(["sync", "--gentle"], repoA);
-              await wait(1000);
-
-              // Round 6: Extra convergence check (for aggressive fuzzing)
-              await pushwork(["sync", "--gentle"], repoB);
-              await wait(5000);
-
-              // Verify final state matches
-
-              const hashAfterA = await hashDirectory(repoA);
-              const hashAfterB = await hashDirectory(repoB);
+              // Sync until the two repos converge (hash equality) instead of
+              // a fixed number of rounds with fixed sleeps — the old 6-round
+              // pattern padded ~10s per run and still flaked under server
+              // load, while convergence detection stops as soon as the state
+              // matches and only escalates rounds when actually needed.
+              const { hashA: hashAfterA, hashB: hashAfterB } =
+                await syncUntilConverged(repoA, repoB, { maxRounds: 6 });
 
               expect(hashAfterA).toBe(hashAfterB);
 

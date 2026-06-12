@@ -96,11 +96,14 @@ export function resolveWorkerScript(): string {
  */
 export async function* runIngestPool(
 	tasks: IngestTask[],
-	workerCount = ingestWorkerCount()
+	workerCount = ingestWorkerCount(),
+	// Test seam: inject a stub worker script (e.g. one that exits without
+	// reporting) to exercise the pool's failure paths without Wasm.
+	workerScript?: string
 ): AsyncGenerator<IngestResult> {
 	if (tasks.length === 0) return
 
-	const script = resolveWorkerScript()
+	const script = workerScript ?? resolveWorkerScript()
 	const count = Math.min(workerCount, tasks.length)
 
 	// Results queue bridging worker callbacks -> async generator.
