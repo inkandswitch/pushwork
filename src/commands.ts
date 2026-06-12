@@ -190,14 +190,15 @@ async function setupCommandContext(
  * Safely shutdown a repository with proper error handling
  */
 async function safeRepoShutdown(repo: Repo): Promise<void> {
-  // TEMPORARY WORKAROUND: pushwork's Subduction sync-verification only
-  // watches local head stability, which doesn't actually confirm the
-  // server received anything. Give any in-flight `syncWithAllPeers`
-  // calls a chance to finish (and the scheduler time to heal transient
-  // failures) before we tear the repo down. Remove once awaitSynced()
-  // (or equivalent) lands in @automerge/automerge-repo@subduction.
-  const graceMsEnv = process.env.PUSHWORK_SYNC_GRACE_MS;
-  const graceMs = graceMsEnv !== undefined ? Number(graceMsEnv) : 3000;
+  // The historical 3s pre-shutdown grace sleep is gone: since the
+  // feed-macrotasks shutdown quiesce pass (ADR-023/ADR-024),
+  // `repo.shutdown()` itself awaits in-flight sync rounds and runs a
+  // final bounded round for un-broadcast commits — deterministically
+  // doing what the sleep only hoped for. Verified 2026-06-12: online
+  // init + clone byte-identical and the two-repo suite green with no
+  // grace. PUSHWORK_SYNC_GRACE_MS remains as an escape hatch for
+  // debugging delivery issues against slow/flaky relays.
+  const graceMs = Number(process.env.PUSHWORK_SYNC_GRACE_MS ?? 0);
   if (Number.isFinite(graceMs) && graceMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, graceMs));
   }

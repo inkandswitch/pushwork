@@ -3,7 +3,6 @@ import {
 	Repo,
 	DocHandle,
 	UrlHeads,
-	generateAutomergeUrl,
 	parseAutomergeUrl,
 	stringifyAutomergeUrl,
 } from "@automerge/automerge-repo"
@@ -46,7 +45,6 @@ import {
 	IngestTask,
 	ingestWorkerCount,
 	parallelIngestMode,
-	runIngestPool,
 	runShardIngest,
 	runShardPull,
 } from "../utils/ingest-pool"
@@ -885,23 +883,19 @@ export class SyncEngine {
 		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 		out.update(`Pushing ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
 
-		// EXPERIMENT (PUSHWORK_PARALLEL_INGEST): build the Automerge docs
-		// for NEW files in a worker pool (darn-style parallel leaf phase),
-		// then proceed with the normal serial directory phase below. Files
-		// whose worker build failed simply aren't in the maps and fall back
-		// to main-thread creation in the per-file loop.
-		//   mode "import": workers ship doc bytes, main repo.imports them
-		//   mode "shard":  shared-nothing — workers own full repos (own
-		//                  Wasm/storage-writes/socket); main never
-		//                  materializes the docs, only records {url, heads}
+		// EXPERIMENT (PUSHWORK_PARALLEL_INGEST=2, "shard"): build + persist +
+		// upload the docs for NEW files in worker-owned repos (darn-style
+		// parallel leaf phase), then proceed with the normal serial directory
+		// phase below. Workers own full repos (own Wasm/storage-writes/
+		// socket); the main thread never materializes the docs, only records
+		// {url, heads}. Files whose worker failed aren't in the map and fall
+		// back to main-thread creation in the per-file loop.
+		// (The "import" variant — workers shipping doc bytes for main-thread
+		// repo.import — was measured wall-neutral and removed; see
+		// .ignore/PARALLEL_INGEST_EXPERIMENT.md.)
 		const ingestMode = newFiles.length > 1 ? parallelIngestMode() : null
-		let prebuiltHandles = new Map<string, DocHandle<FileDocument>>()
 		let shardResults = new Map<string, {url: AutomergeUrl; heads: UrlHeads}>()
-		if (ingestMode === "import") {
-			prebuiltHandles = await profileAsync("push:worker-ingest", () =>
-				this.buildNewFileDocsInWorkers(newFiles)
-			)
-		} else if (ingestMode === "shard") {
+		if (ingestMode === "shard") {
 			shardResults = await profileAsync("push:shard-ingest", () =>
 				this.ingestNewFilesInShardedRepos(newFiles, result)
 			)
@@ -1035,9 +1029,7 @@ export class SyncEngine {
 							continue
 						}
 
-						const handle =
-							prebuiltHandles.get(change.path) ??
-							(await this.createRemoteFile(change))
+						const handle = await this.createRemoteFile(change)
 						if (handle) {
 							const entryUrl = this.getEntryUrl(handle, change.path)
 							newEntries.push({name: fileName, url: entryUrl})
@@ -1512,65 +1504,6 @@ export class SyncEngine {
 				true
 			)
 		}
-	}
-
-	/**
-	 * Create new remote file document
-	 */
-	/**
-	 * EXPERIMENT: build documents for new files in a worker_threads pool.
-	 *
-	 * Workers run `A.from` + text splice (the expensive CRDT construction)
-	 * with their own Wasm instances and return serialized doc bytes; the
-	 * main thread re-materializes each with `repo.import` (an `A.load`,
-	 * much cheaper than building) so the live handle exists for Subduction
-	 * sync exactly as if `createRemoteFile` had made it.
-	 *
-	 * Returns a map of path -> handle for successfully built docs. Failed
-	 * paths are simply absent (callers fall back to main-thread creation).
-	 */
-	private async buildNewFileDocsInWorkers(
-		newFiles: DetectedChange[]
-	): Promise<Map<string, DocHandle<FileDocument>>> {
-		const prebuilt = new Map<string, DocHandle<FileDocument>>()
-		const tasks: IngestTask[] = newFiles
-			.filter(c => c.localContent !== null)
-			.map(c => ({
-				relPath: c.path,
-				content: c.localContent!,
-				isArtifact: this.isArtifactPath(c.path),
-			}))
-		if (tasks.length === 0) return prebuilt
-
-		const workers = ingestWorkerCount()
-		debug(`push: building ${tasks.length} new file docs in ${workers} workers`)
-		out.update(`Building ${tasks.length} file documents in ${workers} workers`)
-
-		const maybeYield = makeYielder()
-		let imported = 0
-		for await (const result of runIngestPool(tasks, workers)) {
-			if (!result.ok) {
-				debug(
-					`push: worker build failed for ${result.relPath}: ${result.error} (will fall back to main thread)`
-				)
-				continue
-			}
-			const {documentId} = parseAutomergeUrl(generateAutomergeUrl())
-			const handle = profileSync("push:repo.import", () =>
-				this.repo.import<FileDocument>(result.bytes, {docId: documentId})
-			)
-			count("push:docs.imported")
-			prebuilt.set(result.relPath, handle)
-			this.handlesByPath.set(result.relPath, handle)
-			imported++
-			if (imported % 100 === 0) {
-				out.update(`Importing built documents [${imported}/${tasks.length}]`)
-			}
-			await maybeYield()
-		}
-
-		debug(`push: worker ingest imported ${imported}/${tasks.length} docs`)
-		return prebuilt
 	}
 
 	/**

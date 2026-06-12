@@ -50,7 +50,7 @@ export const YIELD_BUDGET_MS = Number(process.env.PUSHWORK_YIELD_MS ?? 50);
  * Make a time-budgeted yielder. Call the returned function frequently
  * (e.g. once per item) in a hot loop; it only actually yields once more
  * than `budgetMs` has elapsed since the last yield, so the cost is
- * independent of per-item work size. Count-based cadences mis-tune badly
+ * independent of per-item work size. Count-based cadences tune badly
  * when item cost varies (a file's Automerge work ranges from microseconds
  * to tens of milliseconds); a time budget bounds the worst-case block
  * directly.

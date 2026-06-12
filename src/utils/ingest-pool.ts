@@ -1,24 +1,21 @@
 /**
- * A small worker_threads pool for the parallel-ingest experiment.
+ * Worker pools for the shared-nothing parallel-ingest experiment
+ * (PUSHWORK_PARALLEL_INGEST=2 / "shard"): workers own full Repos (own
+ * Wasm, own storage writes, own socket) and report only {relPath, url,
+ * heads}; the main thread never materializes the docs.
  *
- * Runs `file-doc-worker` tasks (build an Automerge file document, return its
- * serialized bytes) across `PUSHWORK_WORKERS` threads (default cores - 1) and
- * yields results as they complete, so the caller can `repo.import` each doc
- * on the main thread while workers keep building the rest.
+ * Worker scripts run as compiled CommonJS, so a build (`npm run build`)
+ * must exist even when the engine itself runs from src via tsx.
  *
- * Enabled via PUSHWORK_PARALLEL_INGEST=1. The worker script runs as compiled
- * CommonJS, so a build (`npm run build`) must exist even when the engine
- * itself runs from src via tsx (e.g. the bench).
+ * (A second variant — "import" mode, workers shipping doc bytes for the
+ * main thread to repo.import — was measured wall-neutral and deleted
+ * 2026-06-12; see .ignore/PARALLEL_INGEST_EXPERIMENT.md.)
  */
 
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import {Worker} from "node:worker_threads"
-import type {
-	BuildFileDocRequest,
-	BuildFileDocResponse,
-} from "../workers/file-doc-worker"
 import type {
 	ShardWorkerData,
 	ShardWorkerReport,
@@ -31,25 +28,14 @@ export interface IngestTask {
 	isArtifact: boolean
 }
 
-export type IngestResult =
-	| {relPath: string; ok: true; bytes: Uint8Array}
-	| {relPath: string; ok: false; error: string}
-
-export type ParallelIngestMode = "import" | "shard" | null
+export type ParallelIngestMode = "shard" | null
 
 /**
- * PUSHWORK_PARALLEL_INGEST selects the experiment variant:
- *   "1" / "import" — workers build docs, main thread repo.imports them
- *                    (measured wall-neutral: A.load ≈ A.from+splice)
- *   "2" / "shard"  — shared-nothing: workers own full repos (own Wasm,
- *                    own storage writes, own socket), main thread only
- *                    stitches reported URLs into directories
+ * PUSHWORK_PARALLEL_INGEST=2 (or "shard") enables shared-nothing shard
+ * ingest. ("1"/"import" was the refuted repo.import variant, removed.)
  */
 export function parallelIngestMode(): ParallelIngestMode {
 	switch (process.env.PUSHWORK_PARALLEL_INGEST) {
-		case "1":
-		case "import":
-			return "import"
 		case "2":
 		case "shard":
 			return "shard"
@@ -58,153 +44,10 @@ export function parallelIngestMode(): ParallelIngestMode {
 	}
 }
 
-export function parallelIngestEnabled(): boolean {
-	return parallelIngestMode() === "import"
-}
-
 export function ingestWorkerCount(): number {
 	const fromEnv = Number(process.env.PUSHWORK_WORKERS)
 	if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv)
 	return Math.max(1, (os.cpus()?.length ?? 4) - 1)
-}
-
-/**
- * Locate the compiled worker script. When pushwork itself runs from dist
- * the worker sits next to it; when running from src (tsx) we fall back to
- * the dist build at the package root.
- */
-export function resolveWorkerScript(): string {
-	const candidates = [
-		path.join(__dirname, "..", "workers", "file-doc-worker.js"),
-		path.join(__dirname, "..", "..", "dist", "workers", "file-doc-worker.js"),
-	]
-	for (const candidate of candidates) {
-		if (fs.existsSync(candidate)) return candidate
-	}
-	throw new Error(
-		`parallel ingest: compiled worker not found (tried ${candidates.join(", ")}). Run \`npm run build\` first.`
-	)
-}
-
-/**
- * Run `tasks` across a worker pool, yielding results in completion order.
- *
- * Each worker is fed one task at a time; on completion it immediately gets
- * the next unclaimed task. Worker-level crashes fail all tasks currently
- * assigned to that worker but not the run as a whole — callers are expected
- * to fall back to main-thread creation for failed paths.
- */
-export async function* runIngestPool(
-	tasks: IngestTask[],
-	workerCount = ingestWorkerCount(),
-	// Test seam: inject a stub worker script (e.g. one that exits without
-	// reporting) to exercise the pool's failure paths without Wasm.
-	workerScript?: string
-): AsyncGenerator<IngestResult> {
-	if (tasks.length === 0) return
-
-	const script = workerScript ?? resolveWorkerScript()
-	const count = Math.min(workerCount, tasks.length)
-
-	// Results queue bridging worker callbacks -> async generator.
-	const ready: IngestResult[] = []
-	let wake: (() => void) | null = null
-	const push = (result: IngestResult) => {
-		ready.push(result)
-		wake?.()
-		wake = null
-	}
-
-	let nextTask = 0
-	let settled = 0
-	const inFlight = new Map<number, {worker: Worker; task: IngestTask}>()
-
-	const feed = (worker: Worker): void => {
-		if (nextTask >= tasks.length) return
-		const seq = nextTask++
-		const task = tasks[seq]
-		inFlight.set(seq, {worker, task})
-		const request: BuildFileDocRequest = {
-			seq,
-			relPath: task.relPath,
-			content: task.content,
-			isArtifact: task.isArtifact,
-		}
-		worker.postMessage(request)
-	}
-
-	const workers: Worker[] = []
-	const live = new Set<Worker>()
-	for (let i = 0; i < count; i++) {
-		const worker = new Worker(script)
-		workers.push(worker)
-		live.add(worker)
-
-		worker.on("message", (response: BuildFileDocResponse) => {
-			const entry = inFlight.get(response.seq)
-			if (!entry) return
-			inFlight.delete(response.seq)
-			settled++
-			push(
-				response.ok
-					? {relPath: entry.task.relPath, ok: true, bytes: response.bytes}
-					: {relPath: entry.task.relPath, ok: false, error: response.error}
-			)
-			feed(worker)
-		})
-
-		// Fail every task assigned to this worker; the rest of the pool
-		// keeps going. Unclaimed tasks get picked up by other workers.
-		// If the whole pool died, fail the unclaimed tail rather than
-		// deadlocking the generator.
-		const failWorker = (reason: string): void => {
-			if (!live.delete(worker)) return // already handled
-			for (const [seq, entry] of inFlight) {
-				if (entry.worker === worker) {
-					inFlight.delete(seq)
-					settled++
-					push({
-						relPath: entry.task.relPath,
-						ok: false,
-						error: `worker crashed: ${reason}`,
-					})
-				}
-			}
-			if (live.size === 0) {
-				while (nextTask < tasks.length) {
-					const seq = nextTask++
-					settled++
-					push({
-						relPath: tasks[seq].relPath,
-						ok: false,
-						error: `worker pool exhausted: ${reason}`,
-					})
-				}
-			}
-		}
-
-		worker.on("error", error => failWorker(error.message))
-		// A worker can exit without an `error` event (process.exit inside
-		// the worker, external terminate). Without this the in-flight task
-		// never settles and the generator awaits `wake` forever.
-		worker.on("exit", code => failWorker(`exited with code ${code}`))
-
-		feed(worker)
-	}
-
-	try {
-		while (settled < tasks.length || ready.length > 0) {
-			if (ready.length === 0) {
-				await new Promise<void>(resolve => {
-					wake = resolve
-				})
-				continue
-			}
-			yield ready.shift()!
-		}
-	} finally {
-		await Promise.allSettled(workers.map(w => w.terminate()))
-	}
 }
 
 // ─── Shared-nothing shard pool (mode "shard") ─────────────────────────
@@ -247,9 +90,12 @@ export async function runShardIngest(
 	config: DirectoryConfig,
 	protocol: SyncProtocol,
 	tasks: IngestTask[],
-	workerCount = ingestWorkerCount()
+	workerCount = ingestWorkerCount(),
+	// Test seam: inject a stub worker script (e.g. one that exits without
+	// reporting) to exercise the pool's failure paths without Wasm.
+	workerScript?: string
 ): Promise<ShardRunOutcome> {
-	const script = resolveShardWorkerScript()
+	const script = workerScript ?? resolveShardWorkerScript()
 	const count = Math.min(workerCount, tasks.length)
 
 	// Round-robin so size skew spreads across shards.
@@ -294,8 +140,12 @@ export async function runShardIngest(
 					fail()
 					resolve()
 				})
-				worker.on("exit", code => {
-					if (code !== 0) fail()
+				worker.on("exit", () => {
+					// Exit-before-report is a failure regardless of exit code: a
+					// worker that process.exit(0)s without posting still lost its
+					// shard. (fail() is a no-op once the report has arrived, which
+					// covers the eager-terminate exit after a successful report.)
+					fail()
 					resolve()
 				})
 			})
@@ -390,8 +240,12 @@ export async function runShardPull(
 					fail()
 					resolve()
 				})
-				worker.on("exit", code => {
-					if (code !== 0) fail()
+				worker.on("exit", () => {
+					// Exit-before-report is a failure regardless of exit code: a
+					// worker that process.exit(0)s without posting still lost its
+					// shard. (fail() is a no-op once the report has arrived, which
+					// covers the eager-terminate exit after a successful report.)
+					fail()
 					resolve()
 				})
 			})

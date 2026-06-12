@@ -1,18 +1,19 @@
 /**
- * Content hashing & equality (src/utils/content.ts) and its duplicate
- * (calculateContentHash in src/utils/fs.ts).
+ * Content hashing & equality (src/utils/content.ts).
  *
  * `contentHash` is load-bearing for artifact change detection: a wrong or
  * inconsistent hash creates phantom local edits that replace artifact docs
  * wholesale and corrupt shared directory documents (the 2026-06-12
- * resurrection bug). Previously untested. The oracle property ties the two
- * functions together: equality and hash-equality must agree (for same-typed
- * inputs; SHA-256 collisions are unreachable for generated inputs).
+ * resurrection bug). Previously untested. The oracle property: equality and
+ * hash-equality must agree (for same-typed inputs; SHA-256 collisions are
+ * unreachable for generated inputs).
+ *
+ * (A duplicate impl, fs.calculateContentHash, was deleted 2026-06-12 — an
+ * agreement property here proved them identical first.)
  */
 
 import * as fc from "fast-check";
 import { contentHash, isContentEqual } from "../../src/utils/content";
-import { calculateContentHash } from "../../src/utils/fs";
 
 /** string | Uint8Array generator, biased toward small inputs. */
 const contentArb = fc.oneof(
@@ -39,15 +40,6 @@ describe("contentHash / isContentEqual", () => {
 	it("property: hash is stable across calls", () => {
 		fc.assert(
 			fc.property(contentArb, (c) => contentHash(c) === contentHash(c)),
-			{ numRuns: 200 }
-		);
-	});
-
-	it("property: fs.calculateContentHash agrees with content.contentHash (duplicate impls)", async () => {
-		await fc.assert(
-			fc.asyncProperty(contentArb, async (c) => {
-				return (await calculateContentHash(c)) === contentHash(c);
-			}),
 			{ numRuns: 200 }
 		);
 	});

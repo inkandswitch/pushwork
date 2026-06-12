@@ -1,11 +1,7 @@
 /**
- * Stub worker for ingest-pool tests: exits cleanly (code 0) on the first
- * message WITHOUT posting a response and WITHOUT raising an `error` event —
- * the exact scenario that used to hang `runIngestPool` forever (the pool only
- * listened for `message` and `error`).
+ * Stub shard worker for ingest-pool tests: exits cleanly (code 0) on startup
+ * WITHOUT posting a report and WITHOUT raising an `error` event — the
+ * worker-death scenario the shard pools must convert into per-shard task
+ * failures instead of leaving the pool's promise pending.
  */
-const { parentPort } = require("node:worker_threads");
-
-parentPort.on("message", () => {
-  process.exit(0);
-});
+process.exit(0);

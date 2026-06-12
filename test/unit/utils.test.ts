@@ -308,10 +308,11 @@ describe("File System Utilities", () => {
     });
   });
 
-  // calculateContentHash is covered by the oracle property in
-  // test/unit/content.test.ts (agreement with utils/content.contentHash,
-  // equality ⟺ hash-equality). The hardcoded consistency tests it replaced
-  // only exercised crypto.createHash.
+  // Content hashing is covered by the oracle property in
+  // test/unit/content.test.ts (equality ⟺ hash-equality). The hardcoded
+  // consistency tests that used to live here only exercised
+  // crypto.createHash; the duplicate fs.calculateContentHash impl they
+  // tested was deleted 2026-06-12.
 
   describe("getMimeType", () => {
     it("should return correct MIME type for text files", () => {

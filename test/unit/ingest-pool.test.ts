@@ -1,17 +1,26 @@
 /**
- * Worker-pool failure paths (src/utils/ingest-pool.ts, "import" mode).
+ * Shard-pool failure paths (src/utils/ingest-pool.ts).
  *
- * Regression guard: a worker that exits without an `error` event (e.g.
- * `process.exit` inside the worker, external terminate) used to leave its
- * in-flight task unsettled — `settled < tasks.length` stayed true and the
- * async generator awaited its wake promise forever, hanging the sync.
- * The pool must instead fail the task and (if the pool is exhausted) the
- * unclaimed tail. Uses a stub worker script via the `workerScript` test seam
- * so no Wasm or compiled dist is involved.
+ * Regression guard for the worker-death class of bug: a worker that exits
+ * without posting its report (process.exit inside the worker, external
+ * terminate, OOM-kill) must fail its shard's tasks — via `failedPaths` so
+ * the engine falls back to main-thread creation — rather than leaving the
+ * pool's promise pending forever. Uses a stub worker script via the
+ * `workerScript` test seam so no Wasm or compiled dist is involved.
+ *
+ * (The "import"-mode pool this suite originally targeted was a refuted
+ * experiment, deleted 2026-06-12; the shard pools share the same
+ * exit-handling pattern, fixed in the same commit.)
  */
 
 import * as path from "path";
-import { runIngestPool, IngestTask, IngestResult } from "../../src/utils/ingest-pool";
+import {
+	ingestWorkerCount,
+	parallelIngestMode,
+	runShardIngest,
+	IngestTask,
+} from "../../src/utils/ingest-pool";
+import { ConfigManager } from "../../src/core/config";
 
 const EXIT_STUB = path.join(__dirname, "../fixtures/exit-without-report-worker.js");
 
@@ -19,46 +28,77 @@ function task(relPath: string): IngestTask {
 	return { relPath, content: "x", isArtifact: false };
 }
 
-async function collect(
-	tasks: IngestTask[],
-	workers: number
-): Promise<IngestResult[]> {
-	const out: IngestResult[] = [];
-	for await (const r of runIngestPool(tasks, workers, EXIT_STUB)) {
-		out.push(r);
-	}
-	return out;
-}
+const config = new ConfigManager("/tmp").getDefaultDirectoryConfig();
 
-describe("runIngestPool worker-exit handling", () => {
-	it("a worker exiting without reporting fails its task instead of hanging", async () => {
-		const results = await collect([task("a.txt")], 1);
+describe("runShardIngest worker-exit handling", () => {
+	it("a worker exiting without reporting fails its shard instead of hanging", async () => {
+		const outcome = await runShardIngest(
+			"/tmp",
+			config,
+			"subduction",
+			[task("a.txt")],
+			1,
+			EXIT_STUB
+		);
 
-		expect(results).toHaveLength(1);
-		expect(results[0].relPath).toBe("a.txt");
-		expect(results[0].ok).toBe(false);
-		if (!results[0].ok) {
-			expect(results[0].error).toMatch(/exited with code 0/);
-		}
+		expect(outcome.results).toHaveLength(0);
+		expect(outcome.failedPaths).toEqual(["a.txt"]);
 	}, 15000);
 
-	it("pool exhaustion fails the unclaimed tail (every task settles)", async () => {
-		// 1 worker, 3 tasks: the worker dies on task 1; tasks 2-3 are unclaimed
-		// and must be failed rather than left pending.
-		const tasks = [task("a.txt"), task("b.txt"), task("c.txt")];
-		const results = await collect(tasks, 1);
+	it("every task in a dead worker's shard lands in failedPaths", async () => {
+		// 2 workers, 4 tasks round-robined: both workers die; all 4 tasks
+		// must be reported failed (none silently dropped or left pending).
+		const tasks = [task("a.txt"), task("b.txt"), task("c.txt"), task("d.txt")];
+		const outcome = await runShardIngest(
+			"/tmp",
+			config,
+			"subduction",
+			tasks,
+			2,
+			EXIT_STUB
+		);
 
-		expect(results).toHaveLength(3);
-		expect(results.map((r) => r.relPath).sort()).toEqual([
+		expect(outcome.results).toHaveLength(0);
+		expect(outcome.failedPaths.sort()).toEqual([
 			"a.txt",
 			"b.txt",
 			"c.txt",
+			"d.txt",
 		]);
-		expect(results.every((r) => !r.ok)).toBe(true);
 	}, 15000);
+});
 
-	it("yields nothing for an empty task list", async () => {
-		const results = await collect([], 1);
-		expect(results).toHaveLength(0);
+describe("parallelIngestMode", () => {
+	const saved = process.env.PUSHWORK_PARALLEL_INGEST;
+	afterEach(() => {
+		if (saved === undefined) delete process.env.PUSHWORK_PARALLEL_INGEST;
+		else process.env.PUSHWORK_PARALLEL_INGEST = saved;
+	});
+
+	it("recognizes shard mode and rejects the removed import mode", () => {
+		process.env.PUSHWORK_PARALLEL_INGEST = "2";
+		expect(parallelIngestMode()).toBe("shard");
+		process.env.PUSHWORK_PARALLEL_INGEST = "shard";
+		expect(parallelIngestMode()).toBe("shard");
+		// "1" selected the refuted import variant — now plain serial.
+		process.env.PUSHWORK_PARALLEL_INGEST = "1";
+		expect(parallelIngestMode()).toBeNull();
+		delete process.env.PUSHWORK_PARALLEL_INGEST;
+		expect(parallelIngestMode()).toBeNull();
+	});
+});
+
+describe("ingestWorkerCount", () => {
+	const saved = process.env.PUSHWORK_WORKERS;
+	afterEach(() => {
+		if (saved === undefined) delete process.env.PUSHWORK_WORKERS;
+		else process.env.PUSHWORK_WORKERS = saved;
+	});
+
+	it("honors PUSHWORK_WORKERS and floors to at least 1", () => {
+		process.env.PUSHWORK_WORKERS = "3";
+		expect(ingestWorkerCount()).toBe(3);
+		process.env.PUSHWORK_WORKERS = "0"; // invalid → cores-based default ≥ 1
+		expect(ingestWorkerCount()).toBeGreaterThanOrEqual(1);
 	});
 });

@@ -1,6 +1,5 @@
 import * as fs from "fs/promises"
 import * as path from "path"
-import * as crypto from "crypto"
 import {glob} from "glob"
 import * as mimeTypes from "mime-types"
 import * as ignore from "ignore"
@@ -242,16 +241,8 @@ export async function movePath(
 	await fs.rename(sourcePath, destPath)
 }
 
-/**
- * Calculate content hash for change detection
- */
-export async function calculateContentHash(
-	content: string | Uint8Array
-): Promise<string> {
-	const hash = crypto.createHash("sha256")
-	hash.update(content)
-	return hash.digest("hex")
-}
+// (calculateContentHash removed 2026-06-12: it was an unused duplicate of
+// utils/content.ts's contentHash — use that.)
 
 /**
  * Get MIME type for file
