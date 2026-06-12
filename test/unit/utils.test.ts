@@ -308,11 +308,7 @@ describe("File System Utilities", () => {
     });
   });
 
-  // Content hashing is covered by the oracle property in
-  // test/unit/content.test.ts (equality ⟺ hash-equality). The hardcoded
-  // consistency tests that used to live here only exercised
-  // crypto.createHash; the duplicate fs.calculateContentHash impl they
-  // tested was deleted 2026-06-12.
+  // Content hashing is covered by the oracle property in content.test.ts.
 
   describe("getMimeType", () => {
     it("should return correct MIME type for text files", () => {

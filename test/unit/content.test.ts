@@ -3,13 +3,9 @@
  *
  * `contentHash` is load-bearing for artifact change detection: a wrong or
  * inconsistent hash creates phantom local edits that replace artifact docs
- * wholesale and corrupt shared directory documents (the 2026-06-12
- * resurrection bug). Previously untested. The oracle property: equality and
- * hash-equality must agree (for same-typed inputs; SHA-256 collisions are
- * unreachable for generated inputs).
- *
- * (A duplicate impl, fs.calculateContentHash, was deleted 2026-06-12 — an
- * agreement property here proved them identical first.)
+ * wholesale and corrupt shared directory documents. The oracle property:
+ * equality and hash-equality must agree (for same-typed inputs; SHA-256
+ * collisions are unreachable for generated inputs).
  */
 
 import * as fc from "fast-check";

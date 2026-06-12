@@ -3,7 +3,7 @@
  * PUSHWORK_PARALLEL_INGEST=2 / "shard") — the pull/clone mirror of
  * shard-ingest-worker.
  *
- * Each worker owns a FULL Repo (own Wasm, own storage adapter on the
+ * Each worker owns a full Repo (own Wasm, own storage adapter on the
  * shared `.pushwork/automerge` directory, own WebSocket when online).
  * It `repo.find`s its shard of remote file documents — downloading
  * and/or loading + materializing them with its own Wasm instance —

@@ -2,19 +2,18 @@
  * Shared-nothing shard-ingest worker (parallel-ingest experiment, mode
  * PUSHWORK_PARALLEL_INGEST=2 / "shard").
  *
- * Each worker owns a FULL Repo — its own Wasm instance, its own
- * NodeFSStorageAdapter writing to the SAME `.pushwork/automerge`
+ * Each worker owns a full Repo — its own Wasm instance, its own
+ * NodeFSStorageAdapter writing to the same `.pushwork/automerge`
  * directory (document keys are disjoint, atomic-rename writes are
  * multi-writer safe), and, when sync is enabled, its own WebSocket to
  * the sync server.
  *
- * The worker ingests its shard of NEW files end-to-end: build doc →
+ * The worker ingests its shard of new files end-to-end: build doc →
  * persist to shared storage → upload to the server → wait for delivery.
- * It reports only `{relPath, url, heads}` per file. The main thread
- * NEVER materializes these documents — it stitches the reported URLs
- * into directory documents (darn's "parallel leaves, serial
- * directories" shape) and uploads those afterwards, preserving the
- * children-before-parents ordering on the server.
+ * It reports only `{relPath, url, heads}` per file; the main thread
+ * never materializes these documents, stitching the reported URLs into
+ * directory documents afterwards ("parallel leaves, serial directories"),
+ * which preserves children-before-parents ordering on the server.
  */
 
 import {parentPort, workerData} from "node:worker_threads"
@@ -124,9 +123,6 @@ async function run(): Promise<void> {
 
 	// Flush pending storage writes (and close the socket) before reporting.
 	const shutdownStart = Date.now()
-	if (process.env.DEBUG) {
-		console.error(`[pushwork:shard-worker] shutdown starting t=${Date.now()}`)
-	}
 	await repo.shutdown()
 	if (process.env.DEBUG) {
 		console.error(

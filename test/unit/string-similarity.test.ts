@@ -3,7 +3,7 @@
  *
  * This is the scoring function under MoveDetector: a wrong score silently
  * turns renames into delete+create (losing CRDT history) or pairs unrelated
- * files. Previously untested. Properties over arbitrary strings, plus
+ * files. Properties over arbitrary strings, plus
  * directed examples for the documented edge rules.
  */
 

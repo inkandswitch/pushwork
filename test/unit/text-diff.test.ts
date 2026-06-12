@@ -8,7 +8,6 @@
  * part and is what the round-trip property exercises: if our cursor handling is
  * wrong, `applySplice(a, b) !== b`. `updateTextContent`'s legacy-ImmutableString
  * branch and `readDocContent`'s normalization are likewise our own dispatch.
- * Previously untested.
  */
 
 import * as A from "@automerge/automerge";

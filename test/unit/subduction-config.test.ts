@@ -27,10 +27,8 @@ describe("Sync backend configuration", () => {
   });
 
   describe("Default servers", () => {
-    // (Removed: an assertion restating the DEFAULT_SUBDUCTION_SERVER constant
-    // verbatim — a tautology. The cross-constant invariant below is the only
-    // real check: the two backends must not silently share an endpoint.)
     it("Subduction differs from legacy WebSocket server", () => {
+      // The two backends must not silently share an endpoint.
       expect(DEFAULT_SUBDUCTION_SERVER).not.toBe(DEFAULT_SYNC_SERVER);
     });
   });
@@ -84,8 +82,4 @@ describe("Sync backend configuration", () => {
     });
   });
 
-  // (Removed: a "legacy flag option types" block whose runtime assertions were
-  // tautologies — `const o: InitOptions = { legacy: true }; expect(o.legacy)`.
-  // The only real check there is the type annotation, already enforced by `tsc`
-  // on the production usage of InitOptions/CloneOptions. See test-review 2026-06.)
 });

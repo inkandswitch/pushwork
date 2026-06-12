@@ -478,8 +478,7 @@ function validateSyncServer(
   // Default (Subduction) mode: a storage ID is meaningless here.
   if (syncServerOpt.length >= 2) {
     // The variadic option swallows trailing positionals, so a misplaced
-    // directory path often lands here as a bogus "storage ID". Call that
-    // out — it's the more likely mistake than an intentional storage ID.
+    // directory path often lands here as a bogus "storage ID".
     const extra = syncServerOpt[1];
     const looksLikePath =
       extra.includes("/") || extra.startsWith(".") || extra.startsWith("~");

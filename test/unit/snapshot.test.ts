@@ -119,9 +119,8 @@ describe("SnapshotManager", () => {
 
     it("property: save/load round-trips arbitrary snapshots exactly", async () => {
       // Maps serialize to JSON arrays-of-pairs and back; optional fields
-      // (contentHash — the 2026-06-12 resurrection-bug field — and
-      // rootDirectoryUrl) must survive. A lossy round-trip here corrupts
-      // change detection for every subsequent sync.
+      // (contentHash, rootDirectoryUrl) must survive. A lossy round-trip
+      // here corrupts change detection for every subsequent sync.
       const relPath = fc
         .array(fc.stringMatching(/^[a-z]{1,8}$/), { minLength: 1, maxLength: 3 })
         .map((segs) => segs.join("/"));

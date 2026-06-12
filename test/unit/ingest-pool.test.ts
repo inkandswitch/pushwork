@@ -7,10 +7,6 @@
  * the engine falls back to main-thread creation — rather than leaving the
  * pool's promise pending forever. Uses a stub worker script via the
  * `workerScript` test seam so no Wasm or compiled dist is involved.
- *
- * (The "import"-mode pool this suite originally targeted was a refuted
- * experiment, deleted 2026-06-12; the shard pools share the same
- * exit-handling pattern, fixed in the same commit.)
  */
 
 import * as path from "path";

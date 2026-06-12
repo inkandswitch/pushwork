@@ -4,7 +4,6 @@
  * CLAUDE.md's #1 documented pitfall: `repo.find(versionedUrl)` returns a view
  * pinned at the version heads, so every navigation/update path must strip
  * heads first. Stale-heads bugs caused the v1.1.x artifact resurrection family.
- * Previously untested.
  */
 
 import * as A from "@automerge/automerge";
