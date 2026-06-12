@@ -286,8 +286,16 @@ export class ConfigManager {
   async initializeWithOverrides(
     overrides: Partial<DirectoryConfig> = {}
   ): Promise<DirectoryConfig> {
+    // Fresh-config semantics: this writes a brand-new v1 config, so the
+    // default is Subduction. `resolveProtocol`'s "no fields = legacy"
+    // rule is for *on-disk* v0 configs (pre-flip installs) and must not
+    // apply to a bare overrides object — only an explicit legacy signal
+    // (`protocol: "legacy"` or v0-style `subduction: false`) opts out.
     const protocol =
-      overrides.protocol ?? resolveProtocol(overrides) ?? "subduction";
+      overrides.protocol ??
+      (overrides.subduction === undefined
+        ? "subduction"
+        : resolveProtocol(overrides));
     const base = this.getDefaultDirectoryConfigForProtocol(protocol);
     const config = this.mergeConfigs(base, overrides);
 

@@ -150,10 +150,12 @@ export async function* runIngestPool(
 			feed(worker)
 		})
 
-		worker.on("error", error => {
-			// Fail every task assigned to this worker; the rest of the pool
-			// keeps going. Unclaimed tasks get picked up by other workers.
-			live.delete(worker)
+		// Fail every task assigned to this worker; the rest of the pool
+		// keeps going. Unclaimed tasks get picked up by other workers.
+		// If the whole pool died, fail the unclaimed tail rather than
+		// deadlocking the generator.
+		const failWorker = (reason: string): void => {
+			if (!live.delete(worker)) return // already handled
 			for (const [seq, entry] of inFlight) {
 				if (entry.worker === worker) {
 					inFlight.delete(seq)
@@ -161,12 +163,10 @@ export async function* runIngestPool(
 					push({
 						relPath: entry.task.relPath,
 						ok: false,
-						error: `worker crashed: ${error.message}`,
+						error: `worker crashed: ${reason}`,
 					})
 				}
 			}
-			// If the whole pool died, fail the unclaimed tail rather than
-			// deadlocking the generator.
 			if (live.size === 0) {
 				while (nextTask < tasks.length) {
 					const seq = nextTask++
@@ -174,11 +174,17 @@ export async function* runIngestPool(
 					push({
 						relPath: tasks[seq].relPath,
 						ok: false,
-						error: `worker pool exhausted: ${error.message}`,
+						error: `worker pool exhausted: ${reason}`,
 					})
 				}
 			}
-		})
+		}
+
+		worker.on("error", error => failWorker(error.message))
+		// A worker can exit without an `error` event (process.exit inside
+		// the worker, external terminate). Without this the in-flight task
+		// never settles and the generator awaits `wake` forever.
+		worker.on("exit", code => failWorker(`exited with code ${code}`))
 
 		feed(worker)
 	}

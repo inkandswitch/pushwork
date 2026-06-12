@@ -477,12 +477,23 @@ function validateSyncServer(
 
   // Default (Subduction) mode: a storage ID is meaningless here.
   if (syncServerOpt.length >= 2) {
+    // The variadic option swallows trailing positionals, so a misplaced
+    // directory path often lands here as a bogus "storage ID". Call that
+    // out — it's the more likely mistake than an intentional storage ID.
+    const extra = syncServerOpt[1];
+    const looksLikePath =
+      extra.includes("/") || extra.startsWith(".") || extra.startsWith("~");
     console.error(
       chalk.red(
-        "Error: a storage ID is only valid with --legacy.\n" +
-          "Subduction (the default backend) does not use one — pass just the URL:\n" +
-          "  pushwork init --sync-server <url>\n" +
-          "or select the legacy backend:\n" +
+        `Error: unexpected extra value after --sync-server URL: "${extra}"\n` +
+          (looksLikePath
+            ? "This looks like a directory path. --sync-server consumes the " +
+              "arguments that follow it,\nso put the path BEFORE the option:\n" +
+              `  pushwork init ${extra} --sync-server ${syncServer}\n`
+            : "A storage ID is only valid with --legacy.\n" +
+              "Subduction (the default backend) does not use one — pass just the URL:\n" +
+              "  pushwork init --sync-server <url>\n") +
+          "To select the legacy backend instead:\n" +
           "  pushwork init --legacy --sync-server <url> <storage-id>"
       )
     );
