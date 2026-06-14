@@ -1407,7 +1407,7 @@ export class SyncEngine {
 		// for the download tail, catching it up to anything already done.
 		out.done(`Discovered ${seen.size} ${plural("file", seen.size)}`)
 		bar = out.progress(
-			`Cloning ${seen.size} ${plural("file", seen.size)} in ${workers} worker repos`,
+			`Cloning ${seen.size} ${plural("file", seen.size)}`,
 			Math.max(seen.size, 1)
 		)
 		if (downloaded > 0) {
@@ -1419,7 +1419,7 @@ export class SyncEngine {
 		for (const p of outcome.failedPaths) fallback.add(p)
 
 		count("clone:docs.streamed", seen.size - fallback.size)
-		bar.stop(`Cloned ${seen.size - fallback.size}/${seen.size} ${plural("file", seen.size)} in workers`)
+		bar.stop(`Cloned ${seen.size - fallback.size}/${seen.size} ${plural("file", seen.size)}`)
 
 		// Main-thread fallback for any files a worker couldn't handle.
 		for (const relPath of fallback) {
@@ -1479,7 +1479,7 @@ export class SyncEngine {
 		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
 		debug(`pull: shard-pulling ${tasks.length} remote files across ${workers} worker repos`)
 		const bar = out.progress(
-			`Fetching ${tasks.length} ${plural("file", tasks.length)} in ${workers} worker repos`,
+			`Fetching ${tasks.length} ${plural("file", tasks.length)}`,
 			tasks.length
 		)
 		let fetched = 0
@@ -1526,7 +1526,7 @@ export class SyncEngine {
 
 		count("pull:docs.shard-pulled", tasks.length - fallback.size)
 		debug(`pull: shard pull handled ${tasks.length - fallback.size}/${tasks.length} files`)
-		bar.stop(`Fetched ${tasks.length - fallback.size}/${tasks.length} ${plural("file", tasks.length)} in workers`)
+		bar.stop(`Fetched ${tasks.length - fallback.size}/${tasks.length} ${plural("file", tasks.length)}`)
 		return fallback
 	}
 
@@ -1766,7 +1766,7 @@ export class SyncEngine {
 		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
 		debug(`push: shard-ingesting ${tasks.length} new files across ${workers} worker repos`)
 		const bar = out.progress(
-			`Ingesting ${tasks.length} ${plural("file", tasks.length)} in ${workers} worker repos`,
+			`Ingesting ${tasks.length} ${plural("file", tasks.length)}`,
 			tasks.length
 		)
 		let ingested = 0
@@ -1782,7 +1782,7 @@ export class SyncEngine {
 			}
 		)
 		const ingestedOk = outcome.results.filter(r => r.ok).length
-		bar.stop(`Ingested ${ingestedOk}/${tasks.length} ${plural("file", tasks.length)} in workers`)
+		bar.stop(`Ingested ${ingestedOk}/${tasks.length} ${plural("file", tasks.length)}`)
 
 		const unsynced = new Set(outcome.unsynced)
 		for (const r of outcome.results) {
