@@ -37,20 +37,44 @@ import {waitForSync, waitForBidirectionalSync} from "../utils/network-sync"
 import {SnapshotManager} from "./snapshot"
 import {ChangeDetector} from "./change-detection"
 import {MoveDetector} from "./move-detection"
-import {out} from "../utils/output"
+import {out, Progress} from "../utils/output"
 import {profileAsync, profileSync, count} from "../utils/profile"
 import {makeYielder} from "../utils/concurrency"
 import {
 	ClonePullTask,
 	IngestTask,
 	ingestWorkerCount,
-	parallelIngestMode,
+	shouldAutoShard,
+	shouldDeferRemoteContent,
+	shardExplicitlyDisabled as shardDisabled,
+	StreamingClonePool,
 	runShardIngest,
 	runShardPull,
 } from "../utils/ingest-pool"
 import * as path from "path"
 
 const isDebug = !!process.env.DEBUG
+
+function plural(word: string, count: number): string {
+	return count === 1 ? word : `${word}s`
+}
+
+/**
+ * A throttled reporter for the "remote documents discovered" count during
+ * change detection (the clone/pull download). Updates the active task
+ * spinner at most every ~120ms so a wide tree doesn't re-render per doc.
+ */
+function makeRemoteProgressReporter(label: string): (n: number) => void {
+	let total = 0
+	let lastRender = 0
+	return (n: number) => {
+		total += n
+		const now = Date.now()
+		if (now - lastRender < 120) return
+		lastRender = now
+		out.update(`${label} (${total} remote ${plural("document", total)})`)
+	}
+}
 function debug(...args: any[]) {
 	if (isDebug) console.error("[pushwork:engine]", ...args)
 }
@@ -296,6 +320,7 @@ export class SyncEngine {
 			}
 
 			// Detect all changes
+			out.task("Detecting changes")
 			const changes = await this.changeDetector.detectChanges(snapshot)
 
 			// Detect moves
@@ -303,8 +328,13 @@ export class SyncEngine {
 				changes,
 				snapshot
 			)
+			out.done(
+				changes.length === 0
+					? "No local changes"
+					: `Detected ${remainingChanges.length} ${plural("document", remainingChanges.length)}${moves.length > 0 ? ` and ${moves.length} ${plural("move", moves.length)}` : ""}`
+			)
 
-			// Apply local changes only (no network sync)
+			// Apply local changes only (no network sync; renders a push bar)
 			const commitResult = await this.pushLocalChanges(
 				remainingChanges,
 				moves,
@@ -480,6 +510,7 @@ export class SyncEngine {
 			// Wait for initial sync to receive any pending remote changes
 			if (this.config.sync_enabled && snapshot.rootDirectoryUrl) {
 				debug("sync: waiting for root document to be ready")
+				out.task("Connecting to sync server")
 				out.update("Waiting for root document from server")
 
 				// Wait for the root document to be fetched from the network.
@@ -488,13 +519,15 @@ export class SyncEngine {
 				// This is critical for clone scenarios.
 				const plainRootUrl = getPlainUrl(snapshot.rootDirectoryUrl)
 				const maxAttempts = 6
+				let rootHandle: DocHandle<DirectoryDocument> | null = null
 				for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 					try {
-						const rootHandle = await this.repo.find<DirectoryDocument>(plainRootUrl)
+						rootHandle = await this.repo.find<DirectoryDocument>(plainRootUrl)
 						rootHandle.doc() // throws if not ready
 						debug(`sync: root document ready (attempt ${attempt})`)
 						break
 					} catch (error) {
+						rootHandle = null
 						const isUnavailable = String(error).includes("unavailable") || String(error).includes("not ready")
 						if (isUnavailable && attempt < maxAttempts) {
 							const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000)
@@ -509,28 +542,36 @@ export class SyncEngine {
 					}
 				}
 
-				debug("sync: waiting for initial bidirectional sync")
-				out.update("Waiting for initial sync from server")
-				try {
-					await profileAsync("net:initial-wait", () =>
-						waitForBidirectionalSync(
-							this.repo,
-							snapshot.rootDirectoryUrl,
-							{
-								timeoutMs: 5000, // Increased timeout for initial sync
-								pollIntervalMs: 100,
-								stableChecksRequired: 3,
-							}
+				// Stabilize ONLY the root directory document, not the whole
+				// tree. A full-tree scan here would `repo.find` (and thus
+				// download) every document on a clone — that download is
+				// redundant with change detection's own per-doc fetches and
+				// belongs in the pull phase, where it's progressed. We just
+				// need the root's directory listing settled before we walk it.
+				if (rootHandle) {
+					debug("sync: waiting for root document to stabilize")
+					out.update("Waiting for root directory to settle")
+					try {
+						await profileAsync("net:initial-wait", () =>
+							waitForBidirectionalSync(
+								this.repo,
+								snapshot.rootDirectoryUrl,
+								{
+									timeoutMs: 5000,
+									pollIntervalMs: 100,
+									stableChecksRequired: 3,
+									handles: [rootHandle as DocHandle<unknown>],
+								}
+							)
 						)
-					)
-				} catch (error) {
-					out.taskLine(`Initial sync: ${error}`, true)
+					} catch (error) {
+						out.taskLine(`Initial sync: ${error}`, true)
+					}
 				}
+
+				out.done("Connected")
 			}
 
-			// Detect all changes
-			debug("sync: detecting changes")
-			out.update("Detecting local and remote changes")
 			// Scan the local filesystem once and reuse it for both detect
 			// passes. The local tree doesn't change during sync (pushwork
 			// is the only writer; the pull phase runs after both passes),
@@ -540,6 +581,29 @@ export class SyncEngine {
 				this.changeDetector.getCurrentFilesystemState()
 			)
 
+			// Fresh clone (empty snapshot, nothing local to push, sync on,
+			// shard not disabled): take the streaming-clone fast path, which
+			// pipelines the directory walk with a work-stealing download
+			// pool. Skips the normal detect/push/pull entirely.
+			if (
+				this.config.sync_enabled &&
+				!!snapshot.rootDirectoryUrl &&
+				snapshot.files.size === 0 &&
+				currentFiles.size === 0 &&
+				!shardDisabled()
+			) {
+				await profileAsync("clone:stream", () =>
+					this.streamingClonePull(snapshot, result)
+				)
+			} else {
+			// Detect all changes
+			debug("sync: detecting changes")
+			out.task("Detecting changes")
+
+			// Live count of remote documents discovered (the clone/pull
+			// download). Throttled so we don't re-render the spinner per doc.
+			const remoteProgress = makeRemoteProgressReporter("Detecting changes")
+
 			// Capture pre-push snapshot file paths to detect deletions after push
 			const prePushFilePaths = new Set(snapshot.files.keys())
 			const changes = await profileAsync("detect:pre-push", () =>
@@ -548,7 +612,8 @@ export class SyncEngine {
 					undefined,
 					currentFiles,
 					undefined,
-					parallelIngestMode() === "shard" // defer remote fetches to workers
+					shouldDeferRemoteContent(snapshot.files.size), // defer so pull can auto-shard
+					remoteProgress
 				)
 			)
 
@@ -559,6 +624,11 @@ export class SyncEngine {
 			)
 
 			debug(`sync: detected ${changes.length} changes, ${moves.length} moves, ${remainingChanges.length} remaining`)
+			out.done(
+				changes.length === 0
+					? "No local changes"
+					: `Detected ${remainingChanges.length} ${plural("document", remainingChanges.length)}${moves.length > 0 ? ` and ${moves.length} ${plural("move", moves.length)}` : ""}`
+			)
 
 			// Phase 1: Push local changes to remote
 			debug("sync: phase 1 - pushing local changes")
@@ -600,9 +670,19 @@ export class SyncEngine {
 						)
 						const handlePaths = Array.from(this.handlesByPath.keys())
 						debug(`sync: waiting for ${allHandles.length} handles to sync to server: ${handlePaths.slice(0, 10).map(p => p || "(root)").join(", ")}${handlePaths.length > 10 ? ` ...and ${handlePaths.length - 10} more` : ""}`)
-						out.update(`Uploading ${allHandles.length} documents to sync server`)
+						// Label the bar accurately: when shard-ingest workers
+						// uploaded the file documents, the main thread is left
+						// syncing only the directory documents — calling those
+						// "documents" reads as if the files weren't uploaded.
+						const allDirs = handlePaths.every(
+							p => p === "" || snapshot.directories.has(p)
+						)
+						const uploadNoun = allDirs
+							? {one: "directory", many: "directories"}
+							: {one: "document", many: "documents"}
+						// waitForSync renders its own progress bar.
 						const {failed} = await profileAsync("net:upload", () =>
-							waitForSync(allHandles, storageId)
+							waitForSync(allHandles, storageId, undefined, uploadNoun)
 						)
 
 						// Recreate failed documents and retry once.
@@ -610,11 +690,10 @@ export class SyncEngine {
 						// own heal-sync retry logic.
 						if (failed.length > 0 && !sub) {
 							debug(`sync: ${failed.length} documents failed, recreating`)
-							out.update(`Recreating ${failed.length} failed documents`)
+							out.info(`Recreating ${failed.length} failed ${plural("document", failed.length)}`)
 							const retryHandles = await this.recreateFailedDocuments(failed, snapshot)
 							if (retryHandles.length > 0) {
 								debug(`sync: retrying ${retryHandles.length} recreated handles`)
-								out.update(`Retrying ${retryHandles.length} recreated documents`)
 								const retry = await waitForSync(
 									retryHandles,
 									storageId
@@ -644,7 +723,7 @@ export class SyncEngine {
 					// Use tracked handles for post-push check (cheaper than full tree scan)
 					const changedHandles = Array.from(this.handlesByPath.values())
 					debug(`sync: waiting for bidirectional sync to stabilize (${changedHandles.length} tracked handles)`)
-					out.update("Waiting for bidirectional sync to stabilize")
+					out.task("Waiting for sync to stabilize")
 					await profileAsync("net:stabilize", () =>
 						waitForBidirectionalSync(
 							this.repo,
@@ -657,6 +736,7 @@ export class SyncEngine {
 							}
 						)
 					)
+					out.done("Stabilized")
 
 					// Touch root directory AFTER all docs are synced and stable.
 					// This signals consumers (e.g. Patchwork) that new content is
@@ -671,10 +751,12 @@ export class SyncEngine {
 								snapshot.rootDirectoryUrl
 							)
 						debug("sync: syncing root directory touch to server")
-						out.update("Syncing root directory update")
+						// waitForSync renders its own (one-document) bar.
 						const rootSync = await waitForSync(
 							[rootHandle],
-							storageId
+							storageId,
+							undefined,
+							{one: "directory", many: "directories"}
 						)
 						if (rootSync.failed.length > 0) {
 							const msg = "Root directory update did not converge to server; consumers may not see recent changes until next sync"
@@ -706,6 +788,10 @@ export class SyncEngine {
 				debug(`sync: excluding ${deletedPaths.size} deleted paths from re-detection`)
 			}
 			debug("sync: re-detecting changes after network sync")
+			out.task("Checking for remote changes")
+			const postRemoteProgress = makeRemoteProgressReporter(
+				"Checking for remote changes"
+			)
 			const freshChanges = await profileAsync("detect:post", () =>
 				this.changeDetector.detectChanges(
 					snapshot,
@@ -715,7 +801,8 @@ export class SyncEngine {
 					this.workerPushedPaths.size > 0
 						? this.workerPushedPaths
 						: undefined,
-					parallelIngestMode() === "shard" // defer remote fetches to workers
+					shouldDeferRemoteContent(snapshot.files.size), // defer so pull can auto-shard
+					postRemoteProgress
 				)
 			)
 			const freshRemoteChanges = freshChanges.filter(
@@ -723,12 +810,15 @@ export class SyncEngine {
 					c.changeType === ChangeType.REMOTE_ONLY ||
 					c.changeType === ChangeType.BOTH_CHANGED
 			)
+			out.done(
+				freshRemoteChanges.length === 0
+					? "No remote changes"
+					: `Found ${freshRemoteChanges.length} remote ${plural("document", freshRemoteChanges.length)}`
+			)
 
 			debug(`sync: phase 2 - pulling ${freshRemoteChanges.length} remote changes`)
-			if (freshRemoteChanges.length > 0) {
-				out.update(`Pulling ${freshRemoteChanges.length} remote changes`)
-			}
 			// Phase 2: Pull remote changes to local using fresh detection
+			// (renders its own progress bar when there is work)
 			const phase2Result = await profileAsync("phase2:pull", () =>
 				this.pullRemoteChanges(freshRemoteChanges, snapshot)
 			)
@@ -736,7 +826,9 @@ export class SyncEngine {
 			result.directoriesChanged += phase2Result.directoriesChanged
 			result.errors.push(...phase2Result.errors)
 			result.warnings.push(...phase2Result.warnings)
+			} // end non-streaming-clone path
 
+			out.task("Saving snapshot")
 			// Update snapshot heads after pulling remote changes
 			// IMPORTANT: Use getPlainUrl() to strip version/heads from URLs.
 			// Artifact entries store versioned URLs (with heads baked in).
@@ -781,12 +873,14 @@ export class SyncEngine {
 					// Handle might not exist if directory was deleted
 				}
 			}
+
 			})
 
 			// Save updated snapshot if not dry run
 			await profileAsync("snapshot:save", () =>
 				this.snapshotManager.save(snapshot)
 			)
+			out.done("Saved snapshot")
 
 			result.success = result.errors.length === 0
 			return result
@@ -827,31 +921,6 @@ export class SyncEngine {
 		// being starved across thousands of synchronous Automerge calls.
 		const maybeYield = makeYielder()
 
-		// Process moves first - all detected moves are applied
-		if (moves.length > 0) {
-			debug(`push: processing ${moves.length} moves`)
-			out.update(`Processing ${moves.length} move${moves.length > 1 ? "s" : ""}`)
-		}
-		for (let i = 0; i < moves.length; i++) {
-			const move = moves[i]
-			try {
-				debug(`push: move ${i + 1}/${moves.length}: ${move.fromPath} -> ${move.toPath}`)
-				out.taskLine(`Moving ${move.fromPath} -> ${move.toPath}`)
-				await this.applyMoveToRemote(move, snapshot)
-				result.filesChanged++
-			} catch (error) {
-				debug(`push: move failed for ${move.fromPath}: ${error}`)
-				result.errors.push({
-					path: move.fromPath,
-					operation: "move",
-					error: error as Error,
-					recoverable: true,
-				})
-			}
-
-			await maybeYield()
-		}
-
 		// Filter to local changes only
 		const localChanges = changes.filter(
 			c =>
@@ -859,7 +928,7 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
-		if (localChanges.length === 0) {
+		if (moves.length === 0 && localChanges.length === 0) {
 			debug("push: no local changes to push")
 			return result
 		}
@@ -867,17 +936,16 @@ export class SyncEngine {
 		const newFiles = localChanges.filter(c => !snapshot.files.has(c.path) && c.localContent !== null)
 		const modifiedFiles = localChanges.filter(c => snapshot.files.has(c.path) && c.localContent !== null)
 		const deletedFiles = localChanges.filter(c => c.localContent === null && snapshot.files.has(c.path))
-		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
-		out.update(`Pushing ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted)`)
+		debug(`push: ${localChanges.length} local changes (${newFiles.length} new, ${modifiedFiles.length} modified, ${deletedFiles.length} deleted), ${moves.length} moves`)
 
 		// Shard mode (PUSHWORK_PARALLEL_INGEST=2): NEW files are built,
 		// persisted, and uploaded by worker-owned repos; the serial directory
 		// phase below stitches the reported {url, heads} in. Files whose
 		// worker failed are absent from the map and fall back to main-thread
 		// creation. See ingestNewFilesInShardedRepos.
-		const ingestMode = newFiles.length > 1 ? parallelIngestMode() : null
+		const useShardIngest = newFiles.length > 1 && shouldAutoShard(newFiles.length)
 		let shardResults = new Map<string, {url: AutomergeUrl; heads: UrlHeads}>()
-		if (ingestMode === "shard") {
+		if (useShardIngest) {
 			shardResults = await profileAsync("push:shard-ingest", () =>
 				this.ingestNewFilesInShardedRepos(newFiles, result)
 			)
@@ -919,6 +987,36 @@ export class SyncEngine {
 
 		debug(`push: processing ${sortedDirPaths.length} directories (deepest first)`)
 
+		// One bar covers moves + file changes + directory updates. Created
+		// after the shard ingest (which renders its own indicator). NOTE:
+		// while the bar is live, in-loop reporting must go through debug()
+		// or bar.advance(.., msg) — any leveled out.* call dismisses it.
+		const bar = out.progress(
+			`Pushing ${moves.length + localChanges.length} local ${plural("change", moves.length + localChanges.length)}`,
+			moves.length + localChanges.length + sortedDirPaths.length
+		)
+
+		// Process moves first - all detected moves are applied
+		for (let i = 0; i < moves.length; i++) {
+			const move = moves[i]
+			try {
+				debug(`push: move ${i + 1}/${moves.length}: ${move.fromPath} -> ${move.toPath}`)
+				bar.advance(1, `moving ${move.fromPath} -> ${move.toPath}`)
+				await this.applyMoveToRemote(move, snapshot)
+				result.filesChanged++
+			} catch (error) {
+				debug(`push: move failed for ${move.fromPath}: ${error}`)
+				result.errors.push({
+					path: move.fromPath,
+					operation: "move",
+					error: error as Error,
+					recoverable: true,
+				})
+			}
+
+			await maybeYield()
+		}
+
 		// Track which directories were modified (for subdirectory URL propagation)
 		const modifiedDirs = new Set<string>()
 		let filesProcessed = 0
@@ -959,7 +1057,7 @@ export class SyncEngine {
 					if (change.localContent === null && snapshotEntry) {
 						// Delete file
 						debug(`push: [${filesProcessed}/${totalFiles}] delete ${change.path}`)
-						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] deleting ${change.path}`)
+						bar.advance(1, `deleting ${change.path}`)
 						await this.deleteRemoteFile(
 							snapshotEntry.url,
 							snapshot,
@@ -971,7 +1069,7 @@ export class SyncEngine {
 					} else if (!snapshotEntry) {
 						// New file
 						debug(`push: [${filesProcessed}/${totalFiles}] create ${change.path} (${change.fileType})`)
-						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] creating ${change.path}`)
+						bar.advance(1, `creating ${change.path}`)
 
 						// Shared-nothing path: the doc already exists in
 						// storage and on the server (worker-owned repo).
@@ -1041,7 +1139,7 @@ export class SyncEngine {
 							? `${change.localContent.length} chars`
 							: `${(change.localContent as Uint8Array).length} bytes`
 						debug(`push: [${filesProcessed}/${totalFiles}] update ${change.path} (${contentSize})`)
-						out.update(`Pushing local changes [${filesProcessed}/${totalFiles}] updating ${change.path}`)
+						bar.advance(1, `updating ${change.path}`)
 						await this.updateRemoteFile(
 							snapshotEntry.url,
 							change.localContent!,
@@ -1064,7 +1162,7 @@ export class SyncEngine {
 					}
 				} catch (error) {
 					debug(`push: error processing ${change.path}: ${error}`)
-					out.taskLine(`Error pushing ${change.path}: ${error}`, true)
+					debug(`push: error pushing ${change.path}: ${error}`) // surfaced via result.errors
 					result.errors.push({
 						path: change.path,
 						operation: "local-to-remote",
@@ -1122,9 +1220,16 @@ export class SyncEngine {
 				modifiedDirs.add(dirPath)
 				result.directoriesChanged++
 			}
+			bar.advance(1, `directory ${dirLabel}`)
 		}
 
 		debug(`push: complete - ${result.filesChanged} files, ${result.directoriesChanged} dirs changed, ${result.errors.length} errors`)
+		bar.stop(
+			`Pushed ${result.filesChanged} ${plural("file", result.filesChanged)}` +
+				(result.directoriesChanged > 0
+					? `, ${result.directoriesChanged} ${result.directoriesChanged === 1 ? "directory" : "directories"}`
+					: "")
+		)
 		return result
 	}
 
@@ -1150,23 +1255,34 @@ export class SyncEngine {
 				c.changeType === ChangeType.BOTH_CHANGED
 		)
 
+		if (remoteChanges.length === 0) return result
+
 		// Deferred changes (shard mode) carry only an entry URL; shard-pull
 		// workers fetch + write them. Failures fall back to the serial loop.
 		const deferred = remoteChanges.filter(c => c.deferredFetch)
 		const immediate = remoteChanges.filter(c => !c.deferredFetch)
 		let fallbackPaths: Set<string> | undefined
-		if (deferred.length > 1) {
+		// Shard the pull only when there are enough deferred docs to amortize
+		// worker startup (AUTO_SHARD_THRESHOLD), or when shard mode is forced.
+		// Below that, materialize on the main thread (no worker overhead).
+		if (deferred.length > 1 && shouldAutoShard(deferred.length)) {
 			fallbackPaths = await profileAsync("pull:shard-pull", () =>
 				this.pullRemoteFilesInShardedRepos(deferred, snapshot, result)
 			)
-		} else if (deferred.length === 1) {
-			// Worker startup (~1.5 s of Wasm + Repo init) isn't worth it for
-			// a single file — materialize on the main thread directly.
-			fallbackPaths = new Set([deferred[0].path])
+		} else if (deferred.length > 0) {
+			fallbackPaths = new Set(deferred.map(c => c.path))
 		}
 
 		// Sort changes by dependency order (parents before children)
 		const sortedChanges = this.sortChangesByDependency(immediate)
+
+		// Bar covers the main-thread work: immediate changes + any shard
+		// fallbacks (worker-handled paths already counted by the shard run).
+		const mainThreadTotal = sortedChanges.length + (fallbackPaths?.size ?? 0)
+		const bar = out.progress(
+			`Pulling ${remoteChanges.length} remote ${plural("document", remoteChanges.length)}`,
+			Math.max(mainThreadTotal, 1)
+		)
 
 		for (const change of sortedChanges) {
 			try {
@@ -1175,6 +1291,7 @@ export class SyncEngine {
 						`content=${change.remoteContent === null ? "null(delete)" : typeof change.remoteContent}` +
 						`${change.remoteUrl ? ", urlReplaced" : ""})`
 				)
+				bar.advance(1, change.path)
 				await this.applyRemoteChangeToLocal(change, snapshot)
 				result.filesChanged++
 			} catch (error) {
@@ -1193,6 +1310,7 @@ export class SyncEngine {
 			for (const change of deferred) {
 				if (!fallbackPaths.has(change.path)) continue
 				try {
+					bar.advance(1, change.path)
 					await this.applyDeferredChangeOnMainThread(change, snapshot)
 					result.filesChanged++
 				} catch (error) {
@@ -1206,7 +1324,130 @@ export class SyncEngine {
 			}
 		}
 
+		bar.stop(`Pulled ${result.filesChanged} ${plural("document", result.filesChanged)}`)
 		return result
+	}
+
+	/**
+	 * Streaming clone: walk the remote tree on the main thread and feed
+	 * each discovered file to a work-stealing download pool *as it's
+	 * found*, so the walk and the download overlap (pipelining) instead of
+	 * walk-everything-then-download. Used for a fresh clone (empty
+	 * snapshot, no local files). The normal detect/push/pull flow is
+	 * skipped — there's nothing local to push, and this method does the
+	 * pull. Falls back to the main thread for any worker failures.
+	 */
+	private async streamingClonePull(
+		snapshot: SyncSnapshot,
+		result: SyncResult
+	): Promise<void> {
+		const workers = ingestWorkerCount()
+		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
+		debug(`clone: streaming pull across ${workers} worker repos`)
+		// The download total isn't known until the directory walk finishes,
+		// and clack progress bars need a fixed max. So: a spinner during the
+		// (fast) discovery walk, then a real progress bar for the download —
+		// the downloads overlap the walk (pipelined), so the bar is created
+		// with the final count and caught up to whatever already finished.
+		out.task("Discovering files")
+
+		const progress = makeRemoteProgressReporter("Discovering")
+		const fallback = new Set<string>()
+		const seen = new Map<string, AutomergeUrl>() // relPath -> entry url
+		let downloaded = 0
+		let bar: Progress | null = null
+
+		const pool = new StreamingClonePool(
+			this.rootPath,
+			this.config,
+			protocol,
+			workers,
+			outcome => {
+				if (!outcome.ok) {
+					debug(`clone: stream fetch failed for ${outcome.relPath}: ${outcome.error}`)
+					fallback.add(outcome.relPath)
+					return
+				}
+				const isArtifact = this.isArtifactPath(outcome.relPath)
+				const entryUrl = isArtifact
+					? stringifyAutomergeUrl({
+							documentId: parseAutomergeUrl(outcome.url as AutomergeUrl)
+								.documentId,
+							heads: outcome.heads as UrlHeads,
+						})
+					: (outcome.url as AutomergeUrl)
+				this.snapshotManager.updateFileEntry(snapshot, outcome.relPath, {
+					path: joinAndNormalizePath(this.rootPath, outcome.relPath),
+					url: entryUrl,
+					head: outcome.heads as UrlHeads,
+					extension: getFileExtension(outcome.relPath),
+					mimeType: getEnhancedMimeType(outcome.relPath),
+					...(isArtifact ? {contentHash: outcome.contentHash} : {}),
+				})
+				this.workerPushedPaths.add(outcome.relPath)
+				result.filesChanged++
+				downloaded++
+				// Null until the walk finishes (we don't know the total yet);
+				// catch-up happens right after.
+				bar?.advance(1, `Cloning ${downloaded}/${seen.size} ${plural("file", seen.size)}`)
+			}
+		)
+
+		// Walk the tree; each discovered file streams straight to the pool.
+		await this.changeDetector.streamRemoteFiles(
+			snapshot,
+			(relPath, url) => {
+				seen.set(relPath, url)
+				pool.submit({relPath, url})
+			},
+			progress
+		)
+
+		// Discovery complete — total is known. Switch to a determinate bar
+		// for the download tail, catching it up to anything already done.
+		out.done(`Discovered ${seen.size} ${plural("file", seen.size)}`)
+		bar = out.progress(
+			`Cloning ${seen.size} ${plural("file", seen.size)} in ${workers} worker repos`,
+			Math.max(seen.size, 1)
+		)
+		if (downloaded > 0) {
+			bar.advance(downloaded, `Cloning ${downloaded}/${seen.size} ${plural("file", seen.size)}`)
+		}
+
+		const outcome = await pool.finish()
+		// outcome.failedPaths covers worker crashes; merge with per-file fails.
+		for (const p of outcome.failedPaths) fallback.add(p)
+
+		count("clone:docs.streamed", seen.size - fallback.size)
+		bar.stop(`Cloned ${seen.size - fallback.size}/${seen.size} ${plural("file", seen.size)} in workers`)
+
+		// Main-thread fallback for any files a worker couldn't handle.
+		for (const relPath of fallback) {
+			const url = seen.get(relPath)
+			if (!url) continue
+			try {
+				await this.applyDeferredChangeOnMainThread(
+					{
+						path: relPath,
+						changeType: ChangeType.REMOTE_ONLY,
+						fileType: FileType.TEXT,
+						localContent: null,
+						remoteContent: null,
+						remoteUrl: url,
+						deferredFetch: true,
+					},
+					snapshot
+				)
+				result.filesChanged++
+			} catch (error) {
+				result.errors.push({
+					path: relPath,
+					operation: "remote-to-local",
+					error: error as Error,
+					recoverable: true,
+				})
+			}
+		}
 	}
 
 	/**
@@ -1237,14 +1478,21 @@ export class SyncEngine {
 		const workers = ingestWorkerCount()
 		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
 		debug(`pull: shard-pulling ${tasks.length} remote files across ${workers} worker repos`)
-		out.update(`Fetching ${tasks.length} files in ${workers} worker repos`)
-
+		const bar = out.progress(
+			`Fetching ${tasks.length} ${plural("file", tasks.length)} in ${workers} worker repos`,
+			tasks.length
+		)
+		let fetched = 0
 		const outcome = await runShardPull(
 			this.rootPath,
 			this.config,
 			protocol,
 			tasks,
-			workers
+			workers,
+			n => {
+				fetched += n
+				bar.advance(n, `Fetching ${fetched}/${tasks.length} ${plural("file", tasks.length)}`)
+			}
 		)
 
 		for (const r of outcome.results) {
@@ -1278,6 +1526,7 @@ export class SyncEngine {
 
 		count("pull:docs.shard-pulled", tasks.length - fallback.size)
 		debug(`pull: shard pull handled ${tasks.length - fallback.size}/${tasks.length} files`)
+		bar.stop(`Fetched ${tasks.length - fallback.size}/${tasks.length} ${plural("file", tasks.length)} in workers`)
 		return fallback
 	}
 
@@ -1516,15 +1765,24 @@ export class SyncEngine {
 		const workers = ingestWorkerCount()
 		const protocol: SyncProtocol = this.config.protocol ?? "subduction"
 		debug(`push: shard-ingesting ${tasks.length} new files across ${workers} worker repos`)
-		out.update(`Ingesting ${tasks.length} files in ${workers} worker repos`)
-
+		const bar = out.progress(
+			`Ingesting ${tasks.length} ${plural("file", tasks.length)} in ${workers} worker repos`,
+			tasks.length
+		)
+		let ingested = 0
 		const outcome = await runShardIngest(
 			this.rootPath,
 			this.config,
 			protocol,
 			tasks,
-			workers
+			workers,
+			n => {
+				ingested += n
+				bar.advance(n, `Ingesting ${ingested}/${tasks.length} ${plural("file", tasks.length)}`)
+			}
 		)
+		const ingestedOk = outcome.results.filter(r => r.ok).length
+		bar.stop(`Ingested ${ingestedOk}/${tasks.length} ${plural("file", tasks.length)} in workers`)
 
 		const unsynced = new Set(outcome.unsynced)
 		for (const r of outcome.results) {

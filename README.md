@@ -41,6 +41,22 @@ pushwork url
 
 ## Commands
 
+### Global Output Flags
+
+Available on every command:
+
+- `--porcelain` - Machine-readable output: tab-separated `<level>\t<message>`
+  lines, no spinners, colors, or prompts. Use this when scripting.
+- `-q, --quiet` - Suppress progress; show only final summaries and errors
+- `--silent` - Suppress everything except errors (sent to stderr); rely on
+  exit codes
+
+The default is an interactive UI with spinners and confirmation prompts.
+Prompts automatically accept their default answer when any of these flags
+are set or when not attached to a terminal, so scripts and CI never hang.
+Data outputs (`url`, `ls`, `diff --name-only` paths) are always plain lines
+in every mode.
+
 ### Core Commands
 
 **`init [path]`** - Initialize sync in a directory

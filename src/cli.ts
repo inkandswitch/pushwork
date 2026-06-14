@@ -19,6 +19,7 @@ import {
   config,
   watch,
 } from "./commands";
+import { out } from "./utils/output";
 import { setProfilingEnabled } from "./utils/profile";
 
 const pkg = require("../package.json");
@@ -63,7 +64,23 @@ const versionString = [
 const program = new Command()
   .name("pushwork")
   .description("Bidirectional directory synchronization using Automerge CRDTs")
-  .version(versionString, "-V, --version", "output the version number");
+  .version(versionString, "-V, --version", "output the version number")
+  .option(
+    "--porcelain",
+    "Machine-readable output: tab-separated lines, no spinners/colors/prompts"
+  )
+  .option(
+    "-q, --quiet",
+    "Suppress progress output; show only final summaries and errors"
+  )
+  .option("--silent", "Suppress all output except errors (check exit code)")
+  .hook("preAction", (thisCommand) => {
+    const opts = thisCommand.opts();
+    out.configure({
+      porcelain: Boolean(opts.porcelain),
+      verbosity: opts.silent ? "silent" : opts.quiet ? "quiet" : "normal",
+    });
+  });
 
 // Init command
 program

@@ -31,12 +31,18 @@ export function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Concurrency budget for I/O-bound fan-out (file reads, stats). Scaled to
- * cores like darn's `io_bound()` — enough to keep the storage device's
- * queue fed, bounded so a 50k-file tree doesn't open 50k descriptors or
- * buffer 50k file contents in memory at once.
+ * Concurrency budget for I/O-bound fan-out (file reads, stats, remote
+ * `repo.find` round-trips). Scaled to cores like darn's `io_bound()` —
+ * enough to keep the storage device's queue and the sync socket fed,
+ * bounded so a 50k-file tree doesn't open 50k descriptors or buffer 50k
+ * file contents at once. Override with PUSHWORK_IO_CONCURRENCY (used for
+ * A/B measurement of the clone/pull download).
  */
-export const IO_CONCURRENCY = Math.max(8, (os.cpus()?.length ?? 4) * 4);
+export const IO_CONCURRENCY = (() => {
+  const fromEnv = Number(process.env.PUSHWORK_IO_CONCURRENCY);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return Math.max(8, (os.cpus()?.length ?? 4) * 4);
+})();
 
 /**
  * Default time budget between yields, in milliseconds. The loop runs

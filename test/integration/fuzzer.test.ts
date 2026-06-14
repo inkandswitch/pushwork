@@ -777,20 +777,19 @@ describe("Pushwork Fuzzer", () => {
 
               expect(hashAfterA).toBe(hashAfterB);
 
-              // Verify diff shows no changes
+              // Verify diff shows no changes. Porcelain mode gives a clean
+              // contract: status lines are `<level>\t...`, changed paths
+              // are bare lines.
               const { stdout: diffOutput } = await pushwork(
-                ["diff", "--name-only"],
+                ["--porcelain", "diff", "--name-only"],
                 repoA
               );
-              // Filter out status messages, only check for actual file differences
               const diffLines = diffOutput
                 .split("\n")
                 .filter(
                   (line) =>
                     line.trim() &&
-                    !line.includes("✓") &&
-                    !line.includes("Local-only") &&
-                    !line.includes("Root URL")
+                    !/^(ok|info|warning|error|progress)\t/.test(line)
                 );
               expect(diffLines.length).toBe(0);
 

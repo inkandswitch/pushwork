@@ -295,6 +295,11 @@ export async function waitForSync(
   handlesToWaitOn: DocHandle<unknown>[],
   syncServerStorageId?: StorageId,
   timeoutMs: number = 60000,
+  // What the handles represent, for progress messages. In shard-ingest mode
+  // the file documents are uploaded by the worker repos, so the main thread
+  // only syncs the directory documents — labelling them "documents" then
+  // reads as if the files weren't uploaded.
+  noun: { one: string; many: string } = { one: "document", many: "documents" },
 ): Promise<SyncWaitResult> {
   const startTime = Date.now();
 
@@ -308,8 +313,7 @@ export async function waitForSync(
   // for each handle's heads to stop changing.
   if (!syncServerStorageId) {
     debug(`waitForSync: no storage ID, using head-stability polling for ${handlesToWaitOn.length} documents`);
-    out.taskLine(`Waiting for ${handlesToWaitOn.length} documents to sync`);
-    return waitForSyncViaHeadStability(handlesToWaitOn, timeoutMs, startTime);
+    return waitForSyncViaHeadStability(handlesToWaitOn, timeoutMs, startTime, noun);
   }
 
   debug(`waitForSync: waiting for ${handlesToWaitOn.length} documents (timeout=${timeoutMs}ms, batchSize=${SYNC_BATCH_SIZE})`);
@@ -333,7 +337,6 @@ export async function waitForSync(
 
   if (needsSync.length > 0) {
     debug(`waitForSync: ${alreadySynced} already synced, ${needsSync.length} need sync`);
-    out.taskLine(`Uploading: ${alreadySynced}/${handlesToWaitOn.length} already synced, waiting for ${needsSync.length} more`);
   } else {
     debug(`waitForSync: all ${handlesToWaitOn.length} already synced`);
     return { failed: [] };
@@ -342,16 +345,14 @@ export async function waitForSync(
   // Process in batches to avoid flooding the server
   const failed: DocHandle<unknown>[] = [];
   let synced = alreadySynced;
+  const bar = out.progress(
+    `Uploading ${needsSync.length} ${needsSync.length === 1 ? noun.one : noun.many}`,
+    needsSync.length
+  );
 
   for (let i = 0; i < needsSync.length; i += SYNC_BATCH_SIZE) {
     const batch = needsSync.slice(i, i + SYNC_BATCH_SIZE);
-    const batchNum = Math.floor(i / SYNC_BATCH_SIZE) + 1;
-    const totalBatches = Math.ceil(needsSync.length / SYNC_BATCH_SIZE);
-
-    if (totalBatches > 1) {
-      debug(`waitForSync: batch ${batchNum}/${totalBatches} (${batch.length} docs)`);
-      out.update(`Uploading batch ${batchNum}/${totalBatches} (${synced}/${handlesToWaitOn.length} done)`);
-    }
+    debug(`waitForSync: batch ${Math.floor(i / SYNC_BATCH_SIZE) + 1}/${Math.ceil(needsSync.length / SYNC_BATCH_SIZE)} (${batch.length} docs)`);
 
     const results = await Promise.allSettled(
       batch.map(handle => waitForHandleSync(handle, syncServerStorageId, timeoutMs, startTime))
@@ -363,16 +364,17 @@ export async function waitForSync(
       } else {
         synced++;
       }
+      bar.advance(1);
     }
   }
 
   const elapsed = Date.now() - startTime;
   if (failed.length > 0) {
     debug(`waitForSync: ${failed.length} documents failed after ${elapsed}ms`);
-    out.taskLine(`Upload: ${synced} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`, true);
+    bar.fail(`Upload: ${synced} synced, ${failed.length} failed after ${(elapsed / 1000).toFixed(1)}s`);
   } else {
     debug(`waitForSync: all ${handlesToWaitOn.length} documents synced in ${elapsed}ms (${alreadySynced} were already synced)`);
-    out.taskLine(`All ${handlesToWaitOn.length} documents uploaded to server (${(elapsed / 1000).toFixed(1)}s)`);
+    bar.stop(`Uploaded ${handlesToWaitOn.length} ${handlesToWaitOn.length === 1 ? noun.one : noun.many}`);
   }
 
   return { failed };
@@ -388,9 +390,14 @@ async function waitForSyncViaHeadStability(
   handles: DocHandle<unknown>[],
   timeoutMs: number,
   startTime: number,
+  noun: { one: string; many: string } = { one: "document", many: "documents" },
 ): Promise<SyncWaitResult> {
   const failed: DocHandle<unknown>[] = [];
   let synced = 0;
+  const bar = out.progress(
+    `Syncing ${handles.length} ${handles.length === 1 ? noun.one : noun.many} to server`,
+    handles.length
+  );
 
   // Process in batches
   for (let i = 0; i < handles.length; i += SYNC_BATCH_SIZE) {
@@ -406,16 +413,17 @@ async function waitForSyncViaHeadStability(
       } else {
         synced++;
       }
+      bar.advance(1);
     }
   }
 
   const elapsed = Date.now() - startTime;
   if (failed.length > 0) {
     debug(`waitForSync(heads): ${failed.length} documents failed after ${elapsed}ms`);
-    out.taskLine(`Sync: ${synced} synced, ${failed.length} timed out after ${(elapsed / 1000).toFixed(1)}s`, true);
+    bar.fail(`Sync: ${synced} synced, ${failed.length} timed out after ${(elapsed / 1000).toFixed(1)}s`);
   } else {
     debug(`waitForSync(heads): all ${handles.length} documents synced in ${elapsed}ms`);
-    out.taskLine(`All ${handles.length} documents synced (${(elapsed / 1000).toFixed(1)}s)`);
+    bar.stop(`Synced ${handles.length} ${handles.length === 1 ? noun.one : noun.many} to server`);
   }
 
   return { failed };

@@ -13,7 +13,11 @@ import * as path from "path";
 import {
 	ingestWorkerCount,
 	parallelIngestMode,
+	shouldAutoShard,
+	shouldDeferRemoteContent,
 	runShardIngest,
+	AUTO_SHARD_THRESHOLD,
+	SHARD_WORKER_CAP,
 	IngestTask,
 } from "../../src/utils/ingest-pool";
 import { ConfigManager } from "../../src/core/config";
@@ -34,6 +38,7 @@ describe("runShardIngest worker-exit handling", () => {
 			"subduction",
 			[task("a.txt")],
 			1,
+			undefined,
 			EXIT_STUB
 		);
 
@@ -51,6 +56,7 @@ describe("runShardIngest worker-exit handling", () => {
 			"subduction",
 			tasks,
 			2,
+			undefined,
 			EXIT_STUB
 		);
 
@@ -96,5 +102,58 @@ describe("ingestWorkerCount", () => {
 		expect(ingestWorkerCount()).toBe(3);
 		process.env.PUSHWORK_WORKERS = "0"; // invalid → cores-based default ≥ 1
 		expect(ingestWorkerCount()).toBeGreaterThanOrEqual(1);
+	});
+
+	it("caps the auto default at SHARD_WORKER_CAP (EMFILE guard)", () => {
+		delete process.env.PUSHWORK_WORKERS;
+		expect(ingestWorkerCount()).toBeLessThanOrEqual(SHARD_WORKER_CAP);
+	});
+
+	it("PUSHWORK_WORKERS can exceed the cap (explicit override)", () => {
+		process.env.PUSHWORK_WORKERS = String(SHARD_WORKER_CAP + 8);
+		expect(ingestWorkerCount()).toBe(SHARD_WORKER_CAP + 8);
+	});
+});
+
+describe("auto-shard policy", () => {
+	const saved = process.env.PUSHWORK_PARALLEL_INGEST;
+	afterEach(() => {
+		if (saved === undefined) delete process.env.PUSHWORK_PARALLEL_INGEST;
+		else process.env.PUSHWORK_PARALLEL_INGEST = saved;
+	});
+
+	it("auto-enables shard past the threshold, declines below it", () => {
+		delete process.env.PUSHWORK_PARALLEL_INGEST;
+		expect(shouldAutoShard(AUTO_SHARD_THRESHOLD - 1)).toBe(false);
+		expect(shouldAutoShard(AUTO_SHARD_THRESHOLD)).toBe(true);
+	});
+
+	it("explicit =2 forces shard even below the threshold", () => {
+		process.env.PUSHWORK_PARALLEL_INGEST = "2";
+		expect(shouldAutoShard(1)).toBe(true);
+	});
+
+	it("explicit 0/off declines even above the threshold", () => {
+		process.env.PUSHWORK_PARALLEL_INGEST = "0";
+		expect(shouldAutoShard(10_000)).toBe(false);
+		process.env.PUSHWORK_PARALLEL_INGEST = "off";
+		expect(shouldAutoShard(10_000)).toBe(false);
+	});
+
+	it("defers remote content for both clone and incremental (ADR-025)", () => {
+		// New clean remote files are deferred so the pull phase can auto-shard
+		// a big incremental pull, not just a clone. The pull falls back to the
+		// main thread below AUTO_SHARD_THRESHOLD, so deferring is always safe.
+		delete process.env.PUSHWORK_PARALLEL_INGEST;
+		expect(shouldDeferRemoteContent(0)).toBe(true); // clone
+		expect(shouldDeferRemoteContent(500)).toBe(true); // incremental sync
+	});
+
+	it("forced off never defers (the inline-materialization escape hatch)", () => {
+		process.env.PUSHWORK_PARALLEL_INGEST = "0";
+		expect(shouldDeferRemoteContent(0)).toBe(false);
+		expect(shouldDeferRemoteContent(500)).toBe(false);
+		process.env.PUSHWORK_PARALLEL_INGEST = "off";
+		expect(shouldDeferRemoteContent(500)).toBe(false);
 	});
 });

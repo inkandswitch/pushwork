@@ -259,22 +259,24 @@ export async function init(
 
   const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
-  out.task(`Initializing`);
-  if (protocol === "legacy") {
-    out.taskLine("Using legacy WebSocket sync backend", true);
-  }
+  out.intro("pushwork init");
 
   await ensureDirectoryExists(resolvedPath);
 
-  // Check if already initialized
+  // Check if already initialized (before the spinner starts — prompts and
+  // spinners can't share the terminal)
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (await pathExists(syncToolDir)) {
     out.error("Directory already initialized for sync");
     out.exit(1);
   }
 
+  if (protocol === "legacy") {
+    out.info("Using legacy WebSocket sync backend");
+  }
+
   // Initialize repository with optional CLI overrides
-  out.update("Setting up repository");
+  out.task("Setting up repository");
   const { repo, syncEngine, config } = await initializeRepository(
     resolvedPath,
     {
@@ -319,19 +321,21 @@ export async function init(
       );
     }
   }
+  out.done("Repository ready");
 
-  // Run initial sync to capture existing files
-  out.update("Running initial sync");
+  // Initial sync to capture existing files; the engine renders its own
+  // per-phase indicators from here.
   const result = await syncEngine.sync({ protocol });
 
-  out.update("Writing to disk");
+  out.task("Writing to disk");
   await safeRepoShutdown(repo);
+  out.done("Wrote to disk");
 
-  out.done("Initialized");
   out.successBlock("INITIALIZED", rootHandle.url);
   if (result.filesChanged > 0) {
     out.info(`Synced ${result.filesChanged} ${plural("file", result.filesChanged)}`);
   }
+  out.outro("Done");
 
   process.exit();
 }
@@ -354,12 +358,15 @@ export async function sync(
     out.exit(1);
   }
 
-  out.task(
+  // The engine owns per-phase indicators (spinners for indeterminate
+  // phases, progress bars for counted loops); the command only frames
+  // the run with intro/outro and prints the summary blocks.
+  out.intro(
     options.nuclear
-      ? "Nuclear syncing"
+      ? "pushwork sync --nuclear"
       : options.gentle
-      ? "Gentle syncing"
-      : "Syncing"
+      ? "pushwork sync --gentle"
+      : "pushwork sync"
   );
 
   // Opportunistically migrate v0 configs on the most common
@@ -372,7 +379,7 @@ export async function sync(
   });
 
   if (config.protocol === "legacy") {
-    out.taskLine("Using legacy WebSocket sync backend (from config)", true);
+    out.info("Using legacy WebSocket sync backend (from config)");
   }
 
   if (options.nuclear) {
@@ -380,7 +387,7 @@ export async function sync(
   }
 
   if (options.dryRun) {
-    out.update("Analyzing changes");
+    out.task("Analyzing changes");
     const preview = await syncEngine.previewChanges();
 
     if (preview.changes.length === 0 && preview.moves.length === 0) {
@@ -435,11 +442,11 @@ export async function sync(
       printProfileReport("sync");
     }
 
-    out.taskLine("Writing to disk");
+    out.task("Writing to disk");
     await safeRepoShutdown(repo);
+    out.done("Wrote to disk");
 
     if (result.success) {
-      out.done("Synced");
       if (result.filesChanged !== 0 || result.directoriesChanged !== 0) {
         out.successBlock(
           "SYNCED",
@@ -458,7 +465,6 @@ export async function sync(
         }
       }
     } else {
-      out.done("partial", false);
       out.warnBlock(
         "PARTIAL",
         `${result.filesChanged} updated, ${result.errors.length} errors`
@@ -476,11 +482,9 @@ export async function sync(
       }
     }
 
-    // Always print the root URL
+    // Always print the root URL (the outro also closes the clack frame)
     const rootUrl = await syncEngine.getRootDirectoryUrl();
-    if (rootUrl) {
-      out.info(`Root: ${rootUrl}`);
-    }
+    out.outro(rootUrl ? `Root: ${rootUrl}` : "Done");
   }
 
   process.exit();
@@ -752,17 +756,22 @@ export async function clone(
 
   const protocol: SyncProtocol = options.legacy ? "legacy" : "subduction";
 
-  out.task(`Cloning ${rootUrl}`);
-  if (protocol === "legacy") {
-    out.taskLine("Using legacy WebSocket sync backend", true);
-  }
+  out.intro("pushwork clone");
 
-  // Check if directory exists and handle --force
+  // Preconditions before the spinner starts (the confirm prompt and the
+  // spinner can't share the terminal). Interactively, offer to overwrite;
+  // non-interactive callers must pass --force explicitly.
   if (await pathExists(resolvedPath)) {
     const files = await fs.readdir(resolvedPath);
     if (files.length > 0 && !options.force) {
-      out.error("Target directory is not empty. Use --force to overwrite");
-      out.exit(1);
+      const overwrite = await out.confirm(
+        `Target directory ${resolvedPath} is not empty. Overwrite?`,
+        false
+      );
+      if (!overwrite) {
+        out.error("Target directory is not empty. Use --force to overwrite");
+        out.exit(1);
+      }
     }
   } else {
     await ensureDirectoryExists(resolvedPath);
@@ -772,14 +781,24 @@ export async function clone(
   const syncToolDir = path.join(resolvedPath, ConfigManager.CONFIG_DIR);
   if (await pathExists(syncToolDir)) {
     if (!options.force) {
-      out.error("Directory already initialized. Use --force to overwrite");
-      out.exit(1);
+      const overwrite = await out.confirm(
+        "Directory already initialized. Overwrite its pushwork state?",
+        false
+      );
+      if (!overwrite) {
+        out.error("Directory already initialized. Use --force to overwrite");
+        out.exit(1);
+      }
     }
     await fs.rm(syncToolDir, { recursive: true, force: true });
   }
 
+  if (protocol === "legacy") {
+    out.info("Using legacy WebSocket sync backend");
+  }
+
   // Initialize repository with optional CLI overrides
-  out.update("Setting up repository");
+  out.task(`Setting up ${rootUrl}`);
   const { config, repo, syncEngine } = await initializeRepository(
     resolvedPath,
     {
@@ -789,15 +808,20 @@ export async function clone(
     protocol
   );
 
-  // Connect to existing root directory and download files
-  out.update("Downloading files");
+  // Connect to the existing root directory; the engine renders its own
+  // per-phase indicators (connect, detect, pull bar) from here.
   await syncEngine.setRootDirectoryUrl(rootUrl as AutomergeUrl);
+  out.done("Repository ready");
   const result = await syncEngine.sync({ protocol });
 
-  out.update("Writing to disk");
-  await safeRepoShutdown(repo);
+  if (isProfilingEnabled()) {
+    stopDriftProbe();
+    printProfileReport("clone");
+  }
 
-  out.done();
+  out.task("Writing to disk");
+  await safeRepoShutdown(repo);
+  out.done("Wrote to disk");
 
   out.obj({
     Path: resolvedPath,
@@ -806,6 +830,7 @@ export async function clone(
     Sync: config.sync_server,
   });
   out.successBlock("CLONED", rootUrl);
+  out.outro("Done");
   process.exit();
 }
 
@@ -888,17 +913,19 @@ export async function commit(
   targetPath: string,
   _options: CommandOptions = {}
 ): Promise<void> {
-  out.task("Committing local changes");
+  out.intro("pushwork commit");
 
   const resolvedCommitPath = path.resolve(targetPath);
   await migrateConfigIfNeeded(new ConfigManager(resolvedCommitPath));
 
   const { repo, syncEngine } = await setupCommandContext(targetPath, { syncEnabled: false });
 
+  // The engine renders its own indicators (detect spinner, push bar).
   const result = await syncEngine.commitLocal();
-  await safeRepoShutdown(repo);
 
-  out.done();
+  out.task("Writing to disk");
+  await safeRepoShutdown(repo);
+  out.done("Wrote to disk");
 
   if (result.errors.length > 0) {
     out.errorBlock("ERROR", `${result.errors.length} errors`);
@@ -1091,15 +1118,14 @@ export async function watch(
 
       out.info("Build completed...");
 
-      // Run sync
-      out.task("Syncing");
+      // Run sync (the engine renders its own per-phase indicators)
       const result = await syncEngine.sync({ protocol: config.protocol });
 
       if (result.success) {
         if (result.filesChanged === 0 && result.directoriesChanged === 0) {
-          out.done("Already synced");
+          out.success("Already synced");
         } else {
-          out.done(
+          out.success(
             `Synced ${result.filesChanged} ${plural(
               "file",
               result.filesChanged

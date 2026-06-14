@@ -9,6 +9,7 @@ import {
 	ChangeType,
 	FileType,
 	SyncSnapshot,
+	SnapshotFileEntry,
 	FileDocument,
 	DirectoryDocument,
 	DetectedChange,
@@ -17,19 +18,36 @@ import {
 	readFileContent,
 	listDirectory,
 	getRelativePath,
-	findFileInDirectoryHierarchy,
 	joinAndNormalizePath,
 	getPlainUrl,
 	readDocContent,
 } from "../utils"
 import {isContentEqual, contentHash} from "../utils/content"
 import {out} from "../utils/output"
-import {profileAsync} from "../utils/profile"
-import {mapWithConcurrency, IO_CONCURRENCY} from "../utils/concurrency"
+import {profileAsync, count} from "../utils/profile"
+import {mapWithConcurrency, IO_CONCURRENCY, makeYielder} from "../utils/concurrency"
 
 const isDebug = !!process.env.DEBUG
 function debug(...args: any[]) {
 	if (isDebug) console.error("[pushwork:change-detection]", ...args)
+}
+
+/**
+ * Shared state threaded through the remote tree walk so each recursion
+ * doesn't restate the full argument list.
+ */
+interface RemoteWalkContext {
+	snapshot: SyncSnapshot
+	changes: DetectedChange[]
+	// Snapshot's direct children indexed by parent directory path, for
+	// remote-deletion detection without a global scan.
+	childFiles: Map<string, Set<string>>
+	childDirs: Map<string, Set<string>>
+	excludePaths?: Set<string>
+	freshPaths?: Set<string>
+	deferRemoteContent?: boolean
+	onProgress?: (discovered: number) => void
+	maybeYield: () => Promise<void>
 }
 
 /**
@@ -64,13 +82,17 @@ export class ChangeDetector {
 	 *   so both local and remote detection skip them for this run.
 	 * - `deferRemoteContent`: emit URL-only changes for new remote files
 	 *   (no doc materialization); shard-pull workers fetch them.
+	 *
+	 * `onRemoteProgress(n)` is called as remote documents are discovered
+	 * (the clone/pull download), so callers can show a live count.
 	 */
 	async detectChanges(
 		snapshot: SyncSnapshot,
 		excludePaths?: Set<string>,
 		precomputedFiles?: Map<string, {content: string | Uint8Array; type: FileType}>,
 		freshPaths?: Set<string>,
-		deferRemoteContent?: boolean
+		deferRemoteContent?: boolean,
+		onRemoteProgress?: (discovered: number) => void
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -89,17 +111,41 @@ export class ChangeDetector {
 		)
 		changes.push(...localChanges)
 
-		// Check for remote changes (changes in Automerge documents)
-		const remoteChanges = await profileAsync("detect:remote", () =>
-			this.detectRemoteChanges(snapshot, freshPaths)
-		)
-		changes.push(...remoteChanges)
-
-		// Check for new remote documents not in snapshot (critical for clone scenarios)
-		const newRemoteDocuments = await profileAsync("detect:new-remote", () =>
-			this.detectNewRemoteDocuments(snapshot, excludePaths, deferRemoteContent)
-		)
-		changes.push(...newRemoteDocuments)
+		// Remote-change detection.
+		//
+		// Populated snapshot (incremental sync / watch tick): one
+		// Merkle-pruned tree walk. A directory's heads are an authoritative
+		// change token — leaf-first push moves them whenever any descendant
+		// changes — so unchanged subtrees are skipped wholesale and an idle
+		// tick prunes at the root in a single repo.find. This replaces both
+		// the old per-file detectRemoteChanges (O(files × depth) repo.find)
+		// and detectNewRemoteDocuments.
+		//
+		// Empty snapshot (clone / fresh track): no directory heads to prune
+		// against, so use the discovery walk (which also feeds the
+		// streaming-clone and shard-pull deferral).
+		if (snapshot.files.size === 0) {
+			const newRemoteDocuments = await profileAsync("detect:new-remote", () =>
+				this.detectNewRemoteDocuments(
+					snapshot,
+					excludePaths,
+					deferRemoteContent,
+					onRemoteProgress
+				)
+			)
+			changes.push(...newRemoteDocuments)
+		} else {
+			const remoteChanges = await profileAsync("detect:remote-walk", () =>
+				this.detectRemoteTreeWalk(
+					snapshot,
+					excludePaths,
+					freshPaths,
+					deferRemoteContent,
+					onRemoteProgress
+				)
+			)
+			changes.push(...remoteChanges)
+		}
 
 		return changes
 	}
@@ -285,110 +331,315 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Detect changes in remote Automerge documents compared to snapshot
+	 * Incremental remote-change detection via a single tree walk. Replaces
+	 * the old two scans (detectRemoteChanges' per-file root→leaf navigation,
+	 * which re-fetched shared ancestor directories once per file, plus
+	 * detectNewRemoteDocuments' separate walk) with one traversal that visits
+	 * each directory exactly once.
+	 *
+	 * It deliberately does NOT prune unchanged subtrees on snapshot directory
+	 * heads, even though that would be the obvious speedup. Two reasons make
+	 * it unsound here: (1) `repo.find(doc)` is what triggers Subduction to
+	 * sync that doc — pruning a subtree means its changed documents are never
+	 * requested, so the walk reads a stale cached copy and misses the change;
+	 * (2) the engine advances snapshot directory heads to the current/merged
+	 * head at end-of-sync and during push even when the corresponding remote
+	 * changes were not reconciled to disk, so a head match does not prove the
+	 * subtree is reconciled. Sound pruning needs reconciled-head tracking +
+	 * a delivery barrier (a noted follow-up); until then, walk everything.
 	 */
-	private async detectRemoteChanges(
+	async detectRemoteTreeWalk(
 		snapshot: SyncSnapshot,
-		freshPaths?: Set<string>
+		excludePaths?: Set<string>,
+		freshPaths?: Set<string>,
+		deferRemoteContent?: boolean,
+		onProgress?: (discovered: number) => void
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
+		if (!snapshot.rootDirectoryUrl) return changes
 
-		await Promise.all(
-			Array.from(snapshot.files.entries()).map(
-				async ([relativePath, snapshotEntry]) => {
-					// Worker-pushed this run; see detectChanges docs. Genuinely
-					// concurrent remote edits surface on the next sync.
-					if (freshPaths?.has(relativePath)) return
+		// Index the snapshot's direct children by parent directory path so a
+		// changed directory can name which tracked children vanished remotely
+		// without a global scan.
+		const childFiles = new Map<string, Set<string>>()
+		const childDirs = new Map<string, Set<string>>()
+		const indexChild = (
+			map: Map<string, Set<string>>,
+			fullPath: string
+		): void => {
+			const slash = fullPath.lastIndexOf("/")
+			const dir = slash === -1 ? "" : fullPath.slice(0, slash)
+			const name = slash === -1 ? fullPath : fullPath.slice(slash + 1)
+			let set = map.get(dir)
+			if (!set) {
+				set = new Set()
+				map.set(dir, set)
+			}
+			set.add(name)
+		}
+		for (const p of snapshot.files.keys()) indexChild(childFiles, p)
+		for (const p of snapshot.directories.keys()) {
+			if (p !== "") indexChild(childDirs, p)
+		}
 
-					// Find the file's current entry in the remote directory hierarchy
-					const remoteEntry = await this.findInRemoteDirectory(
-						snapshot.rootDirectoryUrl,
-						relativePath
-					)
-
-					if (!remoteEntry) {
-						// File was removed from remote directory listing
-						const localContent = await this.getLocalContent(relativePath)
-
-						// Only report as deleted if local file still exists
-						// (if local file is also deleted, detectLocalChanges handles it)
-						if (localContent !== null) {
-							changes.push({
-								path: relativePath,
-								changeType: ChangeType.REMOTE_ONLY,
-								fileType: FileType.TEXT,
-								localContent,
-								remoteContent: null, // File deleted remotely
-								localHead: snapshotEntry.head,
-								remoteHead: snapshotEntry.head,
-							})
-						}
-						return
-					}
-
-					// Check if the document was replaced entirely (new URL).
-					// This happens when a peer replaces an artifact file, fixes a
-					// legacy immutable string, or recreates a failed document.
-					// The old snapshot URL is now orphaned — read from the new one.
-					const urlReplaced = getPlainUrl(remoteEntry.url) !== getPlainUrl(snapshotEntry.url)
-					const remoteUrl = urlReplaced ? remoteEntry.url : snapshotEntry.url
-
-					const currentRemoteHead = await this.getCurrentRemoteHead(remoteUrl)
-
-					if (urlReplaced || !A.equals(currentRemoteHead, snapshotEntry.head)) {
-						if (this.isArtifactPath(relativePath)) {
-							// Artifact: skip content reads, just report head change
-							const localContent = await this.getLocalContent(relativePath)
-							changes.push({
-								path: relativePath,
-								changeType:
-									localContent !== null
-										? ChangeType.BOTH_CHANGED
-										: ChangeType.REMOTE_ONLY,
-								fileType: FileType.TEXT,
-								localContent,
-								remoteContent: null,
-								localHead: snapshotEntry.head,
-								remoteHead: currentRemoteHead,
-								...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
-							})
-							return
-						}
-
-						// Remote document has changed
-						const currentRemoteContent = await this.getCurrentRemoteContent(remoteUrl)
-						const localContent = await this.getLocalContent(relativePath)
-						const lastKnownContent = urlReplaced
-							? null // Can't diff against old doc when URL changed
-							: await this.getContentAtHead(
-								snapshotEntry.url,
-								snapshotEntry.head
-							)
-
-						const localChanged = localContent && lastKnownContent
-							? !isContentEqual(localContent, lastKnownContent)
-							: localContent !== null
-
-						const changeType = localChanged
-							? ChangeType.BOTH_CHANGED
-							: ChangeType.REMOTE_ONLY
-
-						changes.push({
-							path: relativePath,
-							changeType,
-							fileType: await this.getFileTypeFromContent(currentRemoteContent),
-							localContent,
-							remoteContent: currentRemoteContent,
-							localHead: snapshotEntry.head,
-							remoteHead: currentRemoteHead,
-							...(urlReplaced ? {remoteUrl: remoteEntry.url} : {}),
-						})
-					}
-				}
-			)
-		)
-
+		await this.walkRemoteDir(snapshot.rootDirectoryUrl, "", {
+			snapshot,
+			changes,
+			childFiles,
+			childDirs,
+			excludePaths,
+			freshPaths,
+			deferRemoteContent,
+			onProgress,
+			maybeYield: makeYielder(),
+		})
 		return changes
+	}
+
+	/**
+	 * One directory of the remote walk: classify present entries and report
+	 * deletions, then recurse. Every directory is fetched (`repo.find`),
+	 * which is also what drives Subduction to sync it — see the class doc on
+	 * why this walk does NOT prune unchanged subtrees on snapshot heads.
+	 */
+	private async walkRemoteDir(
+		directoryUrl: AutomergeUrl,
+		dirPath: string,
+		ctx: RemoteWalkContext
+	): Promise<void> {
+		const plainUrl = getPlainUrl(directoryUrl)
+		const result = await this.findDocument<DirectoryDocument>(plainUrl)
+		if (!result) return
+		const dirDoc = result.doc
+
+		const remoteFileNames = new Set<string>()
+		const remoteDirNames = new Set<string>()
+		for (const entry of dirDoc.docs) {
+			if (entry.type === "file") remoteFileNames.add(entry.name)
+			else if (entry.type === "folder") remoteDirNames.add(entry.name)
+		}
+
+		// Remote deletions: tracked children of this directory no longer
+		// listed remotely (report only where the local file still exists).
+		for (const name of ctx.childFiles.get(dirPath) ?? []) {
+			if (remoteFileNames.has(name)) continue
+			const filePath = dirPath ? `${dirPath}/${name}` : name
+			if (ctx.excludePaths?.has(filePath)) continue
+			if (ctx.freshPaths?.has(filePath)) continue
+			const snapshotEntry = ctx.snapshot.files.get(filePath)
+			if (!snapshotEntry) continue
+			await this.reportRemoteDeletion(filePath, snapshotEntry, ctx)
+		}
+		for (const name of ctx.childDirs.get(dirPath) ?? []) {
+			if (remoteDirNames.has(name)) continue
+			// Whole subdirectory gone remotely — every tracked file under it
+			// is a deletion.
+			const subPath = dirPath ? `${dirPath}/${name}` : name
+			const prefix = `${subPath}/`
+			for (const [filePath, snapshotEntry] of ctx.snapshot.files) {
+				if (filePath !== subPath && !filePath.startsWith(prefix)) continue
+				if (ctx.excludePaths?.has(filePath)) continue
+				if (ctx.freshPaths?.has(filePath)) continue
+				await this.reportRemoteDeletion(filePath, snapshotEntry, ctx)
+			}
+		}
+
+		// Present entries: recurse into folders, classify files.
+		await mapWithConcurrency(dirDoc.docs, IO_CONCURRENCY, async entry => {
+			const entryPath = dirPath ? `${dirPath}/${entry.name}` : entry.name
+
+			if (entry.type === "folder") {
+				await this.walkRemoteDir(entry.url, entryPath, ctx)
+				return
+			}
+			if (entry.type !== "file") return
+			if (ctx.excludePaths?.has(entryPath)) return
+			if (ctx.freshPaths?.has(entryPath)) return
+
+			const snapshotEntry = ctx.snapshot.files.get(entryPath)
+			const change = snapshotEntry
+				? await this.classifyTrackedRemoteFile(
+						entryPath,
+						snapshotEntry,
+						entry.url
+					)
+				: await this.classifyNewRemoteFile(
+						entryPath,
+						entry.url,
+						ctx.deferRemoteContent,
+						ctx.onProgress,
+						ctx.maybeYield
+					)
+			if (change) ctx.changes.push(change)
+		})
+	}
+
+	/**
+	 * Report a tracked file that vanished from its remote directory listing.
+	 * Only a still-present local file is a remote deletion; a
+	 * locally-deleted file is detectLocalChanges' job.
+	 */
+	private async reportRemoteDeletion(
+		filePath: string,
+		snapshotEntry: SnapshotFileEntry,
+		ctx: RemoteWalkContext
+	): Promise<void> {
+		const localContent = await this.getLocalContent(filePath)
+		if (localContent === null) return
+		ctx.changes.push({
+			path: filePath,
+			changeType: ChangeType.REMOTE_ONLY,
+			fileType: FileType.TEXT,
+			localContent,
+			remoteContent: null, // deleted remotely
+			localHead: snapshotEntry.head,
+			remoteHead: snapshotEntry.head,
+		})
+	}
+
+	/**
+	 * Classify a remote file that IS tracked in the snapshot (same path).
+	 * Returns a change if its remote document moved (head differs, or the
+	 * directory now points at a replacement URL), else null. Mirrors the
+	 * old detectRemoteChanges per-file body.
+	 */
+	private async classifyTrackedRemoteFile(
+		entryPath: string,
+		snapshotEntry: SnapshotFileEntry,
+		remoteEntryUrl: AutomergeUrl
+	): Promise<DetectedChange | null> {
+		// A peer can replace a document entirely (new URL) rather than
+		// mutating it: artifact replacement, legacy-immutable-string fix, or
+		// recreateFailedDocuments. The old snapshot URL is then orphaned —
+		// read from the new one.
+		const urlReplaced =
+			getPlainUrl(remoteEntryUrl) !== getPlainUrl(snapshotEntry.url)
+		const remoteUrl = urlReplaced ? remoteEntryUrl : snapshotEntry.url
+
+		const currentRemoteHead = await this.getCurrentRemoteHead(remoteUrl)
+
+		if (!urlReplaced && A.equals(currentRemoteHead, snapshotEntry.head)) {
+			// Unchanged — the common case inside a changed directory.
+			return null
+		}
+
+		if (this.isArtifactPath(entryPath)) {
+			// Artifacts are replaced wholesale (RawString), never diffed — so
+			// skip getContentAtHead. But the pull still needs the new bytes to
+			// write them: applyRemoteChangeToLocal treats remoteContent === null
+			// as a *deletion*, so emitting null here would delete the file
+			// instead of updating it (the old code papered over this with a
+			// second, content-bearing change from the discovery walk). A null
+			// read means the doc isn't materialized — not a deletion (those
+			// come from the directory-listing scan) — so skip rather than nuke.
+			const localContent = await this.getLocalContent(entryPath)
+			const remoteContent = await this.getCurrentRemoteContent(remoteUrl)
+			if (remoteContent === null) return null
+			return {
+				path: entryPath,
+				changeType:
+					localContent !== null
+						? ChangeType.BOTH_CHANGED
+						: ChangeType.REMOTE_ONLY,
+				fileType: await this.getFileTypeFromContent(remoteContent),
+				localContent,
+				remoteContent,
+				localHead: snapshotEntry.head,
+				remoteHead: currentRemoteHead,
+				...(urlReplaced ? {remoteUrl: remoteEntryUrl} : {}),
+			}
+		}
+
+		const currentRemoteContent = await this.getCurrentRemoteContent(remoteUrl)
+		const localContent = await this.getLocalContent(entryPath)
+		const lastKnownContent = urlReplaced
+			? null // can't diff against the old doc when the URL changed
+			: await this.getContentAtHead(snapshotEntry.url, snapshotEntry.head)
+
+		const localChanged =
+			localContent && lastKnownContent
+				? !isContentEqual(localContent, lastKnownContent)
+				: localContent !== null
+
+		return {
+			path: entryPath,
+			changeType: localChanged
+				? ChangeType.BOTH_CHANGED
+				: ChangeType.REMOTE_ONLY,
+			fileType: await this.getFileTypeFromContent(currentRemoteContent),
+			localContent,
+			remoteContent: currentRemoteContent,
+			localHead: snapshotEntry.head,
+			remoteHead: currentRemoteHead,
+			...(urlReplaced ? {remoteUrl: remoteEntryUrl} : {}),
+		}
+	}
+
+	/**
+	 * Classify a remote file NOT tracked in the snapshot (new to us).
+	 * Mirrors the new-document branch of discoverRemoteDocumentsRecursive,
+	 * including shard-pull deferral for the clean (no local copy) case.
+	 */
+	private async classifyNewRemoteFile(
+		entryPath: string,
+		entryUrl: AutomergeUrl,
+		deferRemoteContent: boolean | undefined,
+		onProgress: ((discovered: number) => void) | undefined,
+		maybeYield: (() => Promise<void>) | undefined
+	): Promise<DetectedChange | null> {
+		const localContent = await this.getLocalContent(entryPath)
+
+		// Deferred fetch (shard mode): emit a URL-only change for a shard-pull
+		// worker. Only the clean case (no local copy) is deferrable —
+		// coexistence needs content here to compare.
+		if (deferRemoteContent && localContent === null) {
+			onProgress?.(1)
+			return {
+				path: entryPath,
+				changeType: ChangeType.REMOTE_ONLY,
+				fileType: FileType.TEXT, // resolved by the worker
+				localContent: null,
+				remoteContent: null,
+				remoteUrl: entryUrl,
+				deferredFetch: true,
+			}
+		}
+
+		const {content: remoteContent, head: remoteHead} =
+			await this.getCurrentRemoteContentAndHead(entryUrl)
+		onProgress?.(1)
+		await maybeYield?.()
+
+		if (localContent != null && remoteContent == null) {
+			return {
+				path: entryPath,
+				changeType: ChangeType.BOTH_CHANGED,
+				fileType: await this.getFileTypeFromContent(remoteContent),
+				localContent,
+				remoteContent,
+				remoteHead,
+			}
+		} else if (localContent !== null && remoteContent === null) {
+			return {
+				path: entryPath,
+				changeType: ChangeType.LOCAL_ONLY,
+				fileType: await this.getFileTypeFromContent(localContent),
+				localContent,
+				remoteContent: null,
+			}
+		} else if (localContent === null && remoteContent !== null) {
+			return {
+				path: entryPath,
+				changeType: ChangeType.REMOTE_ONLY,
+				fileType: await this.getFileTypeFromContent(remoteContent),
+				localContent: null,
+				remoteContent,
+				remoteHead,
+			}
+		}
+
+		// Neither local nor remote content (ghost entry) — ignore.
+		return null
 	}
 
 	/**
@@ -398,7 +649,8 @@ export class ChangeDetector {
 	private async detectNewRemoteDocuments(
 		snapshot: SyncSnapshot,
 		excludePaths?: Set<string>,
-		deferRemoteContent?: boolean
+		deferRemoteContent?: boolean,
+		onProgress?: (discovered: number) => void
 	): Promise<DetectedChange[]> {
 		const changes: DetectedChange[] = []
 
@@ -408,6 +660,11 @@ export class ChangeDetector {
 		}
 
 		try {
+			// One time-budgeted yielder for the whole walk: lets the event
+			// loop run macrotasks (clack's spinner repaint, the Subduction
+			// socket) periodically instead of being starved across a wide
+			// concurrent download.
+			const maybeYield = makeYielder()
 			// Recursively traverse the directory hierarchy
 			await this.discoverRemoteDocumentsRecursive(
 				snapshot.rootDirectoryUrl,
@@ -415,13 +672,45 @@ export class ChangeDetector {
 				snapshot,
 				changes,
 				excludePaths,
-				deferRemoteContent
+				deferRemoteContent,
+				onProgress,
+				maybeYield
 			)
 		} catch (error) {
 			out.taskLine(`Failed to discover remote documents: ${error}`, true)
 		}
 
 		return changes
+	}
+
+	/**
+	 * Walk the remote directory tree and call `onFile(relPath, url)` for
+	 * every remote file as it's discovered, without materializing any file
+	 * content. Used by the streaming clone path so the download pool can
+	 * start fetching files while the walk is still in progress.
+	 *
+	 * Only meaningful on a fresh/empty snapshot (clone): with a populated
+	 * snapshot the discovery would also need content comparisons.
+	 */
+	async streamRemoteFiles(
+		snapshot: SyncSnapshot,
+		onFile: (relPath: string, url: AutomergeUrl) => void,
+		onProgress?: (discovered: number) => void
+	): Promise<void> {
+		if (!snapshot.rootDirectoryUrl) return
+		const discarded: DetectedChange[] = []
+		const maybeYield = makeYielder()
+		await this.discoverRemoteDocumentsRecursive(
+			snapshot.rootDirectoryUrl,
+			"",
+			snapshot,
+			discarded,
+			undefined,
+			true, // defer (emit URL-only, no content fetch)
+			onProgress,
+			maybeYield,
+			onFile
+		)
 	}
 
 	/**
@@ -433,7 +722,10 @@ export class ChangeDetector {
 		snapshot: SyncSnapshot,
 		changes: DetectedChange[],
 		excludePaths?: Set<string>,
-		deferRemoteContent?: boolean
+		deferRemoteContent?: boolean,
+		onProgress?: (discovered: number) => void,
+		maybeYield?: () => Promise<void>,
+		onFile?: (relPath: string, url: AutomergeUrl) => void
 	): Promise<void> {
 		try {
 			// Find and wait for document to be available (retries on "unavailable")
@@ -445,24 +737,47 @@ export class ChangeDetector {
 			}
 			const dirDoc = result.doc
 
-			// Process each entry in the directory
-			for (const entry of dirDoc.docs) {
-				const entryPath = currentPath
-					? `${currentPath}/${entry.name}`
-					: entry.name
+			// Process entries concurrently (bounded). The walk is the clone
+			// download — each file/dir entry is a `repo.find` round-trip, so
+			// serial processing makes a 1000-file clone 1000 sequential
+			// fetches. Subdirectory recursion fans out the same way (mirrors
+			// network-sync's collectHeadsRecursive). Pushes to the shared
+			// `changes` array are safe under single-threaded JS.
+			await mapWithConcurrency(
+				dirDoc.docs,
+				IO_CONCURRENCY,
+				async entry => {
+					const entryPath = currentPath
+						? `${currentPath}/${entry.name}`
+						: entry.name
 
-				if (entry.type === "file") {
-					// Skip files that were deliberately deleted during this sync cycle
-					if (excludePaths?.has(entryPath)) {
-						debug(`skipping deleted path during re-detection: ${entryPath}`)
-						continue
+					if (entry.type === "folder") {
+						await this.discoverRemoteDocumentsRecursive(
+							entry.url,
+							entryPath,
+							snapshot,
+							changes,
+							excludePaths,
+							deferRemoteContent,
+							onProgress,
+							maybeYield,
+							onFile
+						)
+						return
 					}
 
-					// Check if this file is already tracked in the snapshot
+					if (entry.type !== "file") return
+
+					// Skip files deliberately deleted during this sync cycle
+					if (excludePaths?.has(entryPath)) {
+						debug(`skipping deleted path during re-detection: ${entryPath}`)
+						return
+					}
+
 					const existingEntry = snapshot.files.get(entryPath)
 
 					if (!existingEntry) {
-						// This is a remote file not in our snapshot
+						// Remote file not in our snapshot
 						const localContent = await this.getLocalContent(entryPath)
 
 						// Deferred fetch (shard mode): emit a URL-only change for
@@ -479,11 +794,18 @@ export class ChangeDetector {
 								remoteUrl: entry.url,
 								deferredFetch: true,
 							})
-							continue
+							onProgress?.(1)
+							// Streaming clone: hand the file to the download pool
+							// the moment it's discovered (pipelines the walk with
+							// the download).
+							onFile?.(entryPath, entry.url)
+							return
 						}
 
-						const remoteContent = await this.getCurrentRemoteContent(entry.url)
-						const remoteHead = await this.getCurrentRemoteHead(entry.url)
+						const {content: remoteContent, head: remoteHead} =
+							await this.getCurrentRemoteContentAndHead(entry.url)
+						onProgress?.(1)
+						await maybeYield?.()
 
 						if (localContent != null && remoteContent == null) {
 							// File exists both locally and remotely but not in snapshot
@@ -505,7 +827,7 @@ export class ChangeDetector {
 								remoteContent: null,
 							})
 						} else if (localContent === null && remoteContent !== null) {
-							// File exists remotely but not locally - this is what we need for clone!
+							// File exists remotely but not locally — the clone case
 							changes.push({
 								path: entryPath,
 								changeType: ChangeType.REMOTE_ONLY,
@@ -515,28 +837,30 @@ export class ChangeDetector {
 								remoteHead,
 							})
 						}
-					// Only ignore if neither local nor remote content exists (ghost entry)
-				} else if (
-					getPlainUrl(entry.url) !== getPlainUrl(existingEntry.url)
-				) {
-					// HACK: URL replacement detection bolted onto the "discover new docs" walk.
-					//
-					// A peer can replace a document entirely (creating a new URL) rather than mutating
-					// the existing one. This happens in several cases in updateRemoteFile(): artifact
-					// paths are always replaced; non-artifact docs with legacy immutable string content
-					// are also replaced; and recreateFailedDocuments() replaces docs that timed out
-					// during network sync. The two normal remote-change scans both miss this:
-					//   - detectRemoteChanges() is snapshot-centric: it checks the old (now orphaned)
-					//     doc's heads, which haven't changed, so it reports no change.
-					//   - The "new doc" branch above is directory-centric: it skips paths already in
-					//     the snapshot, assuming they're handled by detectRemoteChanges().
-					//
-					// A cleaner fix would be to have detectRemoteChanges() also verify that the
-					// directory still points to the same URL for each snapshot entry, treating a
-					// mismatch as a first-class URL-replacement change rather than a special case here.
-					const localContent = await this.getLocalContent(entryPath)
-						const remoteContent = await this.getCurrentRemoteContent(entry.url)
-						const remoteHead = await this.getCurrentRemoteHead(entry.url)
+						// Else: neither local nor remote content (ghost entry) — ignore
+					} else if (
+						getPlainUrl(entry.url) !== getPlainUrl(existingEntry.url)
+					) {
+						// HACK: URL replacement detection bolted onto the "discover new docs" walk.
+						//
+						// A peer can replace a document entirely (creating a new URL) rather than mutating
+						// the existing one. This happens in several cases in updateRemoteFile(): artifact
+						// paths are always replaced; non-artifact docs with legacy immutable string content
+						// are also replaced; and recreateFailedDocuments() replaces docs that timed out
+						// during network sync. The two normal remote-change scans both miss this:
+						//   - detectRemoteChanges() is snapshot-centric: it checks the old (now orphaned)
+						//     doc's heads, which haven't changed, so it reports no change.
+						//   - The "new doc" branch above is directory-centric: it skips paths already in
+						//     the snapshot, assuming they're handled by detectRemoteChanges().
+						//
+						// A cleaner fix would be to have detectRemoteChanges() also verify that the
+						// directory still points to the same URL for each snapshot entry, treating a
+						// mismatch as a first-class URL-replacement change rather than a special case here.
+						const localContent = await this.getLocalContent(entryPath)
+						const {content: remoteContent, head: remoteHead} =
+							await this.getCurrentRemoteContentAndHead(entry.url)
+						onProgress?.(1)
+						await maybeYield?.()
 
 						if (remoteContent !== null) {
 							changes.push({
@@ -553,18 +877,8 @@ export class ChangeDetector {
 							})
 						}
 					}
-				} else if (entry.type === "folder") {
-					// Recursively process subdirectory
-					await this.discoverRemoteDocumentsRecursive(
-						entry.url,
-						entryPath,
-						snapshot,
-						changes,
-						excludePaths,
-						deferRemoteContent
-					)
 				}
-			}
+			)
 		} catch (error) {
 			out.taskLine(`Failed to process directory: ${error}`, true)
 		}
@@ -719,6 +1033,35 @@ export class ChangeDetector {
 	}
 
 	/**
+	 * Fetch a remote file's content AND heads in a SINGLE `repo.find`.
+	 * The discovery walk needs both per file; calling getCurrentRemoteContent
+	 * then getCurrentRemoteHead would fetch the same document twice.
+	 */
+	private async getCurrentRemoteContentAndHead(
+		url: AutomergeUrl
+	): Promise<{content: string | Uint8Array | null; head: UrlHeads}> {
+		const empty = {content: null, head: [] as unknown as UrlHeads}
+		try {
+			const plainUrl = getPlainUrl(url)
+			const result = await profileAsync("discover:find", () =>
+				this.findDocument<FileDocument>(plainUrl)
+			)
+			if (!result) return empty
+			const content = await profileAsync("discover:materialize", async () =>
+				readDocContent(result.doc.content)
+			)
+			count("discover:docs")
+			return {
+				content,
+				head: result.handle.heads(),
+			}
+		} catch (error) {
+			out.taskLine(`Failed to get remote document: ${error}`, true)
+			return empty
+		}
+	}
+
+	/**
 	 * Determine file type from content
 	 */
 	private async getFileTypeFromContent(
@@ -773,21 +1116,5 @@ export class ChangeDetector {
 		} else {
 			return ChangeType.BOTH_CHANGED
 		}
-	}
-
-	/**
-	 * Find a file's entry in the remote directory hierarchy.
-	 * Returns the entry (with name, type, url) or null if not found.
-	 */
-	private async findInRemoteDirectory(
-		rootDirectoryUrl: AutomergeUrl | undefined,
-		filePath: string
-	): Promise<{ name: string; type: string; url: AutomergeUrl } | null> {
-		if (!rootDirectoryUrl) return null
-		return findFileInDirectoryHierarchy(
-			this.repo,
-			rootDirectoryUrl,
-			filePath
-		)
 	}
 }

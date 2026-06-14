@@ -25,6 +25,7 @@ import {getFileExtension} from "../utils/fs"
 import {getEnhancedMimeType} from "../utils/mime-types"
 import {updateTextContent} from "../utils/text-diff"
 import type {DirectoryConfig, FileDocument, SyncProtocol} from "../types"
+import {out} from "../utils/output"
 
 export interface ShardTask {
 	relPath: string
@@ -71,6 +72,9 @@ function buildFileDoc(task: ShardTask): FileDocument {
 }
 
 async function run(): Promise<void> {
+	// Workers share the parent's terminal: spinners/progress bars from N
+	// threads would garble the display, so run quiet (errors still print).
+	out.configure({verbosity: "quiet"})
 	const {workingDir, config, protocol, tasks} = workerData as ShardWorkerData
 
 	const repo = await createRepo(workingDir, config, protocol, {

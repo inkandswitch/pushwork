@@ -155,6 +155,21 @@ export async function createRepo(
   const storage = new NodeFSStorageAdapter(automergeDir);
 
   if (protocol === "subduction") {
+    // NOTE: this is a SINGLE websocket connection — every repo.find
+    // multiplexes over it. Large-doc clones are therefore bottlenecked on
+    // head-of-line blocking over one socket, not on client concurrency
+    // (measured: 256 KB docs clone at ~450 KB/s; raising IO_CONCURRENCY
+    // doesn't help past the socket's throughput). The multi-socket path is
+    // shard mode (PUSHWORK_PARALLEL_INGEST=2): each worker owns a separate
+    // Repo → separate SubductionSource → distinct peer/socket. Two cheaper
+    // multi-socket attempts were measured and REJECTED:
+    //   - passing the same endpoint N times → Subduction host-keys the peer
+    //     and doesn't distribute across the duplicate transports;
+    //   - N in-process Repos sharing storage (one per socket, round-robin
+    //     the fetch) → 2–6× SLOWER: N SubductionSources contend on the one
+    //     event loop (each runs its own sync scheduler / recompute / keepalive
+    //     timers). Worker threads aren't just for the sockets — each
+    //     SubductionSource needs its own thread.
     const endpoints: string[] = [];
     if (config.sync_enabled && config.sync_server) {
       endpoints.push(config.sync_server);
