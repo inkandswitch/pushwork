@@ -12,7 +12,7 @@ export {
 	showSnarfs,
 	nuclearizeRepo,
 } from "./pushwork.js";
-export type { HeadsEntry } from "./pushwork.js";
+export type { HeadsEntry, Reporter, RepoSummary } from "./pushwork.js";
 export type { Snarf, SnarfEntry } from "./snarf.js";
 export type { Backend, PushworkConfig } from "./config.js";
 export { CONFIG_VERSION } from "./config.js";
