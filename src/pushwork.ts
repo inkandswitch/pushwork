@@ -55,6 +55,13 @@ const dlog = log("pushwork");
 
 const DEFAULT_ARTIFACT_DIRECTORIES = ["dist"];
 
+/** Called at phase boundaries of long operations so the CLI can show progress. */
+export type Reporter = (phase: string) => void;
+const noReport: Reporter = () => {};
+
+/** Result of init/clone: the root doc URL and how many files it tracks. */
+export type RepoSummary = { url: AutomergeUrl; files: number };
+
 export type InitOpts = {
 	dir: string;
 	backend: Backend;
@@ -95,7 +102,10 @@ export type Diff = {
 	deleted: string[];
 };
 
-export async function init(opts: InitOpts): Promise<AutomergeUrl> {
+export async function init(
+	opts: InitOpts,
+	report: Reporter = noReport,
+): Promise<RepoSummary> {
 	const root = path.resolve(opts.dir);
 	const online = opts.online ?? true;
 	dlog("init root=%s backend=%s shape=%s online=%s", root, opts.backend, opts.shape, online);
@@ -112,16 +122,19 @@ export async function init(opts: InitOpts): Promise<AutomergeUrl> {
 	try {
 		const shape = await resolveShape(opts.shape);
 		const ig = await loadIgnore(root);
+		report("Reading working tree");
 		const fsFiles = await walkDir(root, ig);
 		dlog("init walked %d files", fsFiles.size);
 
 		const title = path.basename(root) || undefined;
+		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
 		const tree = await pushFiles(repo, fsFiles, undefined, artifactDirs);
 		const folderUrl = await shape.encode({ repo, tree, title });
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
 
 		if (online) {
+			report("Publishing to sync server");
 			await waitForSync(folderHandle, { minMs: 3000, idleMs: 1500, maxMs: 15000 });
 			stampLastSyncAt(folderHandle);
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 10000 });
@@ -134,14 +147,17 @@ export async function init(opts: InitOpts): Promise<AutomergeUrl> {
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 		});
-		dlog("init complete: rootUrl=%s", folderUrl);
-		return folderUrl;
+		dlog("init complete: rootUrl=%s files=%d", folderUrl, fsFiles.size);
+		return { url: folderUrl, files: fsFiles.size };
 	} finally {
 		await repo.shutdown();
 	}
 }
 
-export async function clone(opts: CloneOpts): Promise<void> {
+export async function clone(
+	opts: CloneOpts,
+	report: Reporter = noReport,
+): Promise<RepoSummary> {
 	if (!isValidAutomergeUrl(opts.url)) {
 		throw new Error(`invalid automerge URL: ${opts.url}`);
 	}
@@ -159,6 +175,7 @@ export async function clone(opts: CloneOpts): Promise<void> {
 	const online = opts.online ?? true;
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
 	try {
+		report("Fetching repository");
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
 		if (online) {
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
@@ -196,6 +213,8 @@ export async function clone(opts: CloneOpts): Promise<void> {
 		});
 
 		const tree = await shape.decode({ repo, root: folderHandle });
+		const fileCount = flattenLeaves(tree).size;
+		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
 		await materializeTree(repo, root, tree);
 
 		await writeConfig(root, {
@@ -205,7 +224,8 @@ export async function clone(opts: CloneOpts): Promise<void> {
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
-		dlog("clone complete");
+		dlog("clone complete files=%d", fileCount);
+		return { url: storedUrl, files: fileCount };
 	} finally {
 		await repo.shutdown();
 	}
@@ -310,13 +330,16 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 export async function sync(
 	cwd: string,
 	opts: { nuclear?: boolean } = {},
+	report: Reporter = noReport,
 ): Promise<void> {
 	if (opts.nuclear) {
+		report("Recreating documents");
 		await nuclearizeRepo(cwd);
+		report("Publishing to sync server");
 		await publishCurrentTree(cwd);
 		return;
 	}
-	await commitWorkdir(cwd, { online: true });
+	await commitWorkdir(cwd, { online: true }, report);
 }
 
 /**
@@ -407,13 +430,17 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 	}
 }
 
-export async function save(cwd: string): Promise<void> {
-	await commitWorkdir(cwd, { online: false });
+export async function save(
+	cwd: string,
+	report: Reporter = noReport,
+): Promise<void> {
+	await commitWorkdir(cwd, { online: false }, report);
 }
 
 async function commitWorkdir(
 	cwd: string,
 	{ online }: { online: boolean },
+	report: Reporter = noReport,
 ): Promise<void> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
@@ -430,8 +457,10 @@ async function commitWorkdir(
 		const previousFiles = await readFileBytes(repo, previousTree);
 
 		const ig = await loadIgnore(root);
+		report("Scanning working tree");
 		const fsFiles = await walkDir(root, ig);
 
+		report(online ? "Committing local changes" : "Writing documents");
 		const newTree = await pushFiles(
 			repo,
 			fsFiles,
@@ -445,6 +474,7 @@ async function commitWorkdir(
 		}
 
 		if (online) {
+			report("Syncing with peers");
 			await waitForSync(folderHandle, {
 				minMs: 3000,
 				idleMs: 1500,
@@ -471,6 +501,7 @@ async function commitWorkdir(
 			});
 		}
 
+		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
 		await materializeTree(repo, root, finalTree);
 		dlog("commit complete");

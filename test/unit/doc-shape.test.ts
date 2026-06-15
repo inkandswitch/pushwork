@@ -79,7 +79,7 @@ describe("doc shape", () => {
 		const named = path.join(workRoot, "my-pushwork-repo");
 		await fs.mkdir(named);
 		await fs.writeFile(path.join(named, "a.txt"), "a\n");
-		const rootUrl = await init({
+		const { url: rootUrl } = await init({
 			dir: named,
 			backend: "subduction",
 			shape: "vfs",
@@ -97,7 +97,7 @@ describe("doc shape", () => {
 
 	it("init returns a folder doc URL directly", async () => {
 		await fs.writeFile(path.join(workRoot, "a.txt"), "hi\n");
-		const rootUrl = await init({
+		const { url: rootUrl, files } = await init({
 			dir: workRoot,
 			backend: "subduction",
 			shape: "vfs",
@@ -105,6 +105,7 @@ describe("doc shape", () => {
 		});
 		const cfg = await readConfig(workRoot);
 		expect(cfg.rootUrl).toBe(rootUrl);
+		expect(files).toBe(1);
 
 		await withRepo(storageOf(workRoot), async (repo) => {
 			const root = await repo.find(rootUrl);

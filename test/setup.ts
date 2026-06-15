@@ -3,6 +3,9 @@
  */
 import { vi } from "vitest";
 
+// chalk is ESM-only and misbehaves under bundled unit tests; stub it to
+// identity functions. (The CLI runs in a real subprocess in integration
+// tests, so it still gets the real chalk there.)
 vi.mock("chalk", () => ({
 	default: new Proxy(
 		{},
@@ -13,17 +16,4 @@ vi.mock("chalk", () => ({
 			},
 		},
 	),
-}));
-
-vi.mock("ora", () => ({
-	default: vi.fn(() => ({
-		start: vi.fn().mockReturnThis(),
-		stop: vi.fn().mockReturnThis(),
-		succeed: vi.fn().mockReturnThis(),
-		fail: vi.fn().mockReturnThis(),
-		warn: vi.fn().mockReturnThis(),
-		info: vi.fn().mockReturnThis(),
-		clear: vi.fn().mockReturnThis(),
-		text: "",
-	})),
 }));
