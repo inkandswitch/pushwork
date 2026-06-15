@@ -191,12 +191,11 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Determine if content should be treated as text for Automerge text operations
-	 * Note: This method checks the runtime type. File type detection happens
-	 * during reading with isEnhancedTextFile() which now has better dev file support.
+	 * Whether content should be treated as collaborative text. This is a
+	 * runtime-type check; file-type detection happens at read time
+	 * (isEnhancedTextFile).
 	 */
 	private isTextContent(content: string | Uint8Array): boolean {
-		// Simply check the actual type of the content
 		return typeof content === "string"
 	}
 
@@ -248,7 +247,7 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Set the root directory URL in the snapshot
+	 * Get the root directory URL recorded in the snapshot.
 	 */
 	async getRootDirectoryUrl(): Promise<AutomergeUrl | undefined> {
 		const snapshot = await this.snapshotManager.load()

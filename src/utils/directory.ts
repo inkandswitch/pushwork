@@ -19,13 +19,11 @@ export function getPlainUrl(url: AutomergeUrl): AutomergeUrl {
 /**
  * Find a file in the directory hierarchy by path.
  *
- * IMPORTANT: This function strips heads from all URLs before navigation.
- * This ensures we always see the CURRENT state of directories, not a frozen
- * point-in-time view. This is critical because:
- * 1. Directory documents store versioned URLs for subdirectories
- * 2. These URLs may have been captured when the subdirectory was empty
- * 3. Using versioned URLs would make files appear to not exist
- * 4. This would trigger false "remote deletion" detection
+ * Strips heads from every URL before navigating, so it sees the current
+ * state of each directory rather than a frozen point-in-time view. A
+ * directory's stored versioned URL for a subdirectory may have been
+ * captured when that subdirectory was empty; navigating it would make
+ * files appear missing and trigger false remote-deletion detection.
  */
 export async function findFileInDirectoryHierarchy(
   repo: Repo,

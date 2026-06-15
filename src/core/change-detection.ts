@@ -114,11 +114,7 @@ export class ChangeDetector {
 		// Remote-change detection.
 		//
 		// Populated snapshot (incremental sync / watch tick): one tree walk
-		// (detectRemoteTreeWalk) that visits each directory once, replacing
-		// the old per-file detectRemoteChanges (O(files × depth) repo.find)
-		// and detectNewRemoteDocuments. It deliberately does NOT prune on
-		// snapshot directory heads — see detectRemoteTreeWalk's docstring for
-		// why that's unsound here.
+		// that visits each directory once (detectRemoteTreeWalk).
 		//
 		// Empty snapshot (clone / fresh track): the discovery walk (which also
 		// feeds the streaming-clone and shard-pull deferral).
@@ -329,22 +325,13 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Incremental remote-change detection via a single tree walk. Replaces
-	 * the old two scans (detectRemoteChanges' per-file root→leaf navigation,
-	 * which re-fetched shared ancestor directories once per file, plus
-	 * detectNewRemoteDocuments' separate walk) with one traversal that visits
-	 * each directory exactly once.
+	 * Incremental remote-change detection: one tree walk that visits each
+	 * directory exactly once.
 	 *
-	 * It deliberately does NOT prune unchanged subtrees on snapshot directory
-	 * heads, even though that would be the obvious speedup. Two reasons make
-	 * it unsound here: (1) `repo.find(doc)` is what triggers Subduction to
-	 * sync that doc — pruning a subtree means its changed documents are never
-	 * requested, so the walk reads a stale cached copy and misses the change;
-	 * (2) the engine advances snapshot directory heads to the current/merged
-	 * head at end-of-sync and during push even when the corresponding remote
-	 * changes were not reconciled to disk, so a head match does not prove the
-	 * subtree is reconciled. Sound pruning needs reconciled-head tracking +
-	 * a delivery barrier (a noted follow-up); until then, walk everything.
+	 * It does not prune unchanged subtrees on snapshot directory heads:
+	 * `repo.find` is what makes Subduction sync a doc, so a pruned subtree
+	 * would be read from a stale cache and its changes missed. (See CLAUDE.md
+	 * for why head-based pruning is unsound here.)
 	 */
 	async detectRemoteTreeWalk(
 		snapshot: SyncSnapshot,
@@ -395,10 +382,9 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * One directory of the remote walk: classify present entries and report
-	 * deletions, then recurse. Every directory is fetched (`repo.find`),
-	 * which is also what drives Subduction to sync it — see the class doc on
-	 * why this walk does NOT prune unchanged subtrees on snapshot heads.
+	 * One directory of the remote walk: classify present entries, report
+	 * deletions, then recurse. Fetching each directory (`repo.find`) is also
+	 * what drives Subduction to sync it.
 	 */
 	private async walkRemoteDir(
 		directoryUrl: AutomergeUrl,
@@ -498,8 +484,7 @@ export class ChangeDetector {
 	/**
 	 * Classify a remote file that IS tracked in the snapshot (same path).
 	 * Returns a change if its remote document moved (head differs, or the
-	 * directory now points at a replacement URL), else null. Mirrors the
-	 * old detectRemoteChanges per-file body.
+	 * directory now points at a replacement URL), else null.
 	 */
 	private async classifyTrackedRemoteFile(
 		entryPath: string,
@@ -523,13 +508,11 @@ export class ChangeDetector {
 
 		if (this.isArtifactPath(entryPath)) {
 			// Artifacts are replaced wholesale (RawString), never diffed — so
-			// skip getContentAtHead. But the pull still needs the new bytes to
-			// write them: applyRemoteChangeToLocal treats remoteContent === null
-			// as a *deletion*, so emitting null here would delete the file
-			// instead of updating it (the old code papered over this with a
-			// second, content-bearing change from the discovery walk). A null
-			// read means the doc isn't materialized — not a deletion (those
-			// come from the directory-listing scan) — so skip rather than nuke.
+			// skip getContentAtHead. The pull still needs the new bytes:
+			// applyRemoteChangeToLocal treats remoteContent === null as a
+			// deletion, so a null read (doc not materialized) is skipped here
+			// rather than emitted, which would wrongly delete the file.
+			// Genuine deletions come from the directory-listing scan.
 			const localContent = await this.getLocalContent(entryPath)
 			const remoteContent = await this.getCurrentRemoteContent(remoteUrl)
 			if (remoteContent === null) return null
@@ -574,8 +557,7 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Classify a remote file NOT tracked in the snapshot (new to us).
-	 * Mirrors the new-document branch of discoverRemoteDocumentsRecursive,
+	 * Classify a remote file NOT tracked in the snapshot (new to us),
 	 * including shard-pull deferral for the clean (no local copy) case.
 	 */
 	private async classifyNewRemoteFile(
@@ -641,8 +623,8 @@ export class ChangeDetector {
 	}
 
 	/**
-	 * Detect new remote documents from directory hierarchy that aren't in snapshot
-	 * This is critical for clone scenarios where local snapshot is empty
+	 * Discover remote documents not in the snapshot. Used on clone, where the
+	 * local snapshot is empty.
 	 */
 	private async detectNewRemoteDocuments(
 		snapshot: SyncSnapshot,
@@ -839,21 +821,12 @@ export class ChangeDetector {
 					} else if (
 						getPlainUrl(entry.url) !== getPlainUrl(existingEntry.url)
 					) {
-						// HACK: URL replacement detection bolted onto the "discover new docs" walk.
-						//
-						// A peer can replace a document entirely (creating a new URL) rather than mutating
-						// the existing one. This happens in several cases in updateRemoteFile(): artifact
-						// paths are always replaced; non-artifact docs with legacy immutable string content
-						// are also replaced; and recreateFailedDocuments() replaces docs that timed out
-						// during network sync. The two normal remote-change scans both miss this:
-						//   - detectRemoteChanges() is snapshot-centric: it checks the old (now orphaned)
-						//     doc's heads, which haven't changed, so it reports no change.
-						//   - The "new doc" branch above is directory-centric: it skips paths already in
-						//     the snapshot, assuming they're handled by detectRemoteChanges().
-						//
-						// A cleaner fix would be to have detectRemoteChanges() also verify that the
-						// directory still points to the same URL for each snapshot entry, treating a
-						// mismatch as a first-class URL-replacement change rather than a special case here.
+						// The directory points at a different URL than the
+						// snapshot: a peer replaced the document wholesale rather
+						// than mutating it (updateRemoteFile does this for artifact
+						// paths, legacy immutable-string docs, and recreated
+						// timed-out docs). The snapshot's old URL is orphaned, so
+						// read content from the new one.
 						const localContent = await this.getLocalContent(entryPath)
 						const {content: remoteContent, head: remoteHead} =
 							await this.getCurrentRemoteContentAndHead(entry.url)

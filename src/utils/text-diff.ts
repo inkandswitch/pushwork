@@ -26,10 +26,6 @@ export function readDocContent(content: unknown): string | Uint8Array | null {
  * splice for minimal CRDT operations.  If the existing value is a legacy
  * ImmutableString we can't splice into it, so we assign the whole string
  * which converts the field to a collaborative text CRDT going forward.
- *
- * @param doc  - The mutable Automerge document (inside a change callback)
- * @param path - Property path to the text field, e.g. ["content"]
- * @param newContent - The desired new text value
  */
 export function updateTextContent(
 	doc: any,
@@ -58,11 +54,6 @@ export function updateTextContent(
  *
  * This preserves the collaborative text CRDT structure by making minimal
  * character-level edits rather than replacing the entire string.
- *
- * @param doc - The Automerge document (inside a change callback)
- * @param path - The property path to the text field, e.g. ["content"]
- * @param oldContent - The previous text content
- * @param newContent - The desired new text content
  */
 export function spliceText(
 	doc: any,

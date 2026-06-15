@@ -63,7 +63,6 @@ export class MoveDetector {
       }
 
       if (bestMatch) {
-        // If we detected a move above threshold, we apply it
         moves.push({
           fromPath: deletedFile.path,
           toPath: bestMatch.file.path,
@@ -86,8 +85,7 @@ export class MoveDetector {
   }
 
   /**
-   * Calculate similarity between two content pieces
-   * Optimized for speed while maintaining accuracy
+   * Calculate similarity between two content pieces.
    */
   private async calculateSimilarity(
     content1: string | Uint8Array,

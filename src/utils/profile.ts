@@ -2,10 +2,10 @@
  * Lightweight profiling + event-loop drift instrumentation.
  *
  * This exists to investigate the high-CPU / Subduction-timeout behavior
- * on large trees. The single most useful signal (per the patchwork
- * service-worker investigation) is *event-loop drift*: a monotonic timer
- * that should fire every `intervalMs` but fires late when the thread is
- * blocked in synchronous work. Drift discriminates "CPU-blocked" from
+ * on large trees. The most useful signal is *event-loop drift*: a
+ * monotonic timer that should fire every `intervalMs` but fires late when
+ * the thread is blocked in synchronous work. Drift discriminates
+ * "CPU-blocked" from
  * "idle-waiting on the network" — the former is what starves Subduction's
  * Wasm of the thread, missing pongs and stalling responses.
  *

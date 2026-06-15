@@ -13,10 +13,10 @@
  *   main → {type:"done"}              no more tasks coming
  *   worker → {type:"finished"}        after in-flight drains + shutdown
  *
- * Pushing tasks (vs the old static `tasks` array in workerData) lets the
- * main thread (a) feed tasks as the directory walk discovers them
- * (pipelining the walk with the download) and (b) keep faster workers
- * busy when a slow worker is stuck on a big file (work-stealing).
+ * Pushing tasks (rather than a static list at startup) lets the main
+ * thread (a) feed tasks as the directory walk discovers them (pipelining
+ * the walk with the download) and (b) keep faster workers busy when a slow
+ * worker is stuck on a big file (work-stealing).
  */
 
 import {parentPort, workerData} from "node:worker_threads"

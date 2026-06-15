@@ -116,9 +116,6 @@ export class ConfigManager {
     );
   }
 
-  /**
-   * Load global configuration
-   */
   async loadGlobal(): Promise<GlobalConfig | null> {
     try {
       const configPath = this.getGlobalConfigPath();
@@ -134,9 +131,6 @@ export class ConfigManager {
     }
   }
 
-  /**
-   * Save global configuration
-   */
   async saveGlobal(config: GlobalConfig): Promise<void> {
     try {
       const configPath = this.getGlobalConfigPath();
@@ -149,9 +143,6 @@ export class ConfigManager {
     }
   }
 
-  /**
-   * Load local/directory configuration
-   */
   async load(): Promise<DirectoryConfig | null> {
     if (!this.workingDir) {
       return null;
@@ -479,24 +470,15 @@ export class ConfigManager {
     return merged;
   }
 
-  /**
-   * Create default global configuration
-   */
   async createDefaultGlobal(): Promise<void> {
     const defaultGlobal = this.getDefaultGlobalConfig();
     await this.saveGlobal(defaultGlobal);
   }
 
-  /**
-   * Check if global configuration exists
-   */
   async globalConfigExists(): Promise<boolean> {
     return await pathExists(this.getGlobalConfigPath());
   }
 
-  /**
-   * Check if local configuration exists
-   */
   async localConfigExists(): Promise<boolean> {
     if (!this.workingDir) return false;
     return await pathExists(this.getLocalConfigPath());

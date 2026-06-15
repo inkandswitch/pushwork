@@ -1,6 +1,6 @@
 /**
- * Shared-nothing shard-ingest worker (parallel-ingest experiment, mode
- * PUSHWORK_PARALLEL_INGEST=2 / "shard").
+ * Shared-nothing shard-ingest worker (mode PUSHWORK_PARALLEL_INGEST=2 /
+ * "shard").
  *
  * Each worker owns a full Repo — its own Wasm instance, its own
  * NodeFSStorageAdapter writing to the same `.pushwork/automerge`

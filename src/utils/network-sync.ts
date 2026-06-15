@@ -16,13 +16,8 @@ function debug(...args: any[]) {
 }
 
 /**
- * Wait for bidirectional sync to stabilize.
- * This function waits until document heads stop changing, indicating that
- * both outgoing and incoming sync has completed.
- *
- * @param repo - The Automerge repository
- * @param rootDirectoryUrl - The root directory URL to start traversal from
- * @param options - Configuration options
+ * Wait for bidirectional sync to stabilize: poll until document heads stop
+ * changing, indicating both outgoing and incoming sync have settled.
  */
 export async function waitForBidirectionalSync(
   repo: Repo,

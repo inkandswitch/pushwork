@@ -2,8 +2,7 @@
  * Worker pools for shared-nothing parallel ingest
  * (PUSHWORK_PARALLEL_INGEST=2 / "shard"): workers own full Repos (own
  * Wasm, own storage writes, own socket) and report only {relPath, url,
- * heads}; the main thread never materializes the docs. Background and
- * measurements: .ignore/PARALLEL_INGEST_EXPERIMENT.md.
+ * heads}; the main thread never materializes the docs.
  *
  * Worker scripts run as compiled CommonJS, so a build (`npm run build`)
  * must exist even when the engine itself runs from src via tsx.
@@ -70,16 +69,14 @@ export function shardExplicitlyDisabled(): boolean {
 }
 
 /**
- * Worker-count floor below which spinning up shard workers (each ~1 s of
- * Wasm + Repo init) doesn't pay for itself versus the main-thread path.
- * Tuned empirically: the per-doc network/transfer cost only dominates
- * worker startup past a few dozen docs.
+ * Doc-count floor below which spinning up shard workers (each ~1 s of Wasm +
+ * Repo init) doesn't pay for itself versus the main-thread path.
  */
 export const AUTO_SHARD_THRESHOLD = 64
 
 /**
- * Online worker cap. cores−1 (=23 here) triggered an EMFILE death spiral
- * during the post-upload save storm (see CLAUDE.md); 8 was clean.
+ * Worker cap. Higher counts exhaust file descriptors during the upload storm
+ * (see CLAUDE.md).
  */
 export const SHARD_WORKER_CAP = 8
 
@@ -194,11 +191,10 @@ export async function runShardIngest(
 					outcome.results.push(...(report.results as ShardFileOutcome[]))
 					outcome.unsynced.push(...report.unsynced)
 					onProgress?.(report.results.length)
-					// The report is sent only after the worker's repo.shutdown()
-					// has flushed storage, so nothing of value remains in the
-					// thread. Terminate eagerly: online, a leftover Subduction
-					// sync timer (60s) otherwise keeps the thread's event loop
-					// alive long after shutdown, stalling the whole pool.
+					// The report arrives only after the worker's repo.shutdown()
+					// flushed storage, so nothing of value remains. Terminate
+					// eagerly — a leftover Subduction sync timer would otherwise
+					// keep the thread alive and stall the pool.
 					void worker.terminate()
 				})
 
@@ -273,7 +269,7 @@ function resolveCloneWorkerScript(): string {
  * the engine's streaming clone path) and caps each worker at
  * `PER_WORKER_CONCURRENCY` in flight. Idle workers naturally pick up the
  * next queued task, so a worker stuck on a big file doesn't starve the
- * others (the static round-robin partition it replaced did).
+ * others.
  *
  * A crashed worker's in-flight tasks land in `failedPaths` (the caller
  * runs the main-thread fallback). Undispatched queue items are still

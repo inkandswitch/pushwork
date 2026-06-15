@@ -205,34 +205,23 @@ async function safeRepoShutdown(repo: Repo): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, graceMs));
   }
 
-  // Handle uncaught WebSocket errors that occur during shutdown
+  // A closing socket can surface a WebSocket error during teardown; it's
+  // benign (data is already flushed), so swallow it — both as an uncaught
+  // exception and from shutdown() — while letting anything else through.
   const uncaughtErrorHandler = (err: Error) => {
-    if (err.message.includes("WebSocket")) {
-      // Silently suppress WebSocket errors during shutdown
-      return;
-    }
-    // Re-throw non-WebSocket errors
+    if (err.message.includes("WebSocket")) return;
     throw err;
   };
-
-  // Add the error handler before shutdown
   process.on("uncaughtException", uncaughtErrorHandler);
 
   try {
     await repo.shutdown();
   } catch (shutdownError) {
-    // WebSocket errors during shutdown are common and non-critical
-    // Silently ignore them - they don't affect data integrity
     const errorMessage =
       shutdownError instanceof Error
         ? shutdownError.message
         : String(shutdownError);
-
-    // Ignore WebSocket-related errors entirely
-    if (errorMessage.includes("WebSocket")) {
-      // Silently ignore WebSocket shutdown errors
-      return;
-    }
+    if (errorMessage.includes("WebSocket")) return;
   } finally {
     process.off("uncaughtException", uncaughtErrorHandler);
   }

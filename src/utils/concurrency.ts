@@ -14,8 +14,7 @@
  * `yieldToEventLoop()` forces a real macrotask boundary via
  * `setImmediate` (the `check` phase, right after `poll`), so the socket
  * gets serviced. A time-budgeted `makeYielder()` calls it periodically,
- * restoring liveness at negligible throughput cost (measured: the longest
- * event-loop block drops from ~6 s to ~0.6 s, total wall unchanged).
+ * restoring liveness at negligible throughput cost.
  */
 
 import * as os from "os";
@@ -32,10 +31,10 @@ export function yieldToEventLoop(): Promise<void> {
 
 /**
  * Concurrency budget for I/O-bound fan-out (file reads, stats, remote
- * `repo.find` round-trips). Scaled to cores like darn's `io_bound()` —
- * enough to keep the storage device's queue and the sync socket fed,
- * bounded so a 50k-file tree doesn't open 50k descriptors or buffer 50k
- * file contents at once. Override with PUSHWORK_IO_CONCURRENCY (used for
+ * `repo.find` round-trips). Scaled to cores — enough to keep the storage
+ * device's queue and the sync socket fed, bounded so a 50k-file tree
+ * doesn't open 50k descriptors or buffer 50k file contents at once.
+ * Override with PUSHWORK_IO_CONCURRENCY (used for
  * A/B measurement of the clone/pull download).
  */
 export const IO_CONCURRENCY = (() => {

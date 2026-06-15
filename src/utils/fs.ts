@@ -7,9 +7,6 @@ import {FileSystemEntry, FileType} from "../types"
 import {isEnhancedTextFile, isLikelyUtf8Text} from "./mime-types"
 import {mapWithConcurrency, IO_CONCURRENCY} from "./concurrency"
 
-/**
- * Check if a path exists
- */
 export async function pathExists(filePath: string): Promise<boolean> {
 	try {
 		await fs.access(filePath)
@@ -19,9 +16,6 @@ export async function pathExists(filePath: string): Promise<boolean> {
 	}
 }
 
-/**
- * Get file system entry metadata
- */
 export async function getFileSystemEntry(
 	filePath: string
 ): Promise<FileSystemEntry | null> {
@@ -75,9 +69,6 @@ export async function isTextFile(filePath: string): Promise<boolean> {
 	}
 }
 
-/**
- * Read file content as string or buffer
- */
 export async function readFileContent(
 	filePath: string
 ): Promise<string | Uint8Array> {
@@ -97,9 +88,6 @@ export async function readFileContent(
 	return new Uint8Array(buffer)
 }
 
-/**
- * Write file content from string or buffer
- */
 export async function writeFileContent(
 	filePath: string,
 	content: string | Uint8Array
@@ -113,9 +101,6 @@ export async function writeFileContent(
 	}
 }
 
-/**
- * Ensure directory exists, creating it if necessary
- */
 export async function ensureDirectoryExists(dirPath: string): Promise<void> {
 	try {
 		await fs.mkdir(dirPath, {recursive: true})
@@ -126,9 +111,6 @@ export async function ensureDirectoryExists(dirPath: string): Promise<void> {
 	}
 }
 
-/**
- * Remove file or directory
- */
 export async function removePath(filePath: string): Promise<void> {
 	try {
 		const stats = await fs.stat(filePath)
@@ -145,11 +127,9 @@ export async function removePath(filePath: string): Promise<void> {
 }
 
 /**
- * Build a reusable exclude predicate from gitignore-style patterns.
- *
- * The `ignore` matcher is compiled ONCE here and closed over, instead of
- * being rebuilt for every path (the old `isExcluded` recompiled the
- * matcher on each call — O(paths × patterns) wasted work on large trees).
+ * Build a reusable exclude predicate from gitignore-style patterns. The
+ * `ignore` matcher is compiled once and closed over, rather than rebuilt
+ * per path.
  */
 function buildExcludeFilter(
 	basePath: string,
@@ -215,9 +195,6 @@ export async function listDirectory(
 	return entries
 }
 
-/**
- * Copy file with metadata preservation
- */
 export async function copyFile(
 	sourcePath: string,
 	destPath: string
@@ -230,9 +207,6 @@ export async function copyFile(
 	await fs.chmod(destPath, stats.mode)
 }
 
-/**
- * Move/rename file or directory
- */
 export async function movePath(
 	sourcePath: string,
 	destPath: string
@@ -241,16 +215,10 @@ export async function movePath(
 	await fs.rename(sourcePath, destPath)
 }
 
-/**
- * Get MIME type for file
- */
 export function getMimeType(filePath: string): string {
 	return mimeTypes.lookup(filePath) || "application/octet-stream"
 }
 
-/**
- * Get file extension
- */
 export function getFileExtension(filePath: string): string {
 	const ext = path.extname(filePath)
 	return ext.startsWith(".") ? ext.slice(1) : ext

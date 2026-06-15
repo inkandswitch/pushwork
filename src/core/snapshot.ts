@@ -22,30 +22,19 @@ export class SnapshotManager {
 
   constructor(private rootPath: string) {}
 
-  /**
-   * Get path to sync tool directory
-   */
   private getSyncToolDir(): string {
     return path.join(this.rootPath, SnapshotManager.SYNC_TOOL_DIR);
   }
 
-  /**
-   * Get path to snapshot file
-   */
   private getSnapshotPath(): string {
     return path.join(this.getSyncToolDir(), SnapshotManager.SNAPSHOT_FILENAME);
   }
 
-  /**
-   * Check if snapshot exists
-   */
   async exists(): Promise<boolean> {
     return await pathExists(this.getSnapshotPath());
   }
 
-  /**
-   * Load snapshot from disk
-   */
+  /** Returns null if the snapshot is missing or unreadable. */
   async load(): Promise<SyncSnapshot | null> {
     try {
       const snapshotPath = this.getSnapshotPath();
@@ -63,9 +52,6 @@ export class SnapshotManager {
     }
   }
 
-  /**
-   * Save snapshot to disk
-   */
   async save(snapshot: SyncSnapshot): Promise<void> {
     try {
       await ensureDirectoryExists(this.getSyncToolDir());
@@ -79,9 +65,6 @@ export class SnapshotManager {
     }
   }
 
-  /**
-   * Create empty snapshot
-   */
   createEmpty(): SyncSnapshot {
     return {
       timestamp: Date.now(),
@@ -92,9 +75,6 @@ export class SnapshotManager {
     };
   }
 
-  /**
-   * Update file entry in snapshot
-   */
   updateFileEntry(
     snapshot: SyncSnapshot,
     relativePath: string,
@@ -104,9 +84,6 @@ export class SnapshotManager {
     snapshot.timestamp = Date.now();
   }
 
-  /**
-   * Update directory entry in snapshot
-   */
   updateDirectoryEntry(
     snapshot: SyncSnapshot,
     relativePath: string,
@@ -116,39 +93,24 @@ export class SnapshotManager {
     snapshot.timestamp = Date.now();
   }
 
-  /**
-   * Remove file entry from snapshot
-   */
   removeFileEntry(snapshot: SyncSnapshot, relativePath: string): void {
     snapshot.files.delete(relativePath);
     snapshot.timestamp = Date.now();
   }
 
-  /**
-   * Remove directory entry from snapshot
-   */
   removeDirectoryEntry(snapshot: SyncSnapshot, relativePath: string): void {
     snapshot.directories.delete(relativePath);
     snapshot.timestamp = Date.now();
   }
 
-  /**
-   * Get all file paths in snapshot
-   */
   getFilePaths(snapshot: SyncSnapshot): string[] {
     return Array.from(snapshot.files.keys());
   }
 
-  /**
-   * Get all directory paths in snapshot
-   */
   getDirectoryPaths(snapshot: SyncSnapshot): string[] {
     return Array.from(snapshot.directories.keys());
   }
 
-  /**
-   * Get file entry by path
-   */
   getFileEntry(
     snapshot: SyncSnapshot,
     relativePath: string
@@ -156,9 +118,6 @@ export class SnapshotManager {
     return snapshot.files.get(relativePath);
   }
 
-  /**
-   * Get directory entry by path
-   */
   getDirectoryEntry(
     snapshot: SyncSnapshot,
     relativePath: string
@@ -166,18 +125,12 @@ export class SnapshotManager {
     return snapshot.directories.get(relativePath);
   }
 
-  /**
-   * Check if path is tracked in snapshot
-   */
   isTracked(snapshot: SyncSnapshot, relativePath: string): boolean {
     return (
       snapshot.files.has(relativePath) || snapshot.directories.has(relativePath)
     );
   }
 
-  /**
-   * Get snapshot statistics
-   */
   getStats(snapshot: SyncSnapshot): {
     files: number;
     directories: number;
@@ -223,9 +176,6 @@ export class SnapshotManager {
     };
   }
 
-  /**
-   * Convert snapshot to serializable format
-   */
   private serializeSnapshot(snapshot: SyncSnapshot): SerializableSyncSnapshot {
     return {
       timestamp: snapshot.timestamp,
@@ -236,9 +186,6 @@ export class SnapshotManager {
     };
   }
 
-  /**
-   * Convert serializable format back to snapshot
-   */
   private deserializeSnapshot(
     serializable: SerializableSyncSnapshot
   ): SyncSnapshot {
@@ -251,18 +198,13 @@ export class SnapshotManager {
     };
   }
 
-  /**
-   * Clear all snapshot data
-   */
   clear(snapshot: SyncSnapshot): void {
     snapshot.files.clear();
     snapshot.directories.clear();
     snapshot.timestamp = Date.now();
   }
 
-  /**
-   * Clone snapshot for safe manipulation
-   */
+  /** Shallow copy (new Maps; entry objects shared). */
   clone(snapshot: SyncSnapshot): SyncSnapshot {
     return {
       timestamp: snapshot.timestamp,
