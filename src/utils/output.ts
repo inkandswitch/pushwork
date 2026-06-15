@@ -195,6 +195,16 @@ export class Output {
    */
   taskLine(message: string, keepOnComplete = false): void {
     if (!this.taskStartTime) {
+      // No spinner task is active. If a progress bar owns the live region,
+      // route the detail through it — calling info() here runs
+      // finalizeSpinner(), which dismisses the bar and turns every later
+      // advance()/stop() into a no-op (the closing summary then never
+      // prints). Only the interactive clack bar sets activeProgress;
+      // porcelain/plain/quiet have no live region and fall through to info().
+      if (this.activeProgress && !this.activeProgress.isStopped) {
+        this.activeProgress.advance(0, message);
+        return;
+      }
       this.info(message);
       return;
     }
@@ -622,6 +632,11 @@ export class Progress {
     // porcelain record). advance() is still a no-op (no live bar).
     private readonly plain = false
   ) {}
+
+  /** Whether stop()/fail()/dismiss() has already finalized this bar. */
+  get isStopped(): boolean {
+    return this.stopped;
+  }
 
   advance(step = 1, message?: string): void {
     if (this.stopped) return;

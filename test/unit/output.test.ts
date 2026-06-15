@@ -189,6 +189,40 @@ describe("progress", () => {
 
 		expect(stdout()).toEqual(["progress\tWorking\t2", "ok\tDone"]);
 	});
+
+	it("a live interactive bar survives an in-loop taskLine (not dismissed)", () => {
+		// In interactive (TTY) mode a progress bar owns the live region. An
+		// out.taskLine() with no spinner task active used to fall through to
+		// info() → finalizeSpinner() → dismiss the bar, so every later
+		// advance()/stop() became a no-op and the closing summary never
+		// printed (push deletions/moves/artifact rebuilds hit this). taskLine
+		// must now route through the bar instead. This is Output-side logic
+		// independent of clack's rendering, so we force TTY and stub
+		// process.stdout.write so the real clack bar doesn't paint.
+		const origTTY = process.stdout.isTTY;
+		Object.defineProperty(process.stdout, "isTTY", {
+			value: true,
+			configurable: true,
+		});
+		const writeSpy = jest
+			.spyOn(process.stdout, "write")
+			.mockImplementation(() => true);
+		try {
+			const out = configured({}); // normal + non-porcelain + TTY ⇒ live bar
+			const bar = out.progress("Pushing 3 changes", 3);
+			expect(bar.isStopped).toBe(false);
+			out.taskLine("Removed foo.txt from root"); // would dismiss pre-fix
+			expect(bar.isStopped).toBe(false); // bar survived
+			bar.stop("Pushed 3 files");
+			expect(bar.isStopped).toBe(true);
+		} finally {
+			writeSpy.mockRestore();
+			Object.defineProperty(process.stdout, "isTTY", {
+				value: origTTY,
+				configurable: true,
+			});
+		}
+	});
 });
 
 describe("plain mode (normal verbosity, non-TTY)", () => {
