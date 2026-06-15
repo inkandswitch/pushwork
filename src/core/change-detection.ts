@@ -113,17 +113,15 @@ export class ChangeDetector {
 
 		// Remote-change detection.
 		//
-		// Populated snapshot (incremental sync / watch tick): one
-		// Merkle-pruned tree walk. A directory's heads are an authoritative
-		// change token — leaf-first push moves them whenever any descendant
-		// changes — so unchanged subtrees are skipped wholesale and an idle
-		// tick prunes at the root in a single repo.find. This replaces both
+		// Populated snapshot (incremental sync / watch tick): one tree walk
+		// (detectRemoteTreeWalk) that visits each directory once, replacing
 		// the old per-file detectRemoteChanges (O(files × depth) repo.find)
-		// and detectNewRemoteDocuments.
+		// and detectNewRemoteDocuments. It deliberately does NOT prune on
+		// snapshot directory heads — see detectRemoteTreeWalk's docstring for
+		// why that's unsound here.
 		//
-		// Empty snapshot (clone / fresh track): no directory heads to prune
-		// against, so use the discovery walk (which also feeds the
-		// streaming-clone and shard-pull deferral).
+		// Empty snapshot (clone / fresh track): the discovery walk (which also
+		// feeds the streaming-clone and shard-pull deferral).
 		if (snapshot.files.size === 0) {
 			const newRemoteDocuments = await profileAsync("detect:new-remote", () =>
 				this.detectNewRemoteDocuments(

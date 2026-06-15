@@ -63,6 +63,24 @@ export async function pickAvailableBackupPath(base: string): Promise<string> {
 }
 
 /**
+ * Thrown when an on-disk config declares a `config_version` newer than this
+ * build understands. Distinct type so callers can treat it as fatal (proceeding
+ * could corrupt a newer config) while still tolerating ordinary I/O failures.
+ */
+export class ConfigVersionTooNewError extends Error {
+  constructor(
+    readonly found: number,
+    readonly supported: number
+  ) {
+    super(
+      `Config schema version ${found} is newer than this pushwork understands ` +
+        `(supports up to v${supported}). Upgrade pushwork.`
+    );
+    this.name = "ConfigVersionTooNewError";
+  }
+}
+
+/**
  * Configuration manager for pushwork
  */
 export class ConfigManager {
@@ -353,10 +371,7 @@ export class ConfigManager {
       raw.config_version !== undefined &&
       raw.config_version > CONFIG_VERSION
     ) {
-      throw new Error(
-        `Config schema version ${raw.config_version} is newer than this pushwork understands ` +
-          `(supports up to v${CONFIG_VERSION}). Upgrade pushwork.`
-      );
+      throw new ConfigVersionTooNewError(raw.config_version, CONFIG_VERSION);
     }
 
     // Already current — nothing to do.

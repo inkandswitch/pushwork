@@ -50,7 +50,14 @@ export const IO_CONCURRENCY = (() => {
  * turn. 50 ms comfortably beats the sync server's ~100 ms keepalive
  * cadence while keeping the number of yielded loop-turns small.
  */
-export const YIELD_BUDGET_MS = Number(process.env.PUSHWORK_YIELD_MS ?? 50);
+export const YIELD_BUDGET_MS = (() => {
+  // Guard against a non-numeric PUSHWORK_YIELD_MS: an unguarded NaN slips
+  // past makeYielder's `<= 0` no-op check yet makes `elapsed >= NaN` always
+  // false, silently disabling yielding (and the Subduction-timeout
+  // protection it provides). `0` is honored (disables yielding for A/B).
+  const v = Number(process.env.PUSHWORK_YIELD_MS);
+  return Number.isFinite(v) ? v : 50;
+})();
 
 /**
  * Make a time-budgeted yielder. Call the returned function frequently

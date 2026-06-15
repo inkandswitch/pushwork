@@ -224,7 +224,6 @@ program
       gentle: opts.gentle,
       nuclear: opts.nuclear,
       verbose: opts.verbose,
-      profile: opts.profile,
     });
   });
 

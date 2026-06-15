@@ -21,7 +21,7 @@ import {
 import { DEFAULT_SUBDUCTION_SERVER, SyncProtocol } from "./types/config";
 import { SyncEngine } from "./core";
 import { pathExists, ensureDirectoryExists, formatRelativePath } from "./utils";
-import { ConfigManager, resolveProtocol } from "./core/config";
+import { ConfigManager, ConfigVersionTooNewError, resolveProtocol } from "./core/config";
 import { createRepo } from "./utils/repo-factory";
 import { out } from "./utils/output";
 import { waitForSync } from "./utils/network-sync";
@@ -94,8 +94,14 @@ async function migrateConfigIfNeeded(
   try {
     result = await configManager.migrateIfNeeded();
   } catch (error) {
-    // Migration is a convenience — `resolveProtocol` handles v0 configs
-    // transparently in memory on every command, so a failed migration
+    // A config newer than this build understands is fatal: continuing could
+    // corrupt it, so surface the "upgrade pushwork" error and stop.
+    if (error instanceof ConfigVersionTooNewError) {
+      out.error(error.message);
+      out.exit(1);
+    }
+    // Other failures are a convenience miss — `resolveProtocol` handles v0
+    // configs transparently in memory on every command, so a failed migration
     // (disk full, read-only filesystem, permission denied, etc.) is
     // non-fatal. Warn loudly and carry on with in-memory v0 handling.
     out.warn(
@@ -382,17 +388,28 @@ export async function sync(
     out.info("Using legacy WebSocket sync backend (from config)");
   }
 
-  if (options.nuclear) {
+  // --nuclear recreates every Automerge document — destructive, with nothing
+  // to preview — so skip it under --dry-run (running it would wipe the
+  // snapshot and root listing despite the preview intent).
+  if (options.nuclear && !options.dryRun) {
     await syncEngine.nuclearReset();
   }
 
   if (options.dryRun) {
+    if (options.nuclear) {
+      out.info(
+        "--nuclear is ignored under --dry-run (no documents are recreated)"
+      );
+    }
     out.task("Analyzing changes");
     const preview = await syncEngine.previewChanges();
 
     if (preview.changes.length === 0 && preview.moves.length === 0) {
+      // Read-only preview, but the repo is networked — shut it down so the
+      // process exits instead of hanging on the open connection.
       out.done("Already synced");
-      return;
+      await safeRepoShutdown(repo);
+      process.exit();
     }
 
     out.done();
@@ -431,6 +448,7 @@ export async function sync(
 
     out.log("");
     out.log("Run without --dry-run to apply these changes");
+    await safeRepoShutdown(repo);
   } else {
     if (isProfilingEnabled()) {
       resetProfile();
