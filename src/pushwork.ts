@@ -19,6 +19,7 @@ import {
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
+import { shardClone, shardIngest, shouldShard } from "./ingest-pool.js";
 import { log } from "./log.js";
 import { openRepo, waitForSync } from "./repo.js";
 import {
@@ -128,7 +129,9 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, artifactDirs);
+		const tree = shouldShard(fsFiles.size)
+			? await ingestSharded(repo, root, opts.backend, online, fsFiles, artifactDirs)
+			: await pushFiles(repo, fsFiles, undefined, artifactDirs);
 		const folderUrl = await shape.encode({ repo, tree, title });
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
@@ -215,7 +218,7 @@ export async function clone(
 		const tree = await shape.decode({ repo, root: folderHandle });
 		const fileCount = flattenLeaves(tree).size;
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
-		await materializeTree(repo, root, tree);
+		await materializeTree(repo, root, tree, { backend: opts.backend, online });
 
 		await writeConfig(root, {
 			version: CONFIG_VERSION,
@@ -864,6 +867,49 @@ async function pushFiles(
 }
 
 /**
+ * Like `pushFiles` for the all-new case (init), but builds the file documents
+ * across the shared-nothing worker pool: workers create + persist (+ upload)
+ * their shard and report `{path, url, heads}`; this thread only stitches the
+ * URLs into the tree (pinning artifacts from the reported heads) and falls
+ * back to main-thread creation for any path a worker could not handle.
+ */
+async function ingestSharded(
+	repo: Repo,
+	root: string,
+	backend: Backend,
+	online: boolean,
+	fsFiles: Map<string, Uint8Array>,
+	artifactDirs: readonly string[],
+): Promise<VfsNode> {
+	const { created, failed } = await shardIngest({
+		root,
+		backend,
+		online,
+		files: fsFiles,
+		artifactDirs,
+	});
+
+	const tree = newDir();
+	for (const [posixPath, url] of created) {
+		setFileAt(tree, posixPath.split("/").filter(Boolean), url);
+	}
+
+	for (const posixPath of failed) {
+		const bytes = fsFiles.get(posixPath);
+		if (!bytes) continue;
+		const isArtifact = isInArtifactDir(posixPath, artifactDirs);
+		const handle = repo.create<UnixFileEntry>(
+			makeFileEntry(posixPath, bytes, isArtifact),
+		);
+		const url = isArtifact ? pinUrl(handle) : handle.url;
+		setFileAt(tree, posixPath.split("/").filter(Boolean), url);
+	}
+
+	dlog("ingestSharded created=%d main-fallback=%d", created.size, failed.length);
+	return tree;
+}
+
+/**
  * Re-pin every artifact leaf in the folder doc to its file doc's current
  * heads. Bare (non-artifact) URLs are left as-is since they already track
  * current heads implicitly. Returns true if any leaf URL was rewritten.
@@ -916,9 +962,20 @@ async function materializeTree(
 	repo: Repo,
 	root: string,
 	tree: VfsNode,
+	shardCtx?: { backend: Backend; online: boolean },
 ): Promise<void> {
+	const leaves = flattenLeaves(tree);
+
+	// Clone path: fan the per-file download + write out to the worker pool.
+	// Only the caller that knows the working tree is freshly materialized
+	// (clone) passes shardCtx, so writing every leaf is correct here.
+	if (shardCtx && shouldShard(leaves.size)) {
+		await materializeSharded(repo, root, leaves, shardCtx);
+		return;
+	}
+
 	const desired = new Map<string, Uint8Array>();
-	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
+	for (const [posixPath, fileUrl] of leaves) {
 		const handle = await repo.find<UnixFileEntry>(fileUrl);
 		desired.set(posixPath, contentToBytes(handle.doc().content));
 	}
@@ -945,6 +1002,52 @@ async function materializeTree(
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
 	dlog("materialize done: %d written, %d removed", written, removed);
+}
+
+async function materializeSharded(
+	repo: Repo,
+	root: string,
+	leaves: Map<string, AutomergeUrl>,
+	shardCtx: { backend: Backend; online: boolean },
+): Promise<void> {
+	const { written, failed } = await shardClone({
+		root,
+		backend: shardCtx.backend,
+		online: shardCtx.online,
+		leaves,
+	});
+
+	// Main-thread fallback for any leaf a worker could not write.
+	for (const posixPath of failed) {
+		const url = leaves.get(posixPath);
+		if (!url) continue;
+		const handle = await repo.find<UnixFileEntry>(url);
+		await writeFileAtomic(
+			path.join(root, fromPosix(posixPath)),
+			contentToBytes(handle.doc().content),
+		);
+	}
+
+	// Remove anything on disk the tree no longer references.
+	const ig = await loadIgnore(root);
+	const present = await walkDir(root, ig);
+	let removed = 0;
+	for (const posixPath of present.keys()) {
+		if (leaves.has(posixPath)) continue;
+		try {
+			await fs.unlink(path.join(root, fromPosix(posixPath)));
+			removed++;
+		} catch {
+			// already gone
+		}
+		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
+	}
+	dlog(
+		"materialize (shard) written=%d main-fallback=%d removed=%d",
+		written.size,
+		failed.length,
+		removed,
+	);
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);
