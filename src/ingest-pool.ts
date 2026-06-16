@@ -47,15 +47,46 @@ const SHARD_WORKER_CAP = Math.max(
 // doesn't pay for itself versus the main-thread path.
 const SHARD_MIN_ITEMS = 8;
 
-/** `PUSHWORK_PARALLEL_INGEST=shard` (or `=2`) opts into the worker pools. */
-export function shardEnabled(): boolean {
+// Auto-dispatch thresholds for ingest: shard automatically only when the CRDT
+// build is heavy enough to beat per-worker overhead. Tiny files are
+// overhead-bound (a wash), so a small-file tree stays on the main thread even
+// past the item floor.
+const AUTO_AVG_BYTES = 8 * 1024;
+const AUTO_TOTAL_BYTES = 4 * 1024 * 1024;
+
+type ExplicitMode = "on" | "off" | null;
+
+// `PUSHWORK_PARALLEL_INGEST=shard`/`2` forces the pools on; `off`/`0` forces
+// them off; anything else leaves the adaptive policy in charge.
+function explicitMode(): ExplicitMode {
 	const v = process.env.PUSHWORK_PARALLEL_INGEST;
-	return v === "shard" || v === "2";
+	if (v === "shard" || v === "2") return "on";
+	if (v === "off" || v === "0") return "off";
+	return null;
 }
 
-/** Whether an operation over `itemCount` items should use the worker pool. */
-export function shouldShard(itemCount: number): boolean {
-	return shardEnabled() && itemCount >= SHARD_MIN_ITEMS;
+/**
+ * Whether to shard an ingest of `files`. Explicit on/off always wins; otherwise
+ * auto-enable only for CPU-bound trees (large average file or large total
+ * bytes), since the per-char op-tree build is what the workers parallelize.
+ */
+export function shouldShardIngest(files: Map<string, Uint8Array>): boolean {
+	if (files.size < SHARD_MIN_ITEMS) return false;
+	const mode = explicitMode();
+	if (mode !== null) return mode === "on";
+	let total = 0;
+	for (const bytes of files.values()) total += bytes.length;
+	return total >= AUTO_TOTAL_BYTES || total / files.size >= AUTO_AVG_BYTES;
+}
+
+/**
+ * Whether to shard a clone/materialize of `leafCount` files. Parallel
+ * download/read wins broadly (the serial path pays a per-file `repo.find`), so
+ * auto-enable past the floor; explicit `off`/`0` still declines.
+ */
+export function shouldShardClone(leafCount: number): boolean {
+	if (leafCount < SHARD_MIN_ITEMS) return false;
+	return explicitMode() !== "off";
 }
 
 function workerCount(itemCount: number): number {
