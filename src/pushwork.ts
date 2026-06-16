@@ -19,7 +19,12 @@ import {
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
-import { shardClone, shardIngest, shouldShard } from "./ingest-pool.js";
+import {
+	shardClone,
+	shardIngest,
+	shouldShardClone,
+	shouldShardIngest,
+} from "./ingest-pool.js";
 import { log } from "./log.js";
 import { openRepo, waitForSync } from "./repo.js";
 import {
@@ -117,7 +122,7 @@ export async function init(opts: InitOpts): Promise<AutomergeUrl> {
 		dlog("init walked %d files", fsFiles.size);
 
 		const title = path.basename(root) || undefined;
-		const tree = shouldShard(fsFiles.size)
+		const tree = shouldShardIngest(fsFiles)
 			? await ingestSharded(repo, root, opts.backend, online, fsFiles, artifactDirs)
 			: await pushFiles(repo, fsFiles, undefined, artifactDirs);
 		const folderUrl = await shape.encode({ repo, tree, title });
@@ -938,7 +943,7 @@ async function materializeTree(
 	// Clone path: fan the per-file download + write out to the worker pool.
 	// Only the caller that knows the working tree is freshly materialized
 	// (clone) passes shardCtx, so writing every leaf is correct here.
-	if (shardCtx && shouldShard(leaves.size)) {
+	if (shardCtx && shouldShardClone(leaves.size)) {
 		await materializeSharded(repo, root, leaves, shardCtx);
 		return;
 	}
