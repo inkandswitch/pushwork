@@ -53,7 +53,7 @@ async function main(): Promise<void> {
 	fs.mkdirSync(dst);
 	gen(src, N);
 
-	const url = await init({ dir: src, backend: "subduction", shape: "vfs", online: false });
+	const { url } = await init({ dir: src, backend: "subduction", shape: "vfs", online: false });
 	fs.cpSync(
 		path.join(src, ".pushwork", "storage"),
 		path.join(dst, ".pushwork", "storage"),
