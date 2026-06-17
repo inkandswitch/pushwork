@@ -134,7 +134,7 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = shouldShardIngest(fsFiles)
+		const tree = shouldShardIngest(fsFiles.size)
 			? await ingestSharded(repo, root, opts.backend, online, fsFiles, artifactDirs)
 			: await pushFiles(repo, fsFiles, undefined, artifactDirs);
 		const folderUrl = await shape.encode({ repo, tree, title });

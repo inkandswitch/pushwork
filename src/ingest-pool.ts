@@ -47,13 +47,6 @@ const SHARD_WORKER_CAP = Math.max(
 // doesn't pay for itself versus the main-thread path.
 const SHARD_MIN_ITEMS = 8;
 
-// Auto-dispatch thresholds for ingest: shard automatically only when the CRDT
-// build is heavy enough to beat per-worker overhead. Tiny files are
-// overhead-bound (a wash), so a small-file tree stays on the main thread even
-// past the item floor.
-const AUTO_AVG_BYTES = 8 * 1024;
-const AUTO_TOTAL_BYTES = 4 * 1024 * 1024;
-
 type ExplicitMode = "on" | "off" | null;
 
 // `PUSHWORK_PARALLEL_INGEST=shard`/`2` forces the pools on; `off`/`0` forces
@@ -66,17 +59,14 @@ function explicitMode(): ExplicitMode {
 }
 
 /**
- * Whether to shard an ingest of `files`. Explicit on/off always wins; otherwise
- * auto-enable only for CPU-bound trees (large average file or large total
- * bytes), since the per-char op-tree build is what the workers parallelize.
+ * Whether to shard an ingest of `itemCount` files. Count-based, symmetric with
+ * `shouldShardClone`: shard past the item floor unless explicitly disabled.
+ * Parallel ingest keeps the op-tree build AND the per-doc sync round-trips off
+ * the main thread, which wins for many files regardless of per-file size.
  */
-export function shouldShardIngest(files: Map<string, Uint8Array>): boolean {
-	if (files.size < SHARD_MIN_ITEMS) return false;
-	const mode = explicitMode();
-	if (mode !== null) return mode === "on";
-	let total = 0;
-	for (const bytes of files.values()) total += bytes.length;
-	return total >= AUTO_TOTAL_BYTES || total / files.size >= AUTO_AVG_BYTES;
+export function shouldShardIngest(itemCount: number): boolean {
+	if (itemCount < SHARD_MIN_ITEMS) return false;
+	return explicitMode() !== "off";
 }
 
 /**
