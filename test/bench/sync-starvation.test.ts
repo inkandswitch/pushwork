@@ -66,7 +66,13 @@ async function runBench(files: number): Promise<BenchSummary> {
 			"--fanout",
 			"20",
 		],
-		{ cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 },
+		{
+			cwd: REPO_ROOT,
+			maxBuffer: 64 * 1024 * 1024,
+			// This guard measures the MAIN-THREAD ingest path (macrotask yields).
+			// Ingest now shards by count, so force it off to exercise that path.
+			env: { ...process.env, PUSHWORK_PARALLEL_INGEST: "off" },
+		},
 	);
 	const lastLine = stdout.trim().split("\n").pop() ?? "{}";
 	return JSON.parse(lastLine) as BenchSummary;

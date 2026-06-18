@@ -156,12 +156,12 @@ async function main(): Promise<void> {
 			const srcRoot = await mkTmpRoot("pushwork-bench-src-");
 			cleanup.push(srcRoot);
 			await generateTree(srcRoot, args);
-			localCloneUrl = await init({
+			localCloneUrl = (await init({
 				dir: srcRoot,
 				backend: args.backend,
 				shape: args.shape,
 				online: false,
-			});
+			})).url;
 			await fs.cp(
 				path.join(srcRoot, ".pushwork", "storage"),
 				path.join(root, ".pushwork", "storage"),
