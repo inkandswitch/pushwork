@@ -39,11 +39,10 @@ async function walk(
 		}
 		let stat;
 		try {
-			stat = await fs.lstat(full);
+			stat = await fs.stat(full);
 		} catch {
 			continue;
 		}
-		if (stat.isSymbolicLink()) continue;
 		if (stat.isDirectory()) {
 			await walk(root, full, ig, tree);
 		} else if (stat.isFile()) {
