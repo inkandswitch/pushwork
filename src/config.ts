@@ -1,6 +1,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import type { AutomergeUrl } from "@automerge/automerge-repo";
+import { stripHeads } from "./shapes/file.js";
 
 export type Backend = "legacy" | "subduction";
 
@@ -34,7 +35,12 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 	if (!parsed.shape) throw new Error("pushwork config missing shape");
 	return {
 		version: CONFIG_VERSION,
-		rootUrl: parsed.rootUrl,
+		// The root folder doc must always be opened live so sync can mutate it.
+		// Older configs (e.g. migrated from the original pushwork) sometimes
+		// stored a heads-pinned `root_directory_url`; carrying those heads
+		// forward would yield a view-only handle that throws on edit. Strip
+		// them here — the documentId (the repo's identity) is preserved.
+		rootUrl: stripHeads(parsed.rootUrl),
 		backend: parsed.backend,
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],

@@ -1,6 +1,7 @@
 import * as path from "path";
 import {
 	isValidAutomergeUrl,
+	parseAutomergeUrl,
 	type AutomergeUrl,
 	type DocHandle,
 	type Repo,
@@ -39,6 +40,19 @@ const isFolderDoc = (doc: unknown): doc is FolderDoc => {
 const linkFileType = (filename: string): string => {
 	const ext = path.posix.extname(filename).replace(/^\./, "");
 	return ext || "file";
+};
+
+/**
+ * Whether a doc URL carries pinned heads (e.g. `automerge:…#h1|h2`). A handle
+ * resolved from such a URL is view-only and throws on `.change()`.
+ */
+const isPinned = (url: AutomergeUrl): boolean => {
+	try {
+		const { heads } = parseAutomergeUrl(url);
+		return !!heads && heads.length > 0;
+	} catch {
+		return false;
+	}
 };
 
 export const patchworkFolderShape: Shape = {
@@ -110,13 +124,21 @@ async function syncFolder(
 			nextLinks.push({ name, type: linkFileType(name), url: child.url });
 			continue;
 		}
-		// child is a dir
+		// child is a dir. Reuse the existing subfolder doc only if it's a
+		// live, editable folder doc. A subfolder link pinned with heads (an
+		// artifact dir carried over from an old pushwork) resolves to a
+		// view-only handle that throws on `.change()` — in that case we can't
+		// edit it, so destroy that URL and recreate the subfolder fresh.
 		if (existing && existing.type === "folder") {
-			const subHandle = await repo.find<FolderDoc>(existing.url);
-			if (isFolderDoc(subHandle.doc())) {
-				await syncFolder(repo, subHandle, child);
-				nextLinks.push({ name, type: "folder", url: subHandle.url });
-				continue;
+			if (isPinned(existing.url)) {
+				dlog("syncFolder recreating pinned subfolder %s (was %s)", name, existing.url);
+			} else {
+				const subHandle = await repo.find<FolderDoc>(existing.url);
+				if (isFolderDoc(subHandle.doc())) {
+					await syncFolder(repo, subHandle, child);
+					nextLinks.push({ name, type: "folder", url: subHandle.url });
+					continue;
+				}
 			}
 		}
 		const sub = await createFolder(repo, child, name);

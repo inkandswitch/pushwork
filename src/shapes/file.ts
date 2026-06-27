@@ -1,5 +1,6 @@
 import * as path from "path";
 import mime from "mime-types";
+import * as Automerge from "@automerge/automerge";
 import {
 	ImmutableString,
 	isImmutableString,
@@ -62,6 +63,33 @@ export function makeFileEntry(
 		mimeType: mime.lookup(name) || "application/octet-stream",
 		name,
 	};
+}
+
+/**
+ * Mutate an existing file doc in place to match `fresh`. Text content is
+ * merged with Automerge.updateText so concurrent character edits converge;
+ * bytes and ImmutableString are atomic (last writer wins). Metadata fields
+ * (extension, mimeType, name) are overwritten when they differ, and the
+ * @patchwork tag is added if missing. The handle's heads advance only if
+ * something actually changed.
+ */
+export function applyFileEntry(
+	handle: DocHandle<UnixFileEntry>,
+	fresh: UnixFileEntry,
+): void {
+	handle.change((d: UnixFileEntry) => {
+		if (!contentEquals(d.content, fresh.content)) {
+			if (typeof d.content === "string" && typeof fresh.content === "string") {
+				Automerge.updateText(d, ["content"], fresh.content);
+			} else {
+				d.content = fresh.content;
+			}
+		}
+		if (d.extension !== fresh.extension) d.extension = fresh.extension;
+		if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
+		if (d.name !== fresh.name) d.name = fresh.name;
+		if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
+	});
 }
 
 export function readFileEntry(handle: DocHandle<unknown>): {

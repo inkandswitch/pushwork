@@ -458,6 +458,101 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 		);
 	});
 
+	describe("yoink / yeet — single file doc by URL", () => {
+		async function fileDocUrl(repo: string, posixPath: string): Promise<string> {
+			const { stdout } = await pushwork(["heads", posixPath], repo);
+			const line = stdout
+				.split("\n")
+				.find((l) => l.startsWith(posixPath + "\t"));
+			if (!line) throw new Error(`no heads entry for ${posixPath}:\n${stdout}`);
+			return line.split("\t")[1];
+		}
+
+		async function waitForText(
+			repo: string,
+			file: string,
+			expected: string,
+			rounds = 6,
+		): Promise<string> {
+			let last = "";
+			for (let i = 0; i < rounds; i++) {
+				await pushwork(["sync"], repo);
+				last = await readText(path.join(repo, file));
+				if (last === expected) return last;
+			}
+			return last;
+		}
+
+		it(
+			"yoinks a file doc into a detached path",
+			async () => {
+				const a = path.join(workRoot, "a");
+				const b = path.join(workRoot, "b");
+				await fs.mkdir(a);
+				await fs.mkdir(b);
+				await fs.writeFile(path.join(a, "note.md"), "hello");
+				await pushwork(["init", ...flags], a);
+				await pushwork(["init", ...flags], b);
+
+				const url = await fileDocUrl(a, "note.md");
+				await pushwork(["yoink", url, "grabbed.md"], b);
+
+				expect(await readText(path.join(b, "grabbed.md"))).toBe("hello");
+			},
+			TEST_TIMEOUT,
+		);
+
+		it(
+			"yoinks to the doc's own name when no path is given",
+			async () => {
+				const a = path.join(workRoot, "a");
+				const b = path.join(workRoot, "b");
+				await fs.mkdir(a);
+				await fs.mkdir(b);
+				await fs.writeFile(path.join(a, "note.md"), "from name");
+				await pushwork(["init", ...flags], a);
+				await pushwork(["init", ...flags], b);
+
+				const url = await fileDocUrl(a, "note.md");
+				await pushwork(["yoink", url], b);
+
+				expect(await readText(path.join(b, "note.md"))).toBe("from name");
+			},
+			TEST_TIMEOUT,
+		);
+
+		it(
+			"yeets a local file into a doc and peers see it",
+			async () => {
+				const a = path.join(workRoot, "a");
+				const b = path.join(workRoot, "b");
+				await fs.mkdir(a);
+				await fs.mkdir(b);
+				await fs.writeFile(path.join(a, "note.md"), "v1");
+				await pushwork(["init", ...flags], a);
+				await pushwork(["init", ...flags], b);
+
+				const url = await fileDocUrl(a, "note.md");
+				await fs.writeFile(path.join(b, "out.md"), "v2 from b");
+				await pushwork(["yeet", "out.md", url], b);
+
+				expect(await waitForText(a, "note.md", "v2 from b")).toBe("v2 from b");
+			},
+			TEST_TIMEOUT,
+		);
+
+		it(
+			"rejects an invalid URL",
+			async () => {
+				const a = path.join(workRoot, "a");
+				await fs.mkdir(a);
+				await pushwork(["init", ...flags], a);
+				await expect(pushwork(["yoink", "not-a-url"], a)).rejects.toThrow();
+			},
+			TEST_TIMEOUT,
+		);
+	});
+
 	describe("default exclusions", () => {
 		it(
 			"does not sync .git or node_modules to a clone",

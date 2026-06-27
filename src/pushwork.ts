@@ -1,6 +1,5 @@
 import * as fs from "fs/promises";
 import * as path from "path";
-import * as Automerge from "@automerge/automerge";
 import {
 	isValidAutomergeUrl,
 	type AutomergeUrl,
@@ -37,7 +36,7 @@ import {
 	type SnarfEntry,
 } from "./snarf.js";
 import {
-	contentEquals,
+	applyFileEntry,
 	contentToBytes,
 	flattenLeaves,
 	isInArtifactDir,
@@ -825,32 +824,13 @@ async function pushFiles(
 			baseUrl = stripHeads(prev.url);
 			unchanged++;
 		} else if (prev) {
-			// Changed path: mutate the existing file doc in place. This keeps
-			// the file URL stable across edits and avoids the propagation
-			// race where a brand-new file doc URL is referenced by the folder
-			// before its bytes have reached the sync server.
-			//
-			// For string content (text files) we use Automerge.updateText so
-			// concurrent character-level edits merge correctly. Bytes and
-			// ImmutableString are atomic — last writer wins on the field.
+			// Changed path: mutate the existing file doc in place (see
+			// applyFileEntry). This keeps the file URL stable across edits and
+			// avoids the propagation race where a brand-new file doc URL is
+			// referenced by the folder before its bytes have reached the server.
 			const refreshUrl = stripHeads(prev.url);
 			const handle = await repo.find<UnixFileEntry>(refreshUrl);
-			handle.change((d: UnixFileEntry) => {
-				if (!contentEquals(d.content, fresh.content)) {
-					if (
-						typeof d.content === "string" &&
-						typeof fresh.content === "string"
-					) {
-						Automerge.updateText(d, ["content"], fresh.content);
-					} else {
-						d.content = fresh.content;
-					}
-				}
-				if (d.extension !== fresh.extension) d.extension = fresh.extension;
-				if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
-				if (d.name !== fresh.name) d.name = fresh.name;
-				if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
-			});
+			applyFileEntry(handle, fresh);
 			baseUrl = refreshUrl;
 			updated++;
 			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
