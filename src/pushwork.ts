@@ -334,6 +334,90 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 	return config.rootUrl;
 }
 
+/**
+ * Pull a single UnixFileEntry doc from `docUrl` and write its content to a
+ * file on disk. Online: fetches the doc from the sync server. `destPath`
+ * (relative to the repo root) overrides where it lands; if omitted, the
+ * doc's own `name` field is used. Detached — the written file is an ordinary
+ * working-tree file, not linked to `docUrl`; a later `save`/`sync` will track
+ * it under a fresh file doc like any other path.
+ */
+export async function yoink(
+	cwd: string,
+	docUrl: string,
+	destPath?: string,
+): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
+	if (!isValidAutomergeUrl(docUrl)) {
+		throw new Error(`invalid automerge URL: ${docUrl}`);
+	}
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
+
+	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	try {
+		const handle = await repo.find<UnixFileEntry>(docUrl);
+		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
+		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
+
+		const rel = destPath ?? entry.name;
+		if (!rel) {
+			throw new Error(
+				`doc ${docUrl} has no name field; pass a destination path`,
+			);
+		}
+		const target = path.resolve(root, fromPosix(rel));
+		if (!target.startsWith(root + path.sep) && target !== root) {
+			throw new Error(`destination escapes the repo: ${rel}`);
+		}
+		await writeFileAtomic(target, bytes);
+		dlog("yoink wrote %s (%d bytes)", target, bytes.length);
+		return { path: path.relative(root, target), bytes: bytes.length, url: handle.url };
+	} finally {
+		await repo.shutdown();
+	}
+}
+
+/**
+ * Push a single file from disk into the UnixFileEntry doc at `docUrl`,
+ * mutating it in place (text content merges via Automerge.updateText; binary
+ * is last-writer-wins). Online: publishes the change to the sync server so
+ * peers holding `docUrl` see it. Detached — `srcPath` is read straight off
+ * disk and need not be tracked by this repo.
+ */
+export async function yeet(
+	cwd: string,
+	srcPath: string,
+	docUrl: string,
+): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
+	if (!isValidAutomergeUrl(docUrl)) {
+		throw new Error(`invalid automerge URL: ${docUrl}`);
+	}
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	const abs = path.resolve(root, fromPosix(srcPath));
+	dlog("yeet src=%s url=%s root=%s", abs, docUrl, root);
+
+	const bytes = new Uint8Array(await fs.readFile(abs));
+	const fresh = makeFileEntry(srcPath.split(path.sep).join("/"), bytes, false);
+
+	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	try {
+		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
+		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
+		applyFileEntry(handle, fresh);
+		await waitForSync(handle as DocHandle<unknown>, {
+			minMs: 3000,
+			idleMs: 1500,
+			maxMs: 15000,
+		});
+		dlog("yeet pushed %s (%d bytes) → %s", abs, bytes.length, handle.url);
+		return { path: srcPath, bytes: bytes.length, url: handle.url };
+	} finally {
+		await repo.shutdown();
+	}
+}
+
 export async function sync(
 	cwd: string,
 	opts: { nuclear?: boolean } = {},

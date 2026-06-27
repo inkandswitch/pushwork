@@ -15,6 +15,8 @@ import {
 	status,
 	sync,
 	url,
+	yeet,
+	yoink,
 } from "./pushwork.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
@@ -220,6 +222,30 @@ program
 	.action(async () => {
 		dlog("url cwd=%s", process.cwd());
 		out.log(await url(process.cwd()));
+	});
+
+program
+	.command("yoink")
+	.description("Pull a single file doc by URL and write it to disk")
+	.argument("<url>", "automerge: URL of a UnixFileEntry doc")
+	.argument("[path]", "Where to write it (defaults to the doc's own name)")
+	.action(async (u, dest) => {
+		dlog("yoink url=%s dest=%s", u, dest);
+		out.task("Yoinking");
+		const result = await yoink(process.cwd(), u, dest);
+		out.done(`yoinked ${result.path} (${plural(result.bytes, "byte")})`);
+	});
+
+program
+	.command("yeet")
+	.description("Push a single file from disk into a file doc by URL")
+	.argument("<path>", "File to read")
+	.argument("<url>", "automerge: URL of the UnixFileEntry doc to overwrite")
+	.action(async (src, u) => {
+		dlog("yeet src=%s url=%s", src, u);
+		out.task("Yeeting");
+		const result = await yeet(process.cwd(), src, u);
+		out.done(`yeeted ${result.path} → ${result.url} (${plural(result.bytes, "byte")})`);
 	});
 
 program

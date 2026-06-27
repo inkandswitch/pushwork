@@ -106,6 +106,8 @@ pushwork diff
 | `pushwork diff [path]` | Show textual diffs of local changes; optionally limit to `path`. |
 | `pushwork url` | Print the `automerge:` URL of this repo. |
 | `pushwork heads [pathspec]` | Print Automerge heads for the root folder and every file doc (offline). |
+| `pushwork yoink <url> [path]` | Pull a single file doc by URL and write it to disk (default path: the doc's own name). |
+| `pushwork yeet <path> <url>` | Push a single file from disk into the file doc at `url`, mutating it in place. |
 | `pushwork migrate [dir]` | Upgrade an older `.pushwork/config.json` to the current format. |
 | `pushwork cut [name]` | Stash working-tree changes and reset the tree to the saved state (offline). |
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
@@ -230,6 +232,26 @@ pushwork snarfs               # list stashes (newest first)
 pushwork paste                # re-apply the most recent stash
 pushwork paste wip-refactor   # or re-apply a specific one by id or name
 ```
+
+## Sharing a single file
+
+`yoink` and `yeet` move one file doc around by URL, independent of any folder
+structure. Find a file's doc URL with `heads`, then pull or push it from
+anywhere:
+
+```sh
+pushwork heads notes/todo.md        # → notes/todo.md  automerge:abcd…  <heads>
+pushwork yoink automerge:abcd        # write that doc to ./todo.md (its own name)
+pushwork yoink automerge:abcd grabbed.md   # …or to an explicit path
+pushwork yeet draft.md automerge:abcd      # overwrite the doc with draft.md
+```
+
+Both run inside an initialized repo (they use its backend and storage) and
+contact the sync server. `yoink` is detached: the file it writes is an
+ordinary working-tree file, not linked back to the source doc — a later `save`
+or `sync` tracks it under a fresh file doc like any other path. `yeet` mutates
+the target doc in place (text merges character-by-character; binary is
+last-writer-wins), so peers holding that URL see the change.
 
 ## Migrating older repos
 
