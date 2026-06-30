@@ -203,6 +203,70 @@ describe("doc shape", () => {
 		});
 	});
 
+	it("patchwork-folder pins artifact-dir folders, not source folders", async () => {
+		await fs.mkdir(path.join(workRoot, "dist"));
+		await fs.mkdir(path.join(workRoot, "src"));
+		await fs.writeFile(path.join(workRoot, "dist", "main.js"), "console.log(1)\n");
+		await fs.writeFile(path.join(workRoot, "src", "app.ts"), "export const x = 1\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "patchwork-folder",
+			online: false,
+			artifactDirectories: ["dist"],
+		});
+
+		const cfg = await readConfig(workRoot);
+
+		type Link = { name: string; type: string; url: `automerge:${string}` };
+		type FolderDoc = { docs: Link[] };
+		const linkByName = (docs: Link[], name: string) => {
+			const l = docs.find((d) => d.name === name);
+			if (!l) throw new Error(`no link named ${name}`);
+			return l;
+		};
+
+		await withRepo(storageOf(workRoot), async (repo) => {
+			const root = await repo.find(cfg.rootUrl);
+			const rootDoc = readDoc(root) as FolderDoc;
+
+			// The artifact dir's folder link carries heads; the source dir's
+			// folder link is bare. The root doc URL itself is never pinned.
+			const distLink = linkByName(rootDoc.docs, "dist");
+			const srcLink = linkByName(rootDoc.docs, "src");
+			expect(distLink.type).toBe("folder");
+			expect(parseAutomergeUrl(distLink.url).heads).toBeTruthy();
+			expect(parseAutomergeUrl(srcLink.url).heads).toBeFalsy();
+			expect(parseAutomergeUrl(cfg.rootUrl).heads).toBeFalsy();
+
+			// Inside each subfolder: the artifact file leaf is pinned, the
+			// source file leaf is not.
+			const distFolder = await repo.find(distLink.url);
+			const mainLink = linkByName(readDoc(distFolder).docs as Link[], "main.js");
+			expect(parseAutomergeUrl(mainLink.url).heads).toBeTruthy();
+
+			const srcFolder = await repo.find(srcLink.url);
+			const appLink = linkByName(readDoc(srcFolder).docs as Link[], "app.ts");
+			expect(parseAutomergeUrl(appLink.url).heads).toBeFalsy();
+		});
+
+		// Re-encoding (e.g. a later save) keeps the artifact folder doc URL
+		// stable: we strip the pin to edit the live doc rather than recreating.
+		const distUrlBefore = await withRepo(storageOf(workRoot), async (repo) => {
+			const root = await repo.find(cfg.rootUrl);
+			return parseAutomergeUrl(
+				linkByName((readDoc(root) as FolderDoc).docs, "dist").url,
+			).documentId;
+		});
+		await save(workRoot);
+		await withRepo(storageOf(workRoot), async (repo) => {
+			const root = await repo.find(cfg.rootUrl);
+			const distLink = linkByName((readDoc(root) as FolderDoc).docs, "dist");
+			expect(parseAutomergeUrl(distLink.url).documentId).toBe(distUrlBefore);
+			expect(parseAutomergeUrl(distLink.url).heads).toBeTruthy();
+		});
+	});
+
 	it("binary files store content as Uint8Array", async () => {
 		const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0xff]);
 		await fs.writeFile(path.join(workRoot, "img.png"), bytes);

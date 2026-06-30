@@ -81,6 +81,33 @@ async function connectedServerPeer(repo: Repo): Promise<string | undefined> {
 	}
 }
 
+// Trim a peer's advertised heads for *display*. The sync server advertises
+// Subduction sedimentree heads (loose-commit + fragment-boundary commit ids),
+// most of which are interior commits we already hold — so the raw list is long
+// and never resembles our Automerge frontier. Drop everything we already hold
+// that isn't a current frontier tip, keeping our tip(s) plus any head we
+// genuinely lack. The result lines up with `handle.heads()` and collapses to it
+// once synced. Display only — the synced verdict still uses the full set.
+function trimSeenHeads<T>(
+	handle: DocHandle<T>,
+	heads: readonly string[],
+): string[] {
+	let frontier: Set<string>;
+	try {
+		frontier = new Set<string>([...handle.heads()]);
+	} catch {
+		return [...heads];
+	}
+	return heads.filter((h) => {
+		if (frontier.has(h)) return true; // our latest shared tip — keep
+		try {
+			return !handle.containsHeads([h] as never); // keep only what we lack
+		} catch {
+			return true; // can't decide → keep
+		}
+	});
+}
+
 // Sleep up to `ms`, but resolve early if `register`'s wake callback fires.
 function sleepOrWake(
 	ms: number,
@@ -171,9 +198,13 @@ export async function waitForServerSync<T>(
 			if (serverPeerId) {
 				const info = handle.getSyncInfo(serverPeerId as never);
 				if (info && info.lastHeads.length > 0) {
-					serverHeads = [...info.lastHeads] as string[];
-					// containsHeads: do we already hold every commit the server has?
+					// The synced verdict uses the FULL advertised set: do we
+					// already hold every commit the server has?
 					synced = localQuiet && handle.containsHeads(info.lastHeads);
+					// For display, trim the sedimentree heads down to our frontier
+					// tip(s) plus anything we genuinely lack, so the reported
+					// server heads line up with localHeads (and match once synced).
+					serverHeads = trimSeenHeads(handle, info.lastHeads);
 				}
 			}
 

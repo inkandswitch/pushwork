@@ -7,6 +7,7 @@ import {
 	type Repo,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
+import { pinUrl, stripHeads } from "./file.js";
 import { newDir, type Shape, type VfsNode } from "./types.js";
 
 const dlog = log("shapes:folder");
@@ -55,6 +56,21 @@ const isPinned = (url: AutomergeUrl): boolean => {
 	}
 };
 
+/**
+ * A folder is "frozen" — i.e. an artifact directory — when it has content and
+ * every link it holds is itself pinned (artifact file leaves carry heads from
+ * `pushFiles`; nested artifact folders are pinned here). Such a folder's link
+ * is pinned with the folder doc's heads so Patchwork sees the whole subtree as
+ * immutable, matching how it represents artifact directories. An empty folder
+ * is never treated as frozen — there's nothing to mark immutable.
+ */
+const isFrozen = (links: DocLink[]): boolean =>
+	links.length > 0 && links.every((l) => isPinned(l.url));
+
+/** The link URL for a freshly synced subfolder: pinned iff it's frozen. */
+const subfolderUrl = (handle: DocHandle<FolderDoc>, frozen: boolean) =>
+	frozen ? pinUrl(handle) : handle.url;
+
 export const patchworkFolderShape: Shape = {
 	async encode({ repo, tree, previousRoot }) {
 		if (tree.kind !== "dir") throw new Error("folder: root must be a dir");
@@ -66,7 +82,9 @@ export const patchworkFolderShape: Shape = {
 			return handle.url;
 		}
 		dlog("encode creating new root");
-		const handle = await createFolder(repo, tree, "pushwork");
+		// The root link is never pinned (callers track the repo by this bare
+		// URL), so we ignore the frozen flag here.
+		const { handle } = await createFolder(repo, tree, "pushwork");
 		dlog("encode new root=%s", handle.url);
 		return handle.url;
 	},
@@ -85,7 +103,7 @@ async function createFolder(
 	repo: Repo,
 	tree: VfsNode,
 	title: string,
-): Promise<DocHandle<FolderDoc>> {
+): Promise<{ handle: DocHandle<FolderDoc>; frozen: boolean }> {
 	if (tree.kind !== "dir") throw new Error("createFolder: not a dir");
 	const links: DocLink[] = [];
 	for (const [name, child] of tree.entries) {
@@ -93,7 +111,11 @@ async function createFolder(
 			links.push({ name, type: linkFileType(name), url: child.url });
 		} else {
 			const sub = await createFolder(repo, child, name);
-			links.push({ name, type: "folder", url: sub.url });
+			links.push({
+				name,
+				type: "folder",
+				url: subfolderUrl(sub.handle, sub.frozen),
+			});
 		}
 	}
 	const handle = repo.create<FolderDoc>({
@@ -102,14 +124,14 @@ async function createFolder(
 		docs: links,
 	});
 	dlog("createFolder title=%s docs=%d url=%s", title, links.length, handle.url);
-	return handle;
+	return { handle, frozen: isFrozen(links) };
 }
 
 async function syncFolder(
 	repo: Repo,
 	handle: DocHandle<FolderDoc>,
 	tree: VfsNode,
-): Promise<void> {
+): Promise<boolean> {
 	if (tree.kind !== "dir") throw new Error("syncFolder: not a dir");
 
 	const desired = new Map<string, VfsNode>(tree.entries);
@@ -124,25 +146,30 @@ async function syncFolder(
 			nextLinks.push({ name, type: linkFileType(name), url: child.url });
 			continue;
 		}
-		// child is a dir. Reuse the existing subfolder doc only if it's a
-		// live, editable folder doc. A subfolder link pinned with heads (an
-		// artifact dir carried over from an old pushwork) resolves to a
-		// view-only handle that throws on `.change()` — in that case we can't
-		// edit it, so destroy that URL and recreate the subfolder fresh.
+		// child is a dir. Reuse the existing subfolder doc so its URL stays
+		// stable across syncs. A subfolder link pinned with heads (our own
+		// artifact dir, or one carried over from an old pushwork) resolves to a
+		// view-only handle that throws on `.change()`, so strip the heads to
+		// get the live, editable doc before syncing into it. We re-derive the
+		// pin below from whether the subtree is still frozen.
 		if (existing && existing.type === "folder") {
-			if (isPinned(existing.url)) {
-				dlog("syncFolder recreating pinned subfolder %s (was %s)", name, existing.url);
-			} else {
-				const subHandle = await repo.find<FolderDoc>(existing.url);
-				if (isFolderDoc(subHandle.doc())) {
-					await syncFolder(repo, subHandle, child);
-					nextLinks.push({ name, type: "folder", url: subHandle.url });
-					continue;
-				}
+			const subHandle = await repo.find<FolderDoc>(stripHeads(existing.url));
+			if (isFolderDoc(subHandle.doc())) {
+				const frozen = await syncFolder(repo, subHandle, child);
+				nextLinks.push({
+					name,
+					type: "folder",
+					url: subfolderUrl(subHandle, frozen),
+				});
+				continue;
 			}
 		}
 		const sub = await createFolder(repo, child, name);
-		nextLinks.push({ name, type: "folder", url: sub.url });
+		nextLinks.push({
+			name,
+			type: "folder",
+			url: subfolderUrl(sub.handle, sub.frozen),
+		});
 	}
 
 	handle.change((d: FolderDoc) => {
@@ -150,6 +177,7 @@ async function syncFolder(
 		if (typeof d.title !== "string") d.title = "pushwork";
 		d.docs = nextLinks;
 	});
+	return isFrozen(nextLinks);
 }
 
 async function readFolder(
