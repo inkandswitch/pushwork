@@ -1,4 +1,5 @@
 import * as fs from "fs/promises";
+import * as os from "os";
 import * as path from "path";
 import {
 	isValidAutomergeUrl,
@@ -17,6 +18,7 @@ import {
 	type PushworkConfig,
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
+import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
 import {
 	shardClone,
@@ -25,7 +27,12 @@ import {
 	shouldShardIngest,
 } from "./ingest-pool.js";
 import { log } from "./log.js";
-import { openRepo, waitForSync } from "./repo.js";
+import {
+	openRepo,
+	waitForSync,
+	waitForServerSync,
+	type SyncSnapshot,
+} from "./repo.js";
 import {
 	appendSnarf,
 	decodeBytes,
@@ -64,8 +71,49 @@ const DEFAULT_ARTIFACT_DIRECTORIES = ["dist"];
 export type Reporter = (phase: string) => void;
 const noReport: Reporter = () => {};
 
-/** Result of init/clone: the root doc URL and how many files it tracks. */
-export type RepoSummary = { url: AutomergeUrl; files: number };
+/** Surfaces a non-fatal warning (e.g. a settings override) to the user. */
+export type Warn = (message: string) => void;
+const noWarn: Warn = () => {};
+
+/** Decides whether a repo-relative posix path is an artifact (stored as an
+ *  immutable, heads-pinned blob rather than a live CRDT doc). */
+type IsArtifact = (posixPath: string) => boolean;
+
+/**
+ * Build the artifact classifier for an operation. A repo-level
+ * `.pushworkattributes` file travels with the repo content, so its `artifact`
+ * rules take precedence over the local `.pushwork/config.json`
+ * `artifactDirectories`. When the attributes file is present *and* the local
+ * config also lists directories, we warn — the local list is being ignored in
+ * favor of the one the repo carries.
+ */
+async function resolveIsArtifact(
+	root: string,
+	configDirs: readonly string[],
+	warn: Warn = noWarn,
+): Promise<IsArtifact> {
+	const attrs = await readAttributes(root);
+	if (attrs?.hasArtifactRules) {
+		if (configDirs.length > 0) {
+			warn(
+				`${ATTRIBUTES_FILE} defines artifact paths and overrides ` +
+					`artifactDirectories [${configDirs.join(", ")}] from .pushwork/config.json`,
+			);
+		}
+		dlog("artifact source: %s", ATTRIBUTES_FILE);
+		return (p) => attrs.isArtifact(p);
+	}
+	dlog("artifact source: config artifactDirectories %o", configDirs);
+	return (p) => isInArtifactDir(p, configDirs);
+}
+
+/** Result of init/clone: the root doc URL, how many files it tracks, and — when
+ * run online — how it stands relative to the sync server (see {@link SyncSnapshot}). */
+export type RepoSummary = {
+	url: AutomergeUrl;
+	files: number;
+	sync?: SyncSnapshot;
+};
 
 export type InitOpts = {
 	dir: string;
@@ -110,6 +158,7 @@ export type Diff = {
 export async function init(
 	opts: InitOpts,
 	report: Reporter = noReport,
+	warn: Warn = noWarn,
 ): Promise<RepoSummary> {
 	const root = path.resolve(opts.dir);
 	const online = opts.online ?? true;
@@ -117,10 +166,23 @@ export async function init(
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	const artifactDirs = normalizeDirs(
-		opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES,
-	);
-	dlog("init artifactDirs=%o", artifactDirs);
+	// A `.pushworkattributes` file already in the working tree is authoritative;
+	// keep config.json's artifactDirectories empty so it never fights the
+	// repo-carried attributes (and never triggers an override warning later).
+	const attrs = await readAttributes(root);
+	if (attrs?.hasArtifactRules && opts.artifactDirectories?.length) {
+		warn(
+			`${ATTRIBUTES_FILE} defines artifact paths; ignoring --artifact-dir ` +
+				`[${opts.artifactDirectories.join(", ")}]`,
+		);
+	}
+	const artifactDirs = attrs?.hasArtifactRules
+		? []
+		: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
+	const isArtifactPath: IsArtifact = attrs?.hasArtifactRules
+		? (p) => attrs.isArtifact(p)
+		: (p) => isInArtifactDir(p, artifactDirs);
+	dlog("init artifactDirs=%o attributes=%s", artifactDirs, Boolean(attrs?.hasArtifactRules));
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
@@ -134,17 +196,20 @@ export async function init(
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
 		const tree = shouldShardIngest(fsFiles.size)
-			? await ingestSharded(repo, root, opts.backend, online, fsFiles, artifactDirs)
-			: await pushFiles(repo, fsFiles, undefined, artifactDirs);
+			? await ingestSharded(repo, root, opts.backend, online, fsFiles, isArtifactPath)
+			: await pushFiles(repo, fsFiles, undefined, isArtifactPath);
 		const folderUrl = await shape.encode({ repo, tree, title });
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
 
+		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Publishing to sync server");
-			await waitForSync(folderHandle, { minMs: 3000, idleMs: 1500, maxMs: 15000 });
 			stampLastSyncAt(folderHandle);
-			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 10000 });
+			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
+				idleMs: 1500,
+				maxMs: 15000,
+			});
 		}
 
 		await writeConfig(root, {
@@ -154,8 +219,8 @@ export async function init(
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 		});
-		dlog("init complete: rootUrl=%s files=%d", folderUrl, fsFiles.size);
-		return { url: folderUrl, files: fsFiles.size };
+		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
+		return { url: folderUrl, files: fsFiles.size, sync };
 	} finally {
 		await repo.shutdown();
 	}
@@ -174,9 +239,6 @@ export async function clone(
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	const artifactDirs = normalizeDirs(
-		opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES,
-	);
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const online = opts.online ?? true;
@@ -224,6 +286,24 @@ export async function clone(
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
 		await materializeTree(repo, root, tree, { backend: opts.backend, online });
 
+		// Now that the tree (including any `.pushworkattributes`) is on disk,
+		// decide what to record locally. If the repo carries its own artifact
+		// attributes, leave config.json's list empty so it defers to them and
+		// never triggers an override warning on later operations.
+		const cloned = await readAttributes(root);
+		const artifactDirs = cloned?.hasArtifactRules
+			? []
+			: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
+
+		// Confirm we hold everything the server has for the root doc before we
+		// declare the clone done, and capture both head sets for reporting.
+		const sync = online
+			? await waitForServerSync(repo, folderHandle, opts.backend, {
+					idleMs: 1500,
+					maxMs: 15000,
+				})
+			: undefined;
+
 		await writeConfig(root, {
 			version: CONFIG_VERSION,
 			rootUrl: storedUrl,
@@ -231,8 +311,8 @@ export async function clone(
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
-		dlog("clone complete files=%d", fileCount);
-		return { url: storedUrl, files: fileCount };
+		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
+		return { url: storedUrl, files: fileCount, sync };
 	} finally {
 		await repo.shutdown();
 	}
@@ -335,26 +415,64 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 }
 
 /**
+ * Resolve the sync backend + storage for the detached `yoink`/`yeet` commands.
+ * These act on a single doc by URL and don't touch the tracked tree, so they
+ * work even outside a pushwork repo — no `.pushwork/config.json` required. When
+ * a config is present its backend and on-disk storage are reused (so a legacy
+ * repo keeps talking to the legacy server, and fetched docs land in the repo's
+ * cache); otherwise we fall back to `backend ?? "subduction"` and an ephemeral
+ * temp storage dir that `cleanup` removes on shutdown. An explicit `backend`
+ * always wins over the config's.
+ */
+async function openDetachedRepo(
+	root: string,
+	backend?: Backend,
+): Promise<{ repo: Repo; backend: Backend; cleanup: () => Promise<void> }> {
+	if (await configExists(root)) {
+		const config = await readConfig(root);
+		const resolved = backend ?? config.backend;
+		const repo = await openRepo(resolved, storageDir(root), {
+			offline: false,
+		});
+		return { repo, backend: resolved, cleanup: () => repo.shutdown() };
+	}
+	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-"));
+	dlog("openDetachedRepo no config; ephemeral storage=%s", tmp);
+	const resolved = backend ?? "subduction";
+	const repo = await openRepo(resolved, tmp, { offline: false });
+	return {
+		repo,
+		backend: resolved,
+		cleanup: async () => {
+			await repo.shutdown();
+			await fs.rm(tmp, { recursive: true, force: true });
+		},
+	};
+}
+
+/**
  * Pull a single UnixFileEntry doc from `docUrl` and write its content to a
  * file on disk. Online: fetches the doc from the sync server. `destPath`
  * (relative to the repo root) overrides where it lands; if omitted, the
  * doc's own `name` field is used. Detached — the written file is an ordinary
  * working-tree file, not linked to `docUrl`; a later `save`/`sync` will track
- * it under a fresh file doc like any other path.
+ * it under a fresh file doc like any other path. Works outside a pushwork repo;
+ * `backend` overrides the sync backend (default: the repo's config, else
+ * subduction).
  */
 export async function yoink(
 	cwd: string,
 	docUrl: string,
 	destPath?: string,
+	backend?: Backend,
 ): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
 	if (!isValidAutomergeUrl(docUrl)) {
 		throw new Error(`invalid automerge URL: ${docUrl}`);
 	}
 	const root = path.resolve(cwd);
-	const config = await readConfig(root);
 	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	const { repo, cleanup } = await openDetachedRepo(root, backend);
 	try {
 		const handle = await repo.find<UnixFileEntry>(docUrl);
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
@@ -374,7 +492,7 @@ export async function yoink(
 		dlog("yoink wrote %s (%d bytes)", target, bytes.length);
 		return { path: path.relative(root, target), bytes: bytes.length, url: handle.url };
 	} finally {
-		await repo.shutdown();
+		await cleanup();
 	}
 }
 
@@ -383,38 +501,47 @@ export async function yoink(
  * mutating it in place (text content merges via Automerge.updateText; binary
  * is last-writer-wins). Online: publishes the change to the sync server so
  * peers holding `docUrl` see it. Detached — `srcPath` is read straight off
- * disk and need not be tracked by this repo.
+ * disk and need not be tracked by this repo. Works outside a pushwork repo;
+ * `backend` overrides the sync backend (default: the repo's config, else
+ * subduction).
  */
 export async function yeet(
 	cwd: string,
 	srcPath: string,
 	docUrl: string,
+	backend?: Backend,
 ): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
 	if (!isValidAutomergeUrl(docUrl)) {
 		throw new Error(`invalid automerge URL: ${docUrl}`);
 	}
 	const root = path.resolve(cwd);
-	const config = await readConfig(root);
 	const abs = path.resolve(root, fromPosix(srcPath));
 	dlog("yeet src=%s url=%s root=%s", abs, docUrl, root);
 
 	const bytes = new Uint8Array(await fs.readFile(abs));
 	const fresh = makeFileEntry(srcPath.split(path.sep).join("/"), bytes, false);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	const { repo, backend: resolvedBackend, cleanup } = await openDetachedRepo(
+		root,
+		backend,
+	);
 	try {
 		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
-		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
+		// Catch up to the server before overwriting, then confirm our write made
+		// it back to the server.
+		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
+			idleMs: 1500,
+			maxMs: 15000,
+		});
 		applyFileEntry(handle, fresh);
-		await waitForSync(handle as DocHandle<unknown>, {
-			minMs: 3000,
+		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
 			idleMs: 1500,
 			maxMs: 15000,
 		});
 		dlog("yeet pushed %s (%d bytes) → %s", abs, bytes.length, handle.url);
 		return { path: srcPath, bytes: bytes.length, url: handle.url };
 	} finally {
-		await repo.shutdown();
+		await cleanup();
 	}
 }
 
@@ -422,15 +549,15 @@ export async function sync(
 	cwd: string,
 	opts: { nuclear?: boolean } = {},
 	report: Reporter = noReport,
-): Promise<void> {
+	warn: Warn = noWarn,
+): Promise<SyncSnapshot | undefined> {
 	if (opts.nuclear) {
 		report("Recreating documents");
-		await nuclearizeRepo(cwd);
+		await nuclearizeRepo(cwd, warn);
 		report("Publishing to sync server");
-		await publishCurrentTree(cwd);
-		return;
+		return await publishCurrentTree(cwd);
 	}
-	await commitWorkdir(cwd, { online: true }, report);
+	return await commitWorkdir(cwd, { online: true }, report, warn);
 }
 
 /**
@@ -439,7 +566,7 @@ export async function sync(
  * settle. No decode/diff/encode — used after nuclearizeRepo, where every doc
  * is freshly created locally and the server has nothing to merge in.
  */
-async function publishCurrentTree(cwd: string): Promise<void> {
+async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	dlog("publish root=%s", root);
@@ -454,12 +581,12 @@ async function publishCurrentTree(cwd: string): Promise<void> {
 			await repo.find<UnixFileEntry>(fileUrl);
 		}
 		stampLastSyncAt(folderHandle);
-		await waitForSync(folderHandle, {
-			minMs: 3000,
+		const sync = await waitForServerSync(repo, folderHandle, config.backend, {
 			idleMs: 1500,
 			maxMs: 15000,
 		});
-		dlog("publish complete");
+		dlog("publish complete synced=%s", sync.synced);
+		return sync;
 	} finally {
 		await repo.shutdown();
 	}
@@ -476,10 +603,18 @@ async function publishCurrentTree(cwd: string): Promise<void> {
  * Anyone holding one of those URLs directly continues to work from it;
  * this client just stops referencing them.
  */
-export async function nuclearizeRepo(cwd: string): Promise<void> {
+export async function nuclearizeRepo(
+	cwd: string,
+	warn: Warn = noWarn,
+): Promise<void> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	dlog("nuclear root=%s rootUrl=%s", root, config.rootUrl);
+	const isArtifactPath = await resolveIsArtifact(
+		root,
+		config.artifactDirectories,
+		warn,
+	);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
@@ -503,7 +638,7 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 				content: oldDoc.content,
 			});
 			let finalUrl: AutomergeUrl = newFileHandle.url;
-			if (isInArtifactDir(posixPath, config.artifactDirectories)) {
+			if (isArtifactPath(posixPath)) {
 				finalUrl = pinUrl(newFileHandle);
 			}
 			setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
@@ -524,18 +659,25 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 export async function save(
 	cwd: string,
 	report: Reporter = noReport,
+	warn: Warn = noWarn,
 ): Promise<void> {
-	await commitWorkdir(cwd, { online: false }, report);
+	await commitWorkdir(cwd, { online: false }, report, warn);
 }
 
 async function commitWorkdir(
 	cwd: string,
 	{ online }: { online: boolean },
 	report: Reporter = noReport,
-): Promise<void> {
+	warn: Warn = noWarn,
+): Promise<SyncSnapshot | undefined> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	dlog("commit online=%s root=%s", online, root);
+	const isArtifactPath = await resolveIsArtifact(
+		root,
+		config.artifactDirectories,
+		warn,
+	);
 
 	const repo = await openRepo(config.backend, storageDir(root), {
 		offline: !online,
@@ -556,7 +698,7 @@ async function commitWorkdir(
 			repo,
 			fsFiles,
 			previousFiles,
-			config.artifactDirectories,
+			isArtifactPath,
 		);
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
@@ -564,10 +706,13 @@ async function commitWorkdir(
 			await shape.encode({ repo, tree: newTree, previousRoot: folderHandle });
 		}
 
+		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
-			await waitForSync(folderHandle, {
-				minMs: 3000,
+			// First catch up to the server (we hold everything it advertises)
+			// before refreshing pins, so pinned leaves capture each file doc's
+			// post-merge heads.
+			await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: 15000,
 			});
@@ -579,14 +724,14 @@ async function commitWorkdir(
 				repo,
 				folderHandle,
 				shape,
-				config.artifactDirectories,
+				isArtifactPath,
 			);
 
 			// Always stamp lastSyncAt — a sync is also a checkpoint that
-			// "we reconciled with the server at this time" — and let any
-			// resulting changes flush.
+			// "we reconciled with the server at this time" — and re-confirm the
+			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
-			await waitForSync(folderHandle, {
+			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : 5000,
 			});
@@ -595,7 +740,8 @@ async function commitWorkdir(
 		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
 		await materializeTree(repo, root, finalTree);
-		dlog("commit complete");
+		dlog("commit complete synced=%s", sync?.synced);
+		return sync;
 	} finally {
 		await repo.shutdown();
 	}
@@ -889,7 +1035,7 @@ async function pushFiles(
 	repo: Repo,
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
-	artifactDirs: readonly string[],
+	isArtifactPath: IsArtifact,
 ): Promise<VfsNode> {
 	const root = newDir();
 	let created = 0;
@@ -897,7 +1043,7 @@ async function pushFiles(
 	let unchanged = 0;
 	for (const [posixPath, bytes] of fsFiles) {
 		const segments = posixPath.split("/").filter(Boolean);
-		const isArtifact = isInArtifactDir(posixPath, artifactDirs);
+		const isArtifact = isArtifactPath(posixPath);
 		const fresh = makeFileEntry(posixPath, bytes, isArtifact);
 		const prev = previous?.get(posixPath);
 
@@ -948,14 +1094,14 @@ async function ingestSharded(
 	backend: Backend,
 	online: boolean,
 	fsFiles: Map<string, Uint8Array>,
-	artifactDirs: readonly string[],
+	isArtifactPath: IsArtifact,
 ): Promise<VfsNode> {
 	const { created, failed } = await shardIngest({
 		root,
 		backend,
 		online,
 		files: fsFiles,
-		artifactDirs,
+		isArtifact: isArtifactPath,
 	});
 
 	const tree = newDir();
@@ -966,7 +1112,7 @@ async function ingestSharded(
 	for (const posixPath of failed) {
 		const bytes = fsFiles.get(posixPath);
 		if (!bytes) continue;
-		const isArtifact = isInArtifactDir(posixPath, artifactDirs);
+		const isArtifact = isArtifactPath(posixPath);
 		const handle = repo.create<UnixFileEntry>(
 			makeFileEntry(posixPath, bytes, isArtifact),
 		);
@@ -987,7 +1133,7 @@ async function refreshFolderPins(
 	repo: Repo,
 	folderHandle: DocHandle<unknown>,
 	shape: Shape,
-	artifactDirs: readonly string[],
+	isArtifactPath: IsArtifact,
 ): Promise<boolean> {
 	const tree = await shape.decode({ repo, root: folderHandle });
 	const refreshed = newDir();
@@ -995,7 +1141,7 @@ async function refreshFolderPins(
 	for (const [posixPath, currentUrl] of flattenLeaves(tree)) {
 		const segments = posixPath.split("/").filter(Boolean);
 		let finalUrl: AutomergeUrl = currentUrl;
-		if (isInArtifactDir(posixPath, artifactDirs)) {
+		if (isArtifactPath(posixPath)) {
 			const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
 			const repinned = pinUrl(handle);
 			if (repinned !== currentUrl) {

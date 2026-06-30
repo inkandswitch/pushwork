@@ -49,7 +49,10 @@ async function exists(p: string): Promise<boolean> {
 	}
 }
 
-const SOME_URL = "automerge:2j7Vn8Xy9kZ4qP1aBcDeFgHiJkLm";
+// A real, well-formed automerge URL: automerge-repo@subduction.37 tightened
+// parseAutomergeUrl to reject document ids that aren't valid base58check, so
+// this fixture must round-trip through the strict parser (readConfig/stripHeads).
+const SOME_URL = "automerge:XoQnpXDDPXEtRVPhdQruLDVRduB";
 
 // An original-pushwork ("main") DirectoryConfig.
 const mainConfig = (over: RawConfig = {}): RawConfig => ({

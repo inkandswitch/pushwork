@@ -23,7 +23,6 @@ import {
 } from "@automerge/automerge-repo";
 import type { Backend } from "./config.js";
 import { log } from "./log.js";
-import { isInArtifactDir } from "./shapes/index.js";
 import type {
 	ShardIngestData,
 	ShardIngestReport,
@@ -132,7 +131,7 @@ export type ShardIngestOpts = {
 	backend: Backend;
 	online: boolean;
 	files: Map<string, Uint8Array>;
-	artifactDirs: readonly string[];
+	isArtifact: (posixPath: string) => boolean;
 };
 
 /**
@@ -147,7 +146,7 @@ export async function shardIngest(
 	const tasks: ShardIngestTask[] = Array.from(opts.files, ([relPath, bytes]) => ({
 		relPath,
 		bytes,
-		isArtifact: isInArtifactDir(relPath, opts.artifactDirs),
+		isArtifact: opts.isArtifact(relPath),
 	}));
 	const n = workerCount(tasks.length);
 	dlog("shardIngest files=%d workers=%d online=%s", tasks.length, n, opts.online);

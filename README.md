@@ -202,11 +202,34 @@ tmp/
 
 ### Artifact directories
 
-Files inside an _artifact directory_ (default: `dist`) are treated as build
-output: their content is stored as an immutable string and their doc URL is
-_pinned_ to a specific set of heads, so consumers reference an exact snapshot
-rather than a moving target. Configure with `--artifact-dir <dir>` (repeatable)
-at `init`/`clone` time.
+Files marked as _artifacts_ are treated as build output: their content is
+stored as an immutable string and their doc URL is _pinned_ to a specific set
+of heads, so consumers reference an exact snapshot rather than a moving target.
+By default the `dist` directory is an artifact directory; configure the default
+list with `--artifact-dir <dir>` (repeatable) at `init`/`clone` time, which is
+recorded in `.pushwork/config.json` (local to your checkout).
+
+#### `.pushworkattributes` (travels with the repo)
+
+`--artifact-dir` only configures _your_ checkout. To make artifact rules travel
+with the repo so every collaborator agrees, add a `.pushworkattributes` file at
+the repo root. It's an ordinary tracked file (synced like any other content)
+modeled on `.gitattributes`, and a sibling to `.pushworkignore`:
+
+```gitattributes
+# .pushworkattributes
+dist/**     artifact
+build/**    artifact
+*.wasm      artifact
+vendored/   -artifact     # negate a default; last matching rule wins
+```
+
+Each line is `<glob> <attr>...` (blank lines and `#` comments ignored).
+Patterns are gitignore-style globs; the only attribute today is `artifact`
+(`-artifact` unsets it). When a `.pushworkattributes` file is present, its
+`artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`,
+and pushwork warns when the two disagree so a stale local config can't silently
+diverge from the repo.
 
 ## Document shapes
 

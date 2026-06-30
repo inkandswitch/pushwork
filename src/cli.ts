@@ -20,7 +20,7 @@ import {
 } from "./pushwork.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
-import { legacyUrl, subductionUrl } from "./repo.js";
+import { legacyUrl, subductionUrl, type SyncSnapshot } from "./repo.js";
 import { formatVersions } from "./version.js";
 import { migrate, versionLabel } from "./migrations.js";
 
@@ -40,13 +40,59 @@ const collect = (value: string, prev: string[] | undefined) =>
 const backendOf = (opts: { sub?: boolean; legacy?: boolean }) =>
 	opts.legacy || opts.sub === false ? "legacy" : "subduction";
 
+// Like `backendOf` but returns undefined when no flag is given, so callers can
+// fall back to the repo's config (or their own default) instead of forcing
+// subduction.
+const backendOverrideOf = (opts: { sub?: boolean; legacy?: boolean }) =>
+	opts.legacy || opts.sub === false ? ("legacy" as const) : undefined;
+
 const endpointOf = (backend: "legacy" | "subduction") =>
 	backend === "legacy" ? legacyUrl() : subductionUrl();
 
 const report = (phase: string) => out.step(phase);
 
+// Warnings raised mid-operation are buffered and flushed *after* the result
+// line: emitting one immediately clears the active spinner, which would
+// otherwise swallow the command's completion ("saved", the summary, etc.).
+const warnings: string[] = [];
+const warn = (message: string) => {
+	warnings.push(message);
+};
+const flushWarnings = () => {
+	for (const w of warnings) out.warn(w);
+	warnings.length = 0;
+};
+
 const plural = (n: number, one: string, many = one + "s") =>
 	`${n} ${n === 1 ? one : many}`;
+
+const fmtHeads = (heads: string[]) => (heads.length ? heads.join(" ") : "(none)");
+
+/**
+ * Render where the root doc stands relative to the sync server: our own
+ * Automerge heads and the heads the server last advertised. When synced, we
+ * hold every commit the server has (see waitForServerSync) — the two sets are
+ * the same history even though the server's Subduction sedimentree heads need
+ * not be string-identical to our Automerge frontier.
+ */
+function reportSync(sync: SyncSnapshot | undefined): void {
+	if (!sync) return;
+	if (out.isPorcelain) {
+		out.log(`sync\t${sync.synced ? "synced" : sync.connected ? "behind" : "offline"}`);
+		out.log(`root\t${sync.url}\t${sync.localHeads.join(" ")}`);
+		out.log(`server\t${sync.serverPeerId ?? ""}\t${sync.serverHeads.join(" ")}`);
+		return;
+	}
+	out.block(
+		sync.synced ? "SYNCED" : sync.connected ? "NOT SYNCED" : "OFFLINE",
+	);
+	out.obj({
+		"root doc": sync.url,
+		"root heads": fmtHeads(sync.localHeads),
+		"sync server": sync.serverPeerId ?? "(not connected)",
+		"server heads": fmtHeads(sync.serverHeads),
+	});
+}
 
 async function pickBranchInteractively(info: {
 	title?: string;
@@ -139,6 +185,7 @@ program
 		const info = await init(
 			{ dir: root, backend, shape: opts.shape, artifactDirectories: opts.artifactDir },
 			report,
+			warn,
 		);
 		out.done(); // complete the final phase line before the summary
 		out.obj({
@@ -148,7 +195,9 @@ program
 			Sync: endpointOf(backend),
 		});
 		out.block("INITIALIZED", info.url);
+		reportSync(info.sync);
 		out.outro("Done");
+		flushWarnings();
 	});
 
 program
@@ -195,6 +244,7 @@ program
 			Sync: endpointOf(backend),
 		});
 		out.block("CLONED", info.url);
+		reportSync(info.sync);
 		out.outro("Done");
 	});
 
@@ -229,10 +279,11 @@ program
 	.description("Pull a single file doc by URL and write it to disk")
 	.argument("<url>", "automerge: URL of a UnixFileEntry doc")
 	.argument("[path]", "Where to write it (defaults to the doc's own name)")
-	.action(async (u, dest) => {
+	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.action(async (u, dest, opts) => {
 		dlog("yoink url=%s dest=%s", u, dest);
 		out.task("Yoinking");
-		const result = await yoink(process.cwd(), u, dest);
+		const result = await yoink(process.cwd(), u, dest, backendOverrideOf(opts));
 		out.done(`yoinked ${result.path} (${plural(result.bytes, "byte")})`);
 	});
 
@@ -241,10 +292,11 @@ program
 	.description("Push a single file from disk into a file doc by URL")
 	.argument("<path>", "File to read")
 	.argument("<url>", "automerge: URL of the UnixFileEntry doc to overwrite")
-	.action(async (src, u) => {
+	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.action(async (src, u, opts) => {
 		dlog("yeet src=%s url=%s", src, u);
 		out.task("Yeeting");
-		const result = await yeet(process.cwd(), src, u);
+		const result = await yeet(process.cwd(), src, u, backendOverrideOf(opts));
 		out.done(`yeeted ${result.path} → ${result.url} (${plural(result.bytes, "byte")})`);
 	});
 
@@ -259,8 +311,11 @@ program
 		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
 		out.intro(opts.nuclear ? "pushwork sync --nuclear" : "pushwork sync");
 		out.task("Connecting to sync server");
-		await sync(process.cwd(), { nuclear: opts.nuclear }, report);
+		const snapshot = await sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
+		out.done(); // complete the final phase line before the summary
+		reportSync(snapshot);
 		out.outro(opts.nuclear ? "nuclear synced" : "synced");
+		flushWarnings();
 	});
 
 program
@@ -270,8 +325,9 @@ program
 	.action(async () => {
 		dlog("save cwd=%s", process.cwd());
 		out.task("Saving");
-		await save(process.cwd());
+		await save(process.cwd(), undefined, warn);
 		out.done("saved");
+		flushWarnings();
 	});
 
 program

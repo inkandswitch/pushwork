@@ -1,6 +1,7 @@
 import {
 	Repo,
 	initSubduction,
+	type AutomergeUrl,
 	type DocHandle,
 	type NetworkAdapterInterface,
 } from "@automerge/automerge-repo";
@@ -48,6 +49,173 @@ export async function openRepo(
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Where a document stands relative to the Subduction sync server. Returned by
+ * {@link waitForServerSync}; the CLI renders the two head sets so you can see at
+ * a glance that your repo and the server agree.
+ */
+export type SyncSnapshot = {
+	/** The document this snapshot describes (the root folder doc, for `sync`). */
+	url: AutomergeUrl;
+	/** True once we hold every commit the sync server last advertised for the doc. */
+	synced: boolean;
+	/** Whether the repo currently has a live Subduction connection to a server. */
+	connected: boolean;
+	/** The sync server's peer id (its verifying key), once the handshake is done. */
+	serverPeerId?: string;
+	/** Our current Automerge heads for the doc. */
+	localHeads: string[];
+	/** The heads the server last advertised for the doc (Subduction sedimentree heads). */
+	serverHeads: string[];
+};
+
+// The connected sync-server peer id (its verifying key), or undefined while the
+// handshake is still in flight / there is no Subduction connection at all.
+async function connectedServerPeer(repo: Repo): Promise<string | undefined> {
+	if (!repo.isSubductionConnected()) return undefined;
+	try {
+		return (await repo.connectedSubductionPeerIds())[0];
+	} catch {
+		return undefined; // no Subduction source
+	}
+}
+
+// Sleep up to `ms`, but resolve early if `register`'s wake callback fires.
+function sleepOrWake(
+	ms: number,
+	register: (wake: () => void) => void,
+): Promise<void> {
+	return new Promise((resolve) => {
+		const t = setTimeout(resolve, ms);
+		register(() => {
+			clearTimeout(t);
+			resolve();
+		});
+	});
+}
+
+/**
+ * Wait until `handle` is in sync with the Subduction sync server, judging
+ * "synced" against the *server's* advertised heads rather than a local-settle
+ * heuristic.
+ *
+ * The server advertises Subduction sedimentree heads (loose-commit and
+ * fragment-boundary commit ids), which are NOT the Automerge frontier — so we
+ * never compare them to `handle.heads()` for equality. Instead we ask whether we
+ * already hold every commit the server advertises (`DocHandle.containsHeads`): if
+ * we do, there is nothing left to pull, so we are caught up. This is
+ * pull-completeness only — per Automerge's own note a peer can hold our latest
+ * change inside a compacted fragment, so head comparison can't confirm the push
+ * direction; we additionally gate on a brief local-heads settle so our own edit
+ * has flushed before we trust the result.
+ *
+ * On the legacy backend there is no Subduction peer to hear from, so this falls
+ * back to {@link waitForSync} and reports connected=false with empty serverHeads.
+ */
+export async function waitForServerSync<T>(
+	repo: Repo,
+	handle: DocHandle<T>,
+	backend: Backend,
+	{
+		idleMs = 1500,
+		maxMs = 15000,
+		pollMs = 200,
+		resyncAfterMs = 6000,
+	}: { idleMs?: number; maxMs?: number; pollMs?: number; resyncAfterMs?: number } = {},
+): Promise<SyncSnapshot> {
+	const headsOf = () => [...(handle.heads() ?? [])] as string[];
+
+	// Legacy backend never speaks Subduction: there are no server heads to
+	// compare against, so settle locally and report what little we can.
+	if (backend !== "subduction") {
+		await waitForSync(handle, { idleMs, maxMs });
+		return {
+			url: handle.url,
+			synced: true,
+			connected: false,
+			localHeads: headsOf(),
+			serverHeads: [],
+		};
+	}
+
+	const documentId = handle.documentId;
+	dlog("waitForServerSync url=%s idleMs=%d maxMs=%d", handle.url, idleMs, maxMs);
+
+	// Wake the poll loop the instant the server advertises new heads for this doc
+	// (otherwise we just notice on the next poll tick).
+	let wake: (() => void) | null = null;
+	const onRemoteHeads = (p: { documentId: string }) => {
+		if (p.documentId === documentId) wake?.();
+	};
+	repo.on("subduction-remote-heads", onRemoteHeads);
+
+	const start = Date.now();
+	let lastHeads = JSON.stringify(handle.heads());
+	let lastHeadsChange = start;
+	let resynced = false;
+
+	try {
+		for (;;) {
+			const now = Date.now();
+			const cur = JSON.stringify(handle.heads());
+			if (cur !== lastHeads) {
+				lastHeads = cur;
+				lastHeadsChange = now;
+			}
+			const localQuiet = now - lastHeadsChange >= idleMs;
+
+			const serverPeerId = await connectedServerPeer(repo);
+			let serverHeads: string[] = [];
+			let synced = false;
+			if (serverPeerId) {
+				const info = handle.getSyncInfo(serverPeerId as never);
+				if (info && info.lastHeads.length > 0) {
+					serverHeads = [...info.lastHeads] as string[];
+					// containsHeads: do we already hold every commit the server has?
+					synced = localQuiet && handle.containsHeads(info.lastHeads);
+				}
+			}
+
+			if (synced || now - start >= maxMs) {
+				dlog(
+					"waitForServerSync %s url=%s elapsed=%dms",
+					synced ? "synced" : "timed out",
+					handle.url,
+					now - start,
+				);
+				return {
+					url: handle.url,
+					synced,
+					connected: repo.isSubductionConnected(),
+					serverPeerId,
+					localHeads: headsOf(),
+					serverHeads,
+				};
+			}
+
+			// Behind for a while and the scheduler isn't catching us up — re-arm a
+			// single fresh sync round (the technique's stuck-doc nudge, without the
+			// full per-doc exponential backoff a long-lived client would keep).
+			if (!resynced && serverPeerId && now - start >= resyncAfterMs) {
+				dlog("waitForServerSync nudging resync url=%s", handle.url);
+				try {
+					repo.resyncSubduction(documentId);
+				} catch {
+					// no Subduction source / doc not attached
+				}
+				resynced = true;
+			}
+
+			await sleepOrWake(pollMs, (fn) => {
+				wake = fn;
+			});
+			wake = null;
+		}
+	} finally {
+		repo.off("subduction-remote-heads", onRemoteHeads);
+	}
+}
 
 export async function waitForSync<T>(
 	handle: DocHandle<T>,

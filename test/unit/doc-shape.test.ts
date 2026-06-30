@@ -166,6 +166,43 @@ describe("doc shape", () => {
 		});
 	});
 
+	it(".pushworkattributes overrides the default artifact dirs", async () => {
+		// Default behavior pins `dist/`. Here we override via the repo-carried
+		// attributes file: pin `out/` instead, and explicitly un-pin `dist/`.
+		await fs.mkdir(path.join(workRoot, "dist"));
+		await fs.mkdir(path.join(workRoot, "out"));
+		await fs.writeFile(path.join(workRoot, "dist", "main.js"), "console.log(1)\n");
+		await fs.writeFile(path.join(workRoot, "out", "bundle.js"), "console.log(2)\n");
+		await fs.writeFile(
+			path.join(workRoot, ".pushworkattributes"),
+			["out/**  artifact", "dist/** -artifact"].join("\n") + "\n",
+		);
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "vfs",
+			online: false,
+			// Passed but ignored: the attributes file is authoritative.
+			artifactDirectories: ["dist"],
+		});
+
+		// config.json defers to the attributes file (stored list left empty).
+		const cfg = await readConfig(workRoot);
+		expect(cfg.artifactDirectories).toEqual([]);
+
+		await withRepo(storageOf(workRoot), async (repo) => {
+			const folder = await repo.find(cfg.rootUrl);
+			const folderDoc = readDoc(folder) as Record<string, unknown>;
+			// out/ is pinned (heads present); dist/ is not.
+			expect(
+				parseAutomergeUrl(folderDoc["out/bundle.js"] as string).heads,
+			).toBeTruthy();
+			expect(
+				parseAutomergeUrl(folderDoc["dist/main.js"] as string).heads,
+			).toBeFalsy();
+		});
+	});
+
 	it("binary files store content as Uint8Array", async () => {
 		const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0xff]);
 		await fs.writeFile(path.join(workRoot, "img.png"), bytes);
