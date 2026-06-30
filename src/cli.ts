@@ -88,8 +88,8 @@ function reportSync(sync: SyncSnapshot | undefined): void {
 	);
 	out.obj({
 		"root doc": sync.url,
-		"root heads": fmtHeads(sync.localHeads),
 		"sync server": sync.serverPeerId ?? "(not connected)",
+		"root heads": fmtHeads(sync.localHeads),
 		"server heads": fmtHeads(sync.serverHeads),
 	});
 }
