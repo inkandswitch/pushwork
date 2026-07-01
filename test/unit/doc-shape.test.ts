@@ -267,6 +267,40 @@ describe("doc shape", () => {
 		});
 	});
 
+	it("patchwork-folder pins only the configured artifact dir, not its parent", async () => {
+		// artifactDirectories = ["a/b"]. The parent `a` holds nothing but the
+		// artifact subdir `a/b`, so an all-children-pinned heuristic would wrongly
+		// freeze `a`. Driven by the classifier, only `a/b` is pinned.
+		await fs.mkdir(path.join(workRoot, "a", "b"), { recursive: true });
+		await fs.writeFile(path.join(workRoot, "a", "b", "x.js"), "x\n");
+		await init({
+			dir: workRoot,
+			backend: "subduction",
+			shape: "patchwork-folder",
+			online: false,
+			artifactDirectories: ["a/b"],
+		});
+		const cfg = await readConfig(workRoot);
+
+		type Link = { name: string; type: string; url: `automerge:${string}` };
+		type FolderDoc = { docs: Link[] };
+		const linkByName = (docs: Link[], name: string) => {
+			const l = docs.find((d) => d.name === name);
+			if (!l) throw new Error(`no link named ${name}`);
+			return l;
+		};
+
+		await withRepo(storageOf(workRoot), async (repo) => {
+			const root = await repo.find(cfg.rootUrl);
+			const aLink = linkByName((readDoc(root) as FolderDoc).docs, "a");
+			expect(parseAutomergeUrl(aLink.url).heads).toBeFalsy();
+
+			const aFolder = await repo.find(aLink.url);
+			const bLink = linkByName((readDoc(aFolder) as FolderDoc).docs, "b");
+			expect(parseAutomergeUrl(bLink.url).heads).toBeTruthy();
+		});
+	});
+
 	it("binary files store content as Uint8Array", async () => {
 		const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0xff]);
 		await fs.writeFile(path.join(workRoot, "img.png"), bytes);

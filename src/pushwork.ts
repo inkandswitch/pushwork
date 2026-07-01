@@ -198,7 +198,12 @@ export async function init(
 		const tree = shouldShardIngest(fsFiles.size)
 			? await ingestSharded(repo, root, opts.backend, online, fsFiles, isArtifactPath)
 			: await pushFiles(repo, fsFiles, undefined, isArtifactPath);
-		const folderUrl = await shape.encode({ repo, tree, title });
+		const folderUrl = await shape.encode({
+			repo,
+			tree,
+			title,
+			isArtifactDir: isArtifactPath,
+		});
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
 
@@ -650,6 +655,7 @@ export async function nuclearizeRepo(
 			tree: newTree,
 			previousRoot: folderHandle,
 			title,
+			isArtifactDir: isArtifactPath,
 		});
 	} finally {
 		await repo.shutdown();
@@ -703,7 +709,12 @@ async function commitWorkdir(
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
 		if (changed) {
-			await shape.encode({ repo, tree: newTree, previousRoot: folderHandle });
+			await shape.encode({
+				repo,
+				tree: newTree,
+				previousRoot: folderHandle,
+				isArtifactDir: isArtifactPath,
+			});
 		}
 
 		let sync: SyncSnapshot | undefined;
@@ -1153,7 +1164,12 @@ async function refreshFolderPins(
 	}
 	if (changed) {
 		dlog("refreshFolderPins: re-pinned artifacts to current heads");
-		await shape.encode({ repo, tree: refreshed, previousRoot: folderHandle });
+		await shape.encode({
+			repo,
+			tree: refreshed,
+			previousRoot: folderHandle,
+			isArtifactDir: isArtifactPath,
+		});
 	}
 	return changed;
 }

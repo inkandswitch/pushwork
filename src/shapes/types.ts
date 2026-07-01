@@ -23,6 +23,13 @@ export interface Shape {
 		tree: VfsNode;
 		previousRoot?: DocHandle<unknown>;
 		title?: string;
+		/**
+		 * Classifies a repo-relative posix *directory* path as an artifact
+		 * directory (immutable, heads-pinned). Shapes that represent directories
+		 * as their own docs (e.g. patchwork-folder) pin those folder links so
+		 * the whole subtree reads as frozen. Omitted ⇒ no folder is pinned.
+		 */
+		isArtifactDir?: (posixPath: string) => boolean;
 	}): Promise<AutomergeUrl>;
 	decode(args: {
 		repo: Repo;
