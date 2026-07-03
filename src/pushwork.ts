@@ -29,8 +29,11 @@ import {
 import { log } from "./log.js";
 import {
 	openRepo,
+	safeShutdown,
+	waitForConnection,
 	waitForSync,
 	waitForServerSync,
+	type Connection,
 	type SyncSnapshot,
 } from "./repo.js";
 import {
@@ -186,6 +189,8 @@ export async function init(
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
+	// Start measuring the connection now so the local walk/encode overlaps it.
+	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		const shape = await resolveShape(opts.shape);
 		const ig = await loadIgnore(root);
@@ -209,7 +214,9 @@ export async function init(
 
 		let sync: SyncSnapshot | undefined;
 		if (online) {
-			report("Publishing to sync server");
+			report(
+				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
+			);
 			stampLastSyncAt(folderHandle);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
@@ -224,10 +231,11 @@ export async function init(
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
 		return { url: folderUrl, files: fsFiles.size, sync };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -248,6 +256,7 @@ export async function clone(
 
 	const online = opts.online ?? true;
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
+	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		report("Fetching repository");
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
@@ -316,10 +325,11 @@ export async function clone(
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
 		return { url: storedUrl, files: fileCount, sync };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -439,7 +449,7 @@ async function openDetachedRepo(
 		const repo = await openRepo(resolved, storageDir(root), {
 			offline: false,
 		});
-		return { repo, backend: resolved, cleanup: () => repo.shutdown() };
+		return { repo, backend: resolved, cleanup: () => safeShutdown(repo) };
 	}
 	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-"));
 	dlog("openDetachedRepo no config; ephemeral storage=%s", tmp);
@@ -449,7 +459,7 @@ async function openDetachedRepo(
 		repo,
 		backend: resolved,
 		cleanup: async () => {
-			await repo.shutdown();
+			await safeShutdown(repo);
 			await fs.rm(tmp, { recursive: true, force: true });
 		},
 	};
@@ -577,6 +587,7 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 	dlog("publish root=%s", root);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	const connWait = waitForConnection(repo, config.backend);
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -590,10 +601,11 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 			idleMs: 1500,
 			maxMs: 15000,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("publish complete synced=%s", sync.synced);
 		return sync;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -658,7 +670,7 @@ export async function nuclearizeRepo(
 			isArtifactDir: isArtifactPath,
 		});
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -688,6 +700,7 @@ async function commitWorkdir(
 	const repo = await openRepo(config.backend, storageDir(root), {
 		offline: !online,
 	});
+	const connWait = online ? waitForConnection(repo, config.backend) : undefined;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -720,41 +733,45 @@ async function commitWorkdir(
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
-			// First catch up to the server (we hold everything it advertises)
-			// before refreshing pins, so pinned leaves capture each file doc's
-			// post-merge heads.
-			await waitForServerSync(repo, folderHandle, config.backend, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
+			// Only artifact (pinned) leaves need a pre-refresh catch-up (to pin to
+			// the server's merged heads). No artifacts → the single confirm-wait
+			// below both pulls peer changes and pushes our stamp.
+			const hasArtifacts = [...flattenLeaves(newTree).keys()].some(isArtifactPath);
 
-			// After peer changes have settled, refresh the folder doc so its
-			// pinned (artifact) leaves reference each file doc's current
-			// heads. Bare URLs already track current heads implicitly.
-			const refreshed = await refreshFolderPins(
-				repo,
-				folderHandle,
-				shape,
-				isArtifactPath,
-			);
+			let refreshed = false;
+			if (hasArtifacts) {
+				// Catch up so the re-pin captures each file doc's post-merge heads.
+				await waitForServerSync(repo, folderHandle, config.backend, {
+					idleMs: 1500,
+					maxMs: 15000,
+				});
+				// Bare URLs already track current heads implicitly; only pins move.
+				refreshed = await refreshFolderPins(
+					repo,
+					folderHandle,
+					shape,
+					isArtifactPath,
+				);
+			}
 
 			// Always stamp lastSyncAt — a sync is also a checkpoint that
-			// "we reconciled with the server at this time" — and re-confirm the
+			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
-				maxMs: refreshed ? 10000 : 5000,
+				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
 		}
 
 		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
 		await materializeTree(repo, root, finalTree);
+		await attachConnectMs(sync, connWait);
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -809,7 +826,7 @@ export async function heads(
 		out.sort((a, b) => a.path.localeCompare(b.path));
 		return out;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -838,7 +855,7 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 		const diff = computeDiff(previousFiles, fsFiles);
 		return { diff };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -875,7 +892,7 @@ export async function diff(
 		}
 		return out;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -934,7 +951,7 @@ export async function cutWorkdir(
 		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
 		return { id: snarf.id, entries: entries.length };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -966,7 +983,7 @@ export async function pasteSnarf(
 			);
 		}
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 
 	const snarf = await takeSnarf(root, selector);
@@ -1007,6 +1024,22 @@ function stampLastSyncAt(handle: DocHandle<unknown>): void {
 	(handle as DocHandle<Stamped>).change((d: Stamped) => {
 		d.lastSyncAt = Date.now();
 	});
+}
+
+/**
+ * Await the connection probe started at repo-open and stamp its measured connect
+ * time (and any server peer id) onto the sync snapshot.
+ */
+async function attachConnectMs(
+	sync: SyncSnapshot | undefined,
+	connWait: Promise<Connection> | undefined,
+): Promise<void> {
+	if (!connWait) return;
+	const conn = await connWait;
+	if (sync) {
+		sync.connectMs = conn.connectMs;
+		if (sync.serverPeerId == null) sync.serverPeerId = conn.serverPeerId;
+	}
 }
 
 function normalizeDirs(dirs: readonly string[]): string[] {
