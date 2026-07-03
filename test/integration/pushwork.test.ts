@@ -23,6 +23,7 @@ import { promisify } from "util";
 
 const execFileP = promisify(execFile);
 const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
+const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 const TEST_TIMEOUT = 120_000;
 
@@ -125,7 +126,7 @@ async function syncUntilConverged(
 
 beforeAll(async () => {
 	// Build once for the entire suite.
-	await execFileP("pnpm", ["build"], {
+	await execFileP(PNPM, ["build"], {
 		cwd: path.join(__dirname, "..", ".."),
 		timeout: 120_000,
 	});

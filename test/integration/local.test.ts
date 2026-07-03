@@ -14,6 +14,7 @@ import { promisify } from "util";
 
 const execFileP = promisify(execFile);
 const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
+const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 const TEST_TIMEOUT = 60_000;
 
@@ -46,7 +47,7 @@ async function readText(p: string): Promise<string> {
 }
 
 beforeAll(async () => {
-	await execFileP("pnpm", ["build"], {
+	await execFileP(PNPM, ["build"], {
 		cwd: path.join(__dirname, "..", ".."),
 		timeout: 120_000,
 	});

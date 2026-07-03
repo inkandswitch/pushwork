@@ -20,6 +20,18 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
+function withFlushingShutdown(repo: Repo): Repo {
+	const shutdown = repo.shutdown.bind(repo);
+	repo.shutdown = async () => {
+		try {
+			await repo.flush();
+		} finally {
+			await shutdown();
+		}
+	};
+	return repo;
+}
+
 export async function openRepo(
 	backend: Backend,
 	storageDir: string,
@@ -29,7 +41,7 @@ export async function openRepo(
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
 	if (opts.offline) {
-		return new Repo({ storage, network: [] });
+		return withFlushingShutdown(new Repo({ storage, network: [] }));
 	}
 	if (backend === "legacy") {
 		const endpoint = legacyUrl();
@@ -37,15 +49,17 @@ export async function openRepo(
 		const adapter = new WebSocketClientAdapter(
 			endpoint,
 		) as unknown as NetworkAdapterInterface;
-		return new Repo({ storage, network: [adapter] });
+		return withFlushingShutdown(new Repo({ storage, network: [adapter] }));
 	}
 	const endpoint = subductionUrl();
 	dlog("subduction ws endpoint=%s", endpoint);
-	return new Repo({
-		storage,
-		network: [],
-		subductionWebsocketEndpoints: [endpoint],
-	});
+	return withFlushingShutdown(
+		new Repo({
+			storage,
+			network: [],
+			subductionWebsocketEndpoints: [endpoint],
+		}),
+	);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
