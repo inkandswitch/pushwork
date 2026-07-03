@@ -20,7 +20,13 @@ import {
 } from "./pushwork.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
-import { legacyUrl, subductionUrl, type SyncSnapshot } from "./repo.js";
+import {
+	isTransportError,
+	legacyUrl,
+	setAmrepoErrorSink,
+	subductionUrl,
+	type SyncSnapshot,
+} from "./repo.js";
 import { formatVersions } from "./version.js";
 import { migrate, versionLabel } from "./migrations.js";
 
@@ -32,6 +38,39 @@ process.on("warning", (w) => {
 	if (w.name === "TimeoutNegativeWarning") return;
 	if (priorWarn.length > 0) for (const l of priorWarn) l.call(process, w);
 	else process.stderr.write(`(node:${process.pid}) ${w.name}: ${w.message}\n`);
+});
+
+// A dropped connection can surface as an async error with no local listener;
+// suppress those transport blips (Node would otherwise dump a stack trace or
+// exit), and let genuine faults through.
+process.on("uncaughtException", (err) => {
+	if (isTransportError(err)) {
+		dlog("suppressed uncaught transport error: %s", err.message);
+		return;
+	}
+	out.error(err);
+	out.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+	if (isTransportError(reason)) {
+		dlog(
+			"suppressed transport rejection: %s",
+			reason instanceof Error ? reason.message : String(reason),
+		);
+		return;
+	}
+	out.error(reason instanceof Error ? reason : String(reason));
+	out.exit(1);
+});
+
+// am-repo logs are silent by default (see openRepo); surface genuine `error`s in
+// the UI. Main process only — workers keep logs out of the parent's output.
+setAmrepoErrorSink((namespace, message, ...args) => {
+	const tag = namespace.replace(/^automerge-repo:/, "");
+	const detail = args
+		.map((a) => (a instanceof Error ? a.message : String(a)))
+		.join(" ");
+	out.warn(`${tag}: ${message}${detail ? ` ${detail}` : ""}`);
 });
 
 const collect = (value: string, prev: string[] | undefined) =>
@@ -78,13 +117,22 @@ const fmtHeads = (heads: string[]) => (heads.length ? heads.join(" ") : "(none)"
 function reportSync(sync: SyncSnapshot | undefined): void {
 	if (!sync) return;
 	if (out.isPorcelain) {
-		out.log(`sync\t${sync.synced ? "synced" : sync.connected ? "behind" : "offline"}`);
+		out.log(
+			`sync\t${sync.synced ? "synced" : sync.pending ? "pending" : sync.connected ? "behind" : "offline"}`,
+		);
+		out.log(`connect\t${sync.connectMs ?? ""}`);
 		out.log(`root\t${sync.url}\t${sync.localHeads.join(" ")}`);
 		out.log(`server\t${sync.serverPeerId ?? ""}\t${sync.serverHeads.join(" ")}`);
 		return;
 	}
 	out.block(
-		sync.synced ? "SYNCED" : sync.connected ? "NOT SYNCED" : "OFFLINE",
+		sync.synced
+			? "SYNCED"
+			: sync.pending
+				? "PENDING"
+				: sync.connected
+					? "NOT SYNCED"
+					: "OFFLINE",
 	);
 	out.obj({
 		"root doc": sync.url,

@@ -1,16 +1,54 @@
 import {
 	Repo,
 	initSubduction,
+	setLoggerFactory,
 	type AutomergeUrl,
 	type DocHandle,
 	type NetworkAdapterInterface,
 } from "@automerge/automerge-repo";
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
+import debug from "debug";
 import type { Backend } from "./config.js";
 import { log } from "./log.js";
 
 const dlog = log("repo");
+
+// Where automerge-repo `error`-level logs go. Default: silent (routed to
+// `debug`). The main CLI overrides it (setAmrepoErrorSink) to surface failures;
+// workers keep the silent default so they never write to the parent's output.
+type AmrepoErrorSink = (
+	namespace: string,
+	message: string,
+	...args: unknown[]
+) => void;
+let amrepoErrorSink: AmrepoErrorSink = (namespace, message, ...args) =>
+	debug(namespace)(message, ...args);
+
+/** Route automerge-repo `error`-level logs somewhere visible (e.g. the CLI UI). */
+export function setAmrepoErrorSink(sink: AmrepoErrorSink): void {
+	amrepoErrorSink = sink;
+}
+
+// Route automerge-repo logging through `debug` (silent by default; opt in with
+// `DEBUG=automerge-repo:subduction:*`), except `error` → the sink above.
+// Installed in openRepo so it also covers the shard worker threads.
+let amrepoLoggingInstalled = false;
+function installAmrepoLogging(): void {
+	if (amrepoLoggingInstalled) return;
+	amrepoLoggingInstalled = true;
+	setLoggerFactory((namespace) => {
+		const trace = debug(namespace);
+		const to = (message: string, ...args: unknown[]) => trace(message, ...args);
+		return {
+			debug: to,
+			info: to,
+			warn: to,
+			error: (message: string, ...args: unknown[]) =>
+				amrepoErrorSink(namespace, message, ...args),
+		};
+	});
+}
 
 const DEFAULT_LEGACY = "wss://sync3.automerge.org";
 const DEFAULT_SUBDUCTION = "wss://subduction.sync.inkandswitch.com";
@@ -26,6 +64,7 @@ export async function openRepo(
 	opts: { offline?: boolean } = {},
 ): Promise<Repo> {
 	dlog("openRepo backend=%s storage=%s offline=%s", backend, storageDir, !!opts.offline);
+	installAmrepoLogging();
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
 	if (opts.offline) {
@@ -48,6 +87,81 @@ export async function openRepo(
 	});
 }
 
+// Above am-repo's own ~5s shutdown quiesce (so last-mile delivery completes),
+// but well under the ~60s stall a stuck roundtrip or reconnect can cause.
+const DEFAULT_SHUTDOWN_MS = 15000;
+
+/**
+ * Shut a repo down without a slow/dropped connection hanging the CLI: race
+ * `repo.shutdown()` against a bounded deadline, then continue (process exit
+ * closes any lingering socket). Teardown errors are ignored — the work is
+ * already done. Override with `PUSHWORK_SHUTDOWN_MS` (`0` = unbounded).
+ */
+export async function safeShutdown(
+	repo: Repo,
+	{ maxMs }: { maxMs?: number } = {},
+): Promise<void> {
+	const envRaw = process.env.PUSHWORK_SHUTDOWN_MS;
+	const env = envRaw == null ? Number.NaN : Number(envRaw);
+	const deadline = maxMs ?? (Number.isFinite(env) ? env : DEFAULT_SHUTDOWN_MS);
+
+	// Never rejects: teardown hiccups (transport or otherwise) go to debug only.
+	const shutdown = (async () => {
+		try {
+			await repo.shutdown();
+		} catch (err) {
+			dlog(
+				"safeShutdown: ignored %s during shutdown: %s",
+				isTransportError(err) ? "transport error" : "error",
+				errMessage(err),
+			);
+		}
+	})();
+
+	if (deadline <= 0) {
+		await shutdown;
+		return;
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const bound = new Promise<void>((resolve) => {
+		timer = setTimeout(() => {
+			dlog("safeShutdown: exceeded %dms; continuing (exit closes sockets)", deadline);
+			resolve();
+		}, deadline);
+	});
+	try {
+		await Promise.race([shutdown, bound]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+/**
+ * Whether an error is a network/transport blip (dropped WebSocket, reset/refused
+ * socket, DNS hiccup, …) — expected on flaky links and during teardown, so
+ * callers suppress it rather than fail the command.
+ */
+export function isTransportError(err: unknown): boolean {
+	const msg = errMessage(err).toLowerCase();
+	return (
+		msg.includes("websocket") ||
+		msg.includes("socket hang up") ||
+		msg.includes("econnreset") ||
+		msg.includes("econnrefused") ||
+		msg.includes("econnaborted") ||
+		msg.includes("epipe") ||
+		msg.includes("etimedout") ||
+		msg.includes("enotfound") ||
+		msg.includes("eai_again") ||
+		msg.includes("unexpected server response") ||
+		msg.includes("ws error")
+	);
+}
+
+const errMessage = (err: unknown): string =>
+	err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -58,8 +172,20 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export type SyncSnapshot = {
 	/** The document this snapshot describes (the root folder doc, for `sync`). */
 	url: AutomergeUrl;
-	/** True once we hold every commit the sync server last advertised for the doc. */
+	/**
+	 * True only when confirmed both ways: we hold every commit the server
+	 * advertised AND it has advertised our frontier back (push-confirmed). Never
+	 * true on a bare pull-settle, so the CLI won't print SYNCED before our change
+	 * has demonstrably landed.
+	 */
 	synced: boolean;
+	/**
+	 * Connected and pull-complete, but our push wasn't confirmed before the
+	 * deadline — shown as PENDING. Usually transient; can be a false-negative if
+	 * the server compacted our change into a differently-id'd fragment (see
+	 * `.ignore/FIXME.md`).
+	 */
+	pending: boolean;
 	/** Whether the repo currently has a live Subduction connection to a server. */
 	connected: boolean;
 	/** The sync server's peer id (its verifying key), once the handshake is done. */
@@ -68,6 +194,12 @@ export type SyncSnapshot = {
 	localHeads: string[];
 	/** The heads the server last advertised for the doc (Subduction sedimentree heads). */
 	serverHeads: string[];
+	/**
+	 * How long the Subduction connection took this run (ms, from repo open to the
+	 * `subduction-connection` handshake). `0` if already connected; undefined on
+	 * legacy or if we never connected.
+	 */
+	connectMs?: number;
 };
 
 // The connected sync-server peer id (its verifying key), or undefined while the
@@ -79,6 +211,53 @@ async function connectedServerPeer(repo: Repo): Promise<string | undefined> {
 	} catch {
 		return undefined; // no Subduction source
 	}
+}
+
+export type Connection = {
+	connected: boolean;
+	/** ms from this call until the connection was established (0 if already up). */
+	connectMs: number;
+	serverPeerId?: string;
+};
+
+/**
+ * Resolve once the repo's Subduction connection is established, reporting how
+ * long the handshake took (via the `subduction-connection` event). Resolves
+ * connected=false after `maxMs` instead of hanging; returns immediately on
+ * legacy. Elapsed is measured from the call, so starting it right after
+ * {@link openRepo} lets local work overlap the connect.
+ */
+export async function waitForConnection(
+	repo: Repo,
+	backend: Backend,
+	{ maxMs = 15000 }: { maxMs?: number } = {},
+): Promise<Connection> {
+	const start = Date.now();
+	if (backend !== "subduction") return { connected: false, connectMs: 0 };
+	if (repo.isSubductionConnected()) {
+		return { connected: true, connectMs: 0, serverPeerId: await connectedServerPeer(repo) };
+	}
+
+	const connected = await new Promise<boolean>((resolve) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const onConn = (p: { connected: boolean }) => {
+			if (!p.connected) return;
+			if (timer) clearTimeout(timer);
+			repo.off("subduction-connection", onConn);
+			resolve(true);
+		};
+		repo.on("subduction-connection", onConn);
+		timer = setTimeout(() => {
+			repo.off("subduction-connection", onConn);
+			resolve(repo.isSubductionConnected());
+		}, maxMs);
+	});
+
+	return {
+		connected,
+		connectMs: Date.now() - start,
+		serverPeerId: connected ? await connectedServerPeer(repo) : undefined,
+	};
 }
 
 // Trim a peer's advertised heads for *display*. The sync server advertises
@@ -122,6 +301,46 @@ function sleepOrWake(
 	});
 }
 
+// Docs already nudged for a resync this run, keyed by repo, so the several
+// waitForServerSync calls in one command don't re-fire `resyncSubduction` on the
+// same doc. One nudge per doc per run; am-repo's heal loop handles the rest.
+const resyncedDocs = new WeakMap<Repo, Set<string>>();
+
+// Returns true the first time a given doc is nudged for this repo, false after.
+// Exported for unit testing the dedup; not part of the public API.
+export function claimResync(repo: Repo, documentId: string): boolean {
+	let seen = resyncedDocs.get(repo);
+	if (!seen) {
+		seen = new Set<string>();
+		resyncedDocs.set(repo, seen);
+	}
+	if (seen.has(documentId)) return false;
+	seen.add(documentId);
+	return true;
+}
+
+/**
+ * The two-directional sync verdict: `synced` when settled, pull-complete, and the
+ * server has advertised our frontier back (push-confirmed); `pending` when
+ * settled and pull-complete but not yet push-confirmed. Both false while behind
+ * or unsettled.
+ */
+export function syncVerdict(args: {
+	localQuiet: boolean;
+	pullComplete: boolean;
+	frontier: readonly string[];
+	advertised: readonly string[];
+}): { synced: boolean; pending: boolean } {
+	const advertised = new Set(args.advertised);
+	const pushConfirmed =
+		args.frontier.length > 0 && args.frontier.every((h) => advertised.has(h));
+	const settledAndCaughtUp = args.localQuiet && args.pullComplete;
+	return {
+		synced: settledAndCaughtUp && pushConfirmed,
+		pending: settledAndCaughtUp && !pushConfirmed,
+	};
+}
+
 /**
  * Wait until `handle` is in sync with the Subduction sync server, judging
  * "synced" against the *server's* advertised heads rather than a local-settle
@@ -160,6 +379,7 @@ export async function waitForServerSync<T>(
 		return {
 			url: handle.url,
 			synced: true,
+			pending: false,
 			connected: false,
 			localHeads: headsOf(),
 			serverHeads: [],
@@ -195,12 +415,16 @@ export async function waitForServerSync<T>(
 			const serverPeerId = await connectedServerPeer(repo);
 			let serverHeads: string[] = [];
 			let synced = false;
+			let pending = false;
 			if (serverPeerId) {
 				const info = handle.getSyncInfo(serverPeerId as never);
 				if (info && info.lastHeads.length > 0) {
-					// The synced verdict uses the FULL advertised set: do we
-					// already hold every commit the server has?
-					synced = localQuiet && handle.containsHeads(info.lastHeads);
+					({ synced, pending } = syncVerdict({
+						localQuiet,
+						pullComplete: handle.containsHeads(info.lastHeads),
+						frontier: headsOf(),
+						advertised: info.lastHeads,
+					}));
 					// For display, trim the sedimentree heads down to our frontier
 					// tip(s) plus anything we genuinely lack, so the reported
 					// server heads line up with localHeads (and match once synced).
@@ -211,13 +435,14 @@ export async function waitForServerSync<T>(
 			if (synced || now - start >= maxMs) {
 				dlog(
 					"waitForServerSync %s url=%s elapsed=%dms",
-					synced ? "synced" : "timed out",
+					synced ? "synced" : pending ? "pending" : "timed out",
 					handle.url,
 					now - start,
 				);
 				return {
 					url: handle.url,
 					synced,
+					pending: synced ? false : pending,
 					connected: repo.isSubductionConnected(),
 					serverPeerId,
 					localHeads: headsOf(),
@@ -229,13 +454,17 @@ export async function waitForServerSync<T>(
 			// single fresh sync round (the technique's stuck-doc nudge, without the
 			// full per-doc exponential backoff a long-lived client would keep).
 			if (!resynced && serverPeerId && now - start >= resyncAfterMs) {
-				dlog("waitForServerSync nudging resync url=%s", handle.url);
-				try {
-					repo.resyncSubduction(documentId);
-				} catch {
-					// no Subduction source / doc not attached
+				resynced = true; // don't reconsider within this call regardless
+				if (claimResync(repo, documentId)) {
+					dlog("waitForServerSync nudging resync url=%s", handle.url);
+					try {
+						repo.resyncSubduction(documentId);
+					} catch {
+						// no Subduction source / doc not attached
+					}
+				} else {
+					dlog("waitForServerSync resync already nudged this run url=%s", handle.url);
 				}
-				resynced = true;
 			}
 
 			await sleepOrWake(pollMs, (fn) => {
