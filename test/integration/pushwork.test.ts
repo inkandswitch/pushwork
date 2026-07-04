@@ -26,10 +26,6 @@ const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
 const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 const TEST_TIMEOUT = 120_000;
-const LEGACY_RETRY_ATTEMPTS = 4;
-const LEGACY_RETRY_DELAY_MS = 1_500;
-const LEGACY_SYNC_ROUNDS = 12;
-const LEGACY_SYNC_DELAY_MS = 500;
 
 type Backend = { name: string; flags: string[] };
 const BACKENDS: Backend[] = [
@@ -37,65 +33,7 @@ const BACKENDS: Backend[] = [
 	{ name: "legacy", flags: ["--legacy"] },
 ];
 
-async function sleep(ms: number): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function repoBackend(root: string): Promise<Backend["name"] | null> {
-	try {
-		const raw = JSON.parse(
-			await fs.readFile(
-				path.join(root, ".pushwork", "config.json"),
-				"utf8",
-			),
-		) as { backend?: unknown };
-		return raw.backend === "legacy" || raw.backend === "subduction"
-			? raw.backend
-			: null;
-	} catch {
-		return null;
-	}
-}
-
-async function usesLegacyBackend(args: string[], cwd?: string): Promise<boolean> {
-	if (args.includes("--legacy") || args.includes("--no-sub")) return true;
-	if (!cwd) return false;
-	return (await repoBackend(cwd)) === "legacy";
-}
-
-function isTransientLegacyFailure(err: unknown): boolean {
-	const message = err instanceof Error ? err.message : String(err);
-	return (
-		/Document [A-Za-z0-9]+ is unavailable/.test(message) ||
-		/failed to converge after \d+ rounds/.test(message)
-	);
-}
-
-async function withLegacyRetries<T>(
-	run: () => Promise<T>,
-	enabled: boolean,
-): Promise<T> {
-	const attempts = enabled ? LEGACY_RETRY_ATTEMPTS : 1;
-	let lastError: unknown;
-	for (let attempt = 1; attempt <= attempts; attempt++) {
-		try {
-			return await run();
-		} catch (err) {
-			lastError = err;
-			if (
-				!enabled ||
-				attempt === attempts ||
-				!isTransientLegacyFailure(err)
-			) {
-				throw err;
-			}
-			await sleep(LEGACY_RETRY_DELAY_MS * attempt);
-		}
-	}
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-async function runPushwork(
+async function pushwork(
 	args: string[],
 	cwd?: string,
 ): Promise<{ stdout: string; stderr: string }> {
@@ -117,16 +55,6 @@ async function runPushwork(
 			.join("\n");
 		throw new Error(detail);
 	}
-}
-
-async function pushwork(
-	args: string[],
-	cwd?: string,
-): Promise<{ stdout: string; stderr: string }> {
-	return withLegacyRetries(
-		() => runPushwork(args, cwd),
-		await usesLegacyBackend(args, cwd),
-	);
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -180,22 +108,17 @@ async function syncUntilConverged(
 	repos: string[],
 	maxRounds = 6,
 ): Promise<number> {
-	const legacy = (await Promise.all(repos.map(repoBackend))).every(
-		(backend) => backend === "legacy",
-	);
-	const rounds = legacy ? Math.max(maxRounds, LEGACY_SYNC_ROUNDS) : maxRounds;
-	for (let round = 1; round <= rounds; round++) {
+	for (let round = 1; round <= maxRounds; round++) {
 		await syncOnce(repos);
 		const hashes = await Promise.all(repos.map(hashUserContent));
 		if (hashes.every((h) => h === hashes[0])) return round;
-		if (legacy && round < rounds) await sleep(LEGACY_SYNC_DELAY_MS);
 	}
 	const hashes = await Promise.all(repos.map(hashUserContent));
 	const debug = await Promise.all(
 		repos.map(async (r, i) => `${i}: ${(await listUserFiles(r)).join(",")}`),
 	);
 	throw new Error(
-		`failed to converge after ${rounds} rounds:\n  hashes: ${hashes
+		`failed to converge after ${maxRounds} rounds:\n  hashes: ${hashes
 			.map((h) => h.slice(0, 12))
 			.join(" / ")}\n  files:\n    ${debug.join("\n    ")}`,
 	);
@@ -212,7 +135,6 @@ beforeAll(async () => {
 describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 	let workRoot: string;
 	let cleanup: () => void;
-	const isLegacy = flags.includes("--legacy");
 
 	beforeEach(() => {
 		const t = tmp.dirSync({ unsafeCleanup: true });
@@ -221,67 +143,6 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 	});
 
 	afterEach(() => cleanup());
-
-	async function publishRepo(repo: string): Promise<void> {
-		if (!isLegacy) return;
-		for (let attempt = 0; attempt < LEGACY_RETRY_ATTEMPTS; attempt++) {
-			await pushwork(["sync"], repo);
-			if (attempt + 1 < LEGACY_RETRY_ATTEMPTS) {
-				await sleep(LEGACY_SYNC_DELAY_MS);
-			}
-		}
-	}
-
-	async function cloneFrom(
-		sourceRepo: string,
-		url: string,
-		dest: string,
-	): Promise<void> {
-		const args = ["clone", ...flags, url, dest];
-		if (!isLegacy) {
-			await pushwork(args);
-			return;
-		}
-		await withLegacyRetries(async () => {
-			await fs.rm(dest, { recursive: true, force: true });
-			await publishRepo(sourceRepo);
-			await runPushwork(args);
-		}, true);
-	}
-
-	async function yoinkFrom(
-		sourceRepo: string,
-		targetRepo: string,
-		url: string,
-		dest?: string,
-	): Promise<void> {
-		const args = dest ? ["yoink", url, dest] : ["yoink", url];
-		if (!isLegacy) {
-			await pushwork(args, targetRepo);
-			return;
-		}
-		await withLegacyRetries(async () => {
-			await publishRepo(sourceRepo);
-			await runPushwork(args, targetRepo);
-		}, true);
-	}
-
-	async function yeetTo(
-		sourceRepo: string,
-		targetRepo: string,
-		file: string,
-		url: string,
-	): Promise<void> {
-		const args = ["yeet", file, url];
-		if (!isLegacy) {
-			await pushwork(args, targetRepo);
-			return;
-		}
-		await withLegacyRetries(async () => {
-			await publishRepo(sourceRepo);
-			await runPushwork(args, targetRepo);
-		}, true);
-	}
 
 	describe("init", () => {
 		it(
@@ -377,7 +238,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], a);
 
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, url, b);
+				await pushwork(["clone", ...flags, url, b]);
 
 				expect(await readText(path.join(b, "hello.txt"))).toBe("Hello, World!");
 			},
@@ -402,7 +263,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, url, b);
+				await pushwork(["clone", ...flags, url, b]);
 
 				expect(await readText(path.join(b, "package.json"))).toBe(
 					'{"name":"x"}',
@@ -432,7 +293,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, url, b);
+				await pushwork(["clone", ...flags, url, b]);
 
 				const out = await fs.readFile(path.join(b, "image.png"));
 				expect(out.equals(bytes)).toBe(true);
@@ -450,7 +311,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const urlA = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, urlA, b);
+				await pushwork(["clone", ...flags, urlA, b]);
 
 				const urlB = (await pushwork(["url"], b)).stdout.trim();
 				expect(urlB).toBe(urlA);
@@ -466,7 +327,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 			await fs.mkdir(a);
 			await pushwork(["init", ...flags], a);
 			const url = (await pushwork(["url"], a)).stdout.trim();
-			await cloneFrom(a, url, b);
+			await pushwork(["clone", ...flags, url, b]);
 			return { a, b };
 		}
 
@@ -588,7 +449,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				const c = path.join(workRoot, "c");
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, url, c);
+				await pushwork(["clone", ...flags, url, c]);
 
 				expect(await readText(path.join(c, "shared.txt"))).toBe(
 					"shared content",
@@ -614,14 +475,11 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 			expected: string,
 			rounds = 6,
 		): Promise<string> {
-			const legacy = (await repoBackend(repo)) === "legacy";
-			const totalRounds = legacy ? Math.max(rounds, LEGACY_SYNC_ROUNDS) : rounds;
 			let last = "";
-			for (let i = 0; i < totalRounds; i++) {
+			for (let i = 0; i < rounds; i++) {
 				await pushwork(["sync"], repo);
 				last = await readText(path.join(repo, file));
 				if (last === expected) return last;
-				if (legacy && i + 1 < totalRounds) await sleep(LEGACY_SYNC_DELAY_MS);
 			}
 			return last;
 		}
@@ -638,7 +496,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], b);
 
 				const url = await fileDocUrl(a, "note.md");
-				await yoinkFrom(a, b, url, "grabbed.md");
+				await pushwork(["yoink", url, "grabbed.md"], b);
 
 				expect(await readText(path.join(b, "grabbed.md"))).toBe("hello");
 			},
@@ -657,7 +515,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], b);
 
 				const url = await fileDocUrl(a, "note.md");
-				await yoinkFrom(a, b, url);
+				await pushwork(["yoink", url], b);
 
 				expect(await readText(path.join(b, "note.md"))).toBe("from name");
 			},
@@ -677,7 +535,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				const url = await fileDocUrl(a, "note.md");
 				await fs.writeFile(path.join(b, "out.md"), "v2 from b");
-				await yeetTo(a, b, "out.md", url);
+				await pushwork(["yeet", "out.md", url], b);
 
 				expect(await waitForText(a, "note.md", "v2 from b")).toBe("v2 from b");
 			},
@@ -714,7 +572,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await cloneFrom(a, url, b);
+				await pushwork(["clone", ...flags, url, b]);
 
 				expect(await pathExists(path.join(b, "ok.txt"))).toBe(true);
 				expect(await pathExists(path.join(b, "node_modules"))).toBe(false);
@@ -739,7 +597,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				// Bob clones Alice's project.
 				const bob = path.join(workRoot, "bob");
 				const url = (await pushwork(["url"], alice)).stdout.trim();
-				await cloneFrom(alice, url, bob);
+				await pushwork(["clone", ...flags, url, bob]);
 
 				expect(await readText(path.join(bob, "README"))).toBe("# Project");
 				expect(await readText(path.join(bob, "src", "main.ts"))).toBe("// v1");

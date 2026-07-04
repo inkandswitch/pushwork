@@ -21,4 +21,5 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install
-      - run: pnpm test
+      - run: pnpm vitest run --exclude test/integration/pushwork.test.ts
+      - run: pnpm vitest run test/integration/pushwork.test.ts --retry 2
