@@ -210,6 +210,7 @@ beforeAll(async () => {
 describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 	let workRoot: string;
 	let cleanup: () => void;
+	const isLegacy = flags.includes("--legacy");
 
 	beforeEach(() => {
 		const t = tmp.dirSync({ unsafeCleanup: true });
@@ -218,6 +219,67 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 	});
 
 	afterEach(() => cleanup());
+
+	async function publishRepo(repo: string): Promise<void> {
+		if (!isLegacy) return;
+		for (let round = 0; round < LEGACY_RETRY_ATTEMPTS; round++) {
+			await pushwork(["sync"], repo);
+			if (round + 1 < LEGACY_RETRY_ATTEMPTS) {
+				await sleep(LEGACY_SYNC_DELAY_MS);
+			}
+		}
+	}
+
+	async function cloneFrom(
+		sourceRepo: string,
+		url: string,
+		dest: string,
+	): Promise<void> {
+		const args = ["clone", ...flags, url, dest];
+		if (!isLegacy) {
+			await pushwork(args);
+			return;
+		}
+		await withLegacyRetries(async () => {
+			await fs.rm(dest, { recursive: true, force: true });
+			await publishRepo(sourceRepo);
+			await runPushwork(args);
+		}, true);
+	}
+
+	async function yoinkFrom(
+		sourceRepo: string,
+		targetRepo: string,
+		url: string,
+		dest?: string,
+	): Promise<void> {
+		const args = dest ? ["yoink", url, dest] : ["yoink", url];
+		if (!isLegacy) {
+			await pushwork(args, targetRepo);
+			return;
+		}
+		await withLegacyRetries(async () => {
+			await publishRepo(sourceRepo);
+			await runPushwork(args, targetRepo);
+		}, true);
+	}
+
+	async function yeetTo(
+		sourceRepo: string,
+		targetRepo: string,
+		file: string,
+		url: string,
+	): Promise<void> {
+		const args = ["yeet", file, url];
+		if (!isLegacy) {
+			await pushwork(args, targetRepo);
+			return;
+		}
+		await withLegacyRetries(async () => {
+			await publishRepo(sourceRepo);
+			await runPushwork(args, targetRepo);
+		}, true);
+	}
 
 	describe("init", () => {
 		it(
@@ -313,7 +375,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], a);
 
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
+				await cloneFrom(a, url, b);
 
 				expect(await readText(path.join(b, "hello.txt"))).toBe("Hello, World!");
 			},
@@ -338,7 +400,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
+				await cloneFrom(a, url, b);
 
 				expect(await readText(path.join(b, "package.json"))).toBe(
 					'{"name":"x"}',
@@ -368,7 +430,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
+				await cloneFrom(a, url, b);
 
 				const out = await fs.readFile(path.join(b, "image.png"));
 				expect(out.equals(bytes)).toBe(true);
@@ -386,7 +448,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const urlA = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, urlA, b]);
+				await cloneFrom(a, urlA, b);
 
 				const urlB = (await pushwork(["url"], b)).stdout.trim();
 				expect(urlB).toBe(urlA);
@@ -402,7 +464,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 			await fs.mkdir(a);
 			await pushwork(["init", ...flags], a);
 			const url = (await pushwork(["url"], a)).stdout.trim();
-			await pushwork(["clone", ...flags, url, b]);
+			await cloneFrom(a, url, b);
 			return { a, b };
 		}
 
@@ -524,7 +586,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				const c = path.join(workRoot, "c");
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, c]);
+				await cloneFrom(a, url, c);
 
 				expect(await readText(path.join(c, "shared.txt"))).toBe(
 					"shared content",
@@ -574,7 +636,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], b);
 
 				const url = await fileDocUrl(a, "note.md");
-				await pushwork(["yoink", url, "grabbed.md"], b);
+				await yoinkFrom(a, b, url, "grabbed.md");
 
 				expect(await readText(path.join(b, "grabbed.md"))).toBe("hello");
 			},
@@ -593,7 +655,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				await pushwork(["init", ...flags], b);
 
 				const url = await fileDocUrl(a, "note.md");
-				await pushwork(["yoink", url], b);
+				await yoinkFrom(a, b, url);
 
 				expect(await readText(path.join(b, "note.md"))).toBe("from name");
 			},
@@ -613,7 +675,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				const url = await fileDocUrl(a, "note.md");
 				await fs.writeFile(path.join(b, "out.md"), "v2 from b");
-				await pushwork(["yeet", "out.md", url], b);
+				await yeetTo(a, b, "out.md", url);
 
 				expect(await waitForText(a, "note.md", "v2 from b")).toBe("v2 from b");
 			},
@@ -650,7 +712,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 				await pushwork(["init", ...flags], a);
 				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
+				await cloneFrom(a, url, b);
 
 				expect(await pathExists(path.join(b, "ok.txt"))).toBe(true);
 				expect(await pathExists(path.join(b, "node_modules"))).toBe(false);
@@ -675,7 +737,7 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 				// Bob clones Alice's project.
 				const bob = path.join(workRoot, "bob");
 				const url = (await pushwork(["url"], alice)).stdout.trim();
-				await pushwork(["clone", ...flags, url, bob]);
+				await cloneFrom(alice, url, bob);
 
 				expect(await readText(path.join(bob, "README"))).toBe("# Project");
 				expect(await readText(path.join(bob, "src", "main.ts"))).toBe("// v1");
