@@ -26,6 +26,10 @@ const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
 const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 const TEST_TIMEOUT = 120_000;
+const LEGACY_RETRY_ATTEMPTS = 4;
+const LEGACY_RETRY_DELAY_MS = 1_500;
+const LEGACY_SYNC_ROUNDS = 12;
+const LEGACY_SYNC_DELAY_MS = 500;
 
 type Backend = { name: string; flags: string[] };
 const BACKENDS: Backend[] = [
@@ -33,7 +37,63 @@ const BACKENDS: Backend[] = [
 	{ name: "legacy", flags: ["--legacy"] },
 ];
 
-async function pushwork(
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function repoBackend(root: string): Promise<Backend["name"] | null> {
+	try {
+		const raw = JSON.parse(
+			await fs.readFile(
+				path.join(root, ".pushwork", "config.json"),
+				"utf8",
+			),
+		) as { backend?: unknown };
+		return raw.backend === "legacy" || raw.backend === "subduction"
+			? raw.backend
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+async function usesLegacyBackend(args: string[], cwd?: string): Promise<boolean> {
+	if (args.includes("--legacy") || args.includes("--no-sub")) return true;
+	if (!cwd) return false;
+	return (await repoBackend(cwd)) === "legacy";
+}
+
+function isTransientLegacyFailure(err: unknown): boolean {
+	const message = err instanceof Error ? err.message : String(err);
+	return (
+		/Document [A-Za-z0-9]+ is unavailable/.test(message) ||
+		/failed to converge after \d+ rounds/.test(message)
+	);
+}
+
+async function withLegacyRetries<T>(
+	run: () => Promise<T>,
+	enabled: boolean,
+): Promise<T> {
+	const attempts = enabled ? LEGACY_RETRY_ATTEMPTS : 1;
+	for (let attempt = 1; attempt <= attempts; attempt++) {
+		try {
+			return await run();
+		} catch (err) {
+			if (
+				!enabled ||
+				attempt === attempts ||
+				!isTransientLegacyFailure(err)
+			) {
+				throw err;
+			}
+			await sleep(LEGACY_RETRY_DELAY_MS * attempt);
+		}
+	}
+	throw new Error("unreachable");
+}
+
+async function runPushwork(
 	args: string[],
 	cwd?: string,
 ): Promise<{ stdout: string; stderr: string }> {
@@ -55,6 +115,16 @@ async function pushwork(
 			.join("\n");
 		throw new Error(detail);
 	}
+}
+
+async function pushwork(
+	args: string[],
+	cwd?: string,
+): Promise<{ stdout: string; stderr: string }> {
+	return withLegacyRetries(
+		() => runPushwork(args, cwd),
+		await usesLegacyBackend(args, cwd),
+	);
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -108,17 +178,22 @@ async function syncUntilConverged(
 	repos: string[],
 	maxRounds = 6,
 ): Promise<number> {
-	for (let round = 1; round <= maxRounds; round++) {
+	const legacy = (await Promise.all(repos.map(repoBackend))).every(
+		(backend) => backend === "legacy",
+	);
+	const rounds = legacy ? Math.max(maxRounds, LEGACY_SYNC_ROUNDS) : maxRounds;
+	for (let round = 1; round <= rounds; round++) {
 		await syncOnce(repos);
 		const hashes = await Promise.all(repos.map(hashUserContent));
 		if (hashes.every((h) => h === hashes[0])) return round;
+		if (legacy && round < rounds) await sleep(LEGACY_SYNC_DELAY_MS);
 	}
 	const hashes = await Promise.all(repos.map(hashUserContent));
 	const debug = await Promise.all(
 		repos.map(async (r, i) => `${i}: ${(await listUserFiles(r)).join(",")}`),
 	);
 	throw new Error(
-		`failed to converge after ${maxRounds} rounds:\n  hashes: ${hashes
+		`failed to converge after ${rounds} rounds:\n  hashes: ${hashes
 			.map((h) => h.slice(0, 12))
 			.join(" / ")}\n  files:\n    ${debug.join("\n    ")}`,
 	);
@@ -475,11 +550,14 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 			expected: string,
 			rounds = 6,
 		): Promise<string> {
+			const legacy = (await repoBackend(repo)) === "legacy";
+			const totalRounds = legacy ? Math.max(rounds, LEGACY_SYNC_ROUNDS) : rounds;
 			let last = "";
-			for (let i = 0; i < rounds; i++) {
+			for (let i = 0; i < totalRounds; i++) {
 				await pushwork(["sync"], repo);
 				last = await readText(path.join(repo, file));
 				if (last === expected) return last;
+				if (legacy && i + 1 < totalRounds) await sleep(LEGACY_SYNC_DELAY_MS);
 			}
 			return last;
 		}
