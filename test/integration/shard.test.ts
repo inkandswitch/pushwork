@@ -16,9 +16,10 @@ import { promisify } from "util";
 const execFileP = promisify(execFile);
 const REPO_ROOT = path.join(__dirname, "..", "..");
 const FIXTURE = path.join(__dirname, "fixtures", "shard-roundtrip.ts");
+const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 beforeAll(async () => {
-	await execFileP("pnpm", ["build"], { cwd: REPO_ROOT, timeout: 120_000 });
+	await execFileP(PNPM, ["build"], { cwd: REPO_ROOT, timeout: 120_000 });
 }, 120_000);
 
 describe("shard parallel ingest/clone", () => {
