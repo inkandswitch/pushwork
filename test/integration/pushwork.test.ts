@@ -76,10 +76,12 @@ async function withLegacyRetries<T>(
 	enabled: boolean,
 ): Promise<T> {
 	const attempts = enabled ? LEGACY_RETRY_ATTEMPTS : 1;
+	let lastError: unknown;
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
 			return await run();
 		} catch (err) {
+			lastError = err;
 			if (
 				!enabled ||
 				attempt === attempts ||
@@ -90,7 +92,7 @@ async function withLegacyRetries<T>(
 			await sleep(LEGACY_RETRY_DELAY_MS * attempt);
 		}
 	}
-	throw new Error("unreachable");
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function runPushwork(
@@ -222,9 +224,9 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 
 	async function publishRepo(repo: string): Promise<void> {
 		if (!isLegacy) return;
-		for (let round = 0; round < LEGACY_RETRY_ATTEMPTS; round++) {
+		for (let attempt = 0; attempt < LEGACY_RETRY_ATTEMPTS; attempt++) {
 			await pushwork(["sync"], repo);
-			if (round + 1 < LEGACY_RETRY_ATTEMPTS) {
+			if (attempt + 1 < LEGACY_RETRY_ATTEMPTS) {
 				await sleep(LEGACY_SYNC_DELAY_MS);
 			}
 		}
