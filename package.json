@@ -1,6 +1,6 @@
 {
 	"name": "pushwork",
-	"version": "2.2.1",
+	"version": "2.2.2",
 	"description": "Bidirectional directory synchronization using Automerge CRDTs",
 	"main": "dist/index.js",
 	"exports": {
