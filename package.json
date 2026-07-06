@@ -38,7 +38,7 @@
 		"filesystem"
 	],
 	"author": "Peter van Hardenberg",
-	"license": "MIT",
+	"license": "(MIT OR Apache-2.0)",
 	"files": [
 		"dist",
 		"patches"
