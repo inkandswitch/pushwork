@@ -1,10 +1,14 @@
+import * as path from "path";
+import { MessageChannel, Worker } from "worker_threads";
 import {
 	Repo,
+	WorkerWebSocketEndpoint,
 	initSubduction,
 	setLoggerFactory,
 	type AutomergeUrl,
 	type DocHandle,
 	type NetworkAdapterInterface,
+	type WorkerPortLike,
 } from "@automerge/automerge-repo";
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
@@ -79,12 +83,63 @@ export async function openRepo(
 		return new Repo({ storage, network: [adapter] });
 	}
 	const endpoint = subductionUrl();
-	dlog("subduction ws endpoint=%s", endpoint);
-	return new Repo({
+	if (process.env.PUSHWORK_WS_INLINE === "1") {
+		dlog("subduction ws endpoint=%s (in-thread)", endpoint);
+		return new Repo({
+			storage,
+			network: [],
+			subductionWebsocketEndpoints: [endpoint],
+		});
+	}
+	dlog("subduction ws endpoint=%s (worker-hosted)", endpoint);
+	const { endpoint: workerEndpoint, terminate } = spawnWorkerEndpoint(endpoint);
+	const repo = new Repo({
 		storage,
 		network: [],
-		subductionWebsocketEndpoints: [endpoint],
+		subductionWebsocketEndpoints: [workerEndpoint],
 	});
+	socketWorkers.set(repo, terminate);
+	return repo;
+}
+
+// Terminators for the per-repo socket-host worker threads. BYO-port endpoints
+// are never terminated by repo.shutdown() (upstream contract), so safeShutdown
+// runs these after the repo is down.
+const socketWorkers = new WeakMap<Repo, () => Promise<void>>();
+
+/**
+ * Spawn a Node worker thread hosting the WebSocket for one endpoint and wrap
+ * it as a {@link WorkerWebSocketEndpoint}.
+ *
+ * Upstream auto-spawns only browser dedicated Workers (and throws in Node), so
+ * we BYO port: one end of a MessageChannel goes to the worker
+ * (dist/workers/subduction-ws-host.js, which calls upstream's
+ * `attachWebSocketHost`), the other satisfies `WorkerPortLike` — Node's
+ * MessagePort is an EventTarget with `start()`.
+ */
+function spawnWorkerEndpoint(url: string): {
+	endpoint: WorkerWebSocketEndpoint;
+	terminate: () => Promise<void>;
+} {
+	const { port1, port2 } = new MessageChannel();
+	const worker = new Worker(path.join(__dirname, "workers", "subduction-ws-host.js"), {
+		workerData: { port: port2 },
+		transferList: [port2],
+	});
+	worker.on("error", (err) => dlog("ws host worker error: %s", errMessage(err)));
+	// Don't let the socket-host thread keep the process alive on its own —
+	// teardown is explicit via terminate(), and unref covers crash paths.
+	worker.unref();
+	const endpoint = new WorkerWebSocketEndpoint(url, {
+		worker: port1 as unknown as WorkerPortLike,
+	});
+	return {
+		endpoint,
+		terminate: async () => {
+			await endpoint.shutdown?.();
+			await worker.terminate();
+		},
+	};
 }
 
 // Above am-repo's own ~5s shutdown quiesce (so last-mile delivery completes),
@@ -115,6 +170,17 @@ export async function safeShutdown(
 				isTransportError(err) ? "transport error" : "error",
 				errMessage(err),
 			);
+		}
+		// The BYO-port socket-host worker outlives repo.shutdown() by design;
+		// terminate it once the repo has flushed.
+		const terminate = socketWorkers.get(repo);
+		if (terminate) {
+			socketWorkers.delete(repo);
+			try {
+				await terminate();
+			} catch (err) {
+				dlog("safeShutdown: ws worker terminate failed: %s", errMessage(err));
+			}
 		}
 	})();
 

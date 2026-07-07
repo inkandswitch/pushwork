@@ -1,3 +1,13 @@
 allowBuilds:
   cbor-extract: true
   esbuild: true
+
+# TEMPORARY (testing sdn-workers WorkerWebSocketEndpoint): link the local
+# automerge-repo checkout, and pin the automerge core + subduction Wasm
+# packages to the SAME physical copies the linked checkout resolves, so
+# there is exactly one Wasm instance (ADR-021). Remove once the new
+# automerge-repo is published to npm.
+overrides:
+  "@automerge/automerge-repo": "link:../automerge-repo/packages/automerge-repo"
+  "@automerge/automerge": "link:../automerge-repo/node_modules/@automerge/automerge"
+  "@automerge/automerge-subduction": "link:../automerge-repo/node_modules/@automerge/automerge-subduction"
