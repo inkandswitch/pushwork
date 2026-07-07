@@ -1,5 +1,6 @@
 import {
 	Repo,
+	WorkerWebSocketEndpoint,
 	initSubduction,
 	setLoggerFactory,
 	type AutomergeUrl,
@@ -34,6 +35,8 @@ export function setAmrepoErrorSink(sink: AmrepoErrorSink): void {
 // `DEBUG=automerge-repo:subduction:*`), except `error` → the sink above.
 // Installed in openRepo so it also covers the shard worker threads.
 let amrepoLoggingInstalled = false;
+
+
 function installAmrepoLogging(): void {
 	if (amrepoLoggingInstalled) return;
 	amrepoLoggingInstalled = true;
@@ -58,6 +61,38 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
+// Real ESM import() from CJS-compiled code (tsc would rewrite a plain
+// `import()` to `require()`, which loads the CJS build — a SECOND Wasm
+// instance whose log level is not the one automerge-repo uses).
+const importEsm = new Function("s", "return import(s)") as (
+	s: string,
+) => Promise<{ setSubductionLogLevel?: (level: string) => void }>;
+
+// The Rust (Wasm) side logs through its own tracing writer straight to the
+// console — setLoggerFactory doesn't route it. SubductionSource's constructor
+// pins the filter to "warn", which lets benign close-path warnings (e.g.
+// "connection closed, removing conn" from the worker transport's teardown)
+// leak into CLI output. Drop it to "error" unless the user asked for
+// subduction debugging; must run AFTER `new Repo()` (the constructor re-pins).
+// Imports the same ESM module instance automerge-repo's graph loaded.
+//
+// Runs on ALL backends deliberately: `new Repo()` constructs a
+// SubductionSource unconditionally (offline and legacy included), and its
+// constructor pins the global Rust filter to "warn" every time — the storage
+// bridge and shutdown quiesce can warn even with no connection. The filter is
+// a per-Wasm-instance singleton, so backend-gating would isolate nothing; and
+// the import() is served from Node's ESM cache (loaded by initSubduction),
+// so this costs a cache lookup once per openRepo.
+async function quietSubductionRustLogs(): Promise<void> {
+	if (/subduction/i.test(process.env.DEBUG ?? "")) return;
+	try {
+		const m = await importEsm("@automerge/automerge-subduction/slim");
+		m.setSubductionLogLevel?.("error");
+	} catch (err) {
+		dlog("quietSubductionRustLogs failed: %s", errMessage(err));
+	}
+}
+
 export async function openRepo(
 	backend: Backend,
 	storageDir: string,
@@ -67,8 +102,12 @@ export async function openRepo(
 	installAmrepoLogging();
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
+	const finish = async (repo: Repo): Promise<Repo> => {
+		await quietSubductionRustLogs();
+		return repo;
+	};
 	if (opts.offline) {
-		return new Repo({ storage, network: [] });
+		return finish(new Repo({ storage, network: [] }));
 	}
 	if (backend === "legacy") {
 		const endpoint = legacyUrl();
@@ -76,15 +115,31 @@ export async function openRepo(
 		const adapter = new WebSocketClientAdapter(
 			endpoint,
 		) as unknown as NetworkAdapterInterface;
-		return new Repo({ storage, network: [adapter] });
+		return finish(new Repo({ storage, network: [adapter] }));
 	}
 	const endpoint = subductionUrl();
-	dlog("subduction ws endpoint=%s", endpoint);
-	return new Repo({
-		storage,
-		network: [],
-		subductionWebsocketEndpoints: [endpoint],
-	});
+	if (process.env.PUSHWORK_WS_INLINE === "1") {
+		dlog("subduction ws endpoint=%s (in-thread)", endpoint);
+		return finish(
+			new Repo({
+				storage,
+				network: [],
+				subductionWebsocketEndpoints: [endpoint],
+			}),
+		);
+	}
+	// Socket + frame relay live in a worker_threads thread (auto-spawned by
+	// upstream since subduction.41; torn down by repo.shutdown() via the
+	// endpoint's teardown hook), so a busy main thread never stalls reads or
+	// keepalives.
+	dlog("subduction ws endpoint=%s (worker-hosted)", endpoint);
+	return finish(
+		new Repo({
+			storage,
+			network: [],
+			subductionWebsocketEndpoints: [new WorkerWebSocketEndpoint(endpoint)],
+		}),
+	);
 }
 
 // Above am-repo's own ~5s shutdown quiesce (so last-mile delivery completes),
