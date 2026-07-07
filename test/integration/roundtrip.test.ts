@@ -14,12 +14,9 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 
 const execFileP = promisify(execFile);
-const REPO_ROOT = path.join(__dirname, "..", "..");
 const FIXTURE = path.join(__dirname, "fixtures", "init-clone-roundtrip.ts");
 
-beforeAll(async () => {
-	await execFileP("pnpm", ["build"], { cwd: REPO_ROOT, timeout: 120_000 });
-}, 120_000);
+// dist/ is built once by test/global-setup.ts.
 
 describe("init/clone round-trip", () => {
 	it(

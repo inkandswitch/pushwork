@@ -123,13 +123,7 @@ async function syncUntilConverged(
 	);
 }
 
-beforeAll(async () => {
-	// Build once for the entire suite.
-	await execFileP("pnpm", ["build"], {
-		cwd: path.join(__dirname, "..", ".."),
-		timeout: 120_000,
-	});
-}, 120_000);
+// dist/ is built once by test/global-setup.ts.
 
 describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 	let workRoot: string;

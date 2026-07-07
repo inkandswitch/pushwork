@@ -211,6 +211,20 @@ export function isTransportError(err: unknown): boolean {
 	);
 }
 
+/**
+ * Whether an error is the upstream dispatch-after-shutdown race hitting a
+ * closed storage adapter: an inbound subduction message can still be
+ * dispatched after `Repo.shutdown()` has closed the LMDB env, and the read
+ * throws "Can not read from a closed database". Harmless — the repo has
+ * already flushed — but it surfaces as an unhandled rejection. Suppressed
+ * like transport blips until upstream drains dispatch before closing
+ * storage (reported; see .ignore/TODO.md).
+ */
+export function isClosedStorageError(err: unknown): boolean {
+	const msg = errMessage(err).toLowerCase();
+	return msg.includes("closed database") || msg.includes("already closed");
+}
+
 const errMessage = (err: unknown): string =>
 	err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 

@@ -11,6 +11,7 @@ import * as path from "path";
 import * as tmp from "tmp";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { CONFIG_VERSION } from "../../src/config.js";
 
 const execFileP = promisify(execFile);
 const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
@@ -45,12 +46,7 @@ async function readText(p: string): Promise<string> {
 	return fs.readFile(p, "utf8");
 }
 
-beforeAll(async () => {
-	await execFileP("pnpm", ["build"], {
-		cwd: path.join(__dirname, "..", ".."),
-		timeout: 120_000,
-	});
-}, 120_000);
+// dist/ is built once by test/global-setup.ts.
 
 describe("pushwork local-only commands", () => {
 	let workRoot: string;
@@ -171,13 +167,13 @@ describe("pushwork local-only commands", () => {
 
 	describe("config", () => {
 		it(
-			"records version 4 and no branches field",
+			"records the current config version and no branches field",
 			async () => {
 				await initRepo();
 				const cfg = JSON.parse(
 					await readText(path.join(workRoot, ".pushwork", "config.json")),
 				);
-				expect(cfg.version).toBe(4);
+				expect(cfg.version).toBe(CONFIG_VERSION);
 				expect(cfg.branches).toBeUndefined();
 			},
 			TEST_TIMEOUT,
