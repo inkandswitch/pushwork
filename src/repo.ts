@@ -75,6 +75,14 @@ const importEsm = new Function("s", "return import(s)") as (
 // leak into CLI output. Drop it to "error" unless the user asked for
 // subduction debugging; must run AFTER `new Repo()` (the constructor re-pins).
 // Imports the same ESM module instance automerge-repo's graph loaded.
+//
+// Runs on ALL backends deliberately: `new Repo()` constructs a
+// SubductionSource unconditionally (offline and legacy included), and its
+// constructor pins the global Rust filter to "warn" every time — the storage
+// bridge and shutdown quiesce can warn even with no connection. The filter is
+// a per-Wasm-instance singleton, so backend-gating would isolate nothing; and
+// the import() is served from Node's ESM cache (loaded by initSubduction),
+// so this costs a cache lookup once per openRepo.
 async function quietSubductionRustLogs(): Promise<void> {
 	if (/subduction/i.test(process.env.DEBUG ?? "")) return;
 	try {
