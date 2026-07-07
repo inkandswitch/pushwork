@@ -328,13 +328,12 @@ type CloneOpts = InitOpts & {
 | --- | --- | --- |
 | `PUSHWORK_SUBDUCTION_SERVER` | `wss://subduction.sync.inkandswitch.com` | Subduction sync endpoint. |
 | `PUSHWORK_LEGACY_SERVER` | `wss://sync3.automerge.org` | Legacy WebSocket sync endpoint. |
-| `PUSHWORK_FETCH_CONCURRENCY` | `16` | Max concurrent per-file document fetches during clone/pull (`1` = serial). |
 | `PUSHWORK_WS_INLINE` | _off_ | Set to `1` to open the sync WebSocket on the main thread instead of a worker thread. |
 | `DEBUG` | _off_ | Set `DEBUG=true` (rewritten to `DEBUG=*`) to enable `pushwork:*` debug logs. |
 
 ### Concurrency
 
-pushwork runs a single Automerge `Repo` over one sync connection. The WebSocket (and its frame decoding) lives in a worker thread so a busy main thread never stalls reads or keepalives, and per-file document fetches during clone/pull are pipelined over that one connection (`PUSHWORK_FETCH_CONCURRENCY`). Every synced document sits under the same delivery check, so the final `SYNCED`/`PENDING` verdict covers the whole tree.
+pushwork runs a single Automerge `Repo` over one sync connection. The WebSocket (and its frame decoding) lives in a worker thread so a busy main thread never stalls reads or keepalives, and per-file document fetches during clone/pull are pipelined concurrently over that one connection. Every synced document sits under the same delivery check, so the final `SYNCED`/`PENDING` verdict covers the whole tree.
 
 ## Development
 

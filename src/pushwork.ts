@@ -1178,29 +1178,27 @@ async function materializeTree(
 ): Promise<void> {
 	const leaves = flattenLeaves(tree);
 
-	// Fetch leaves with bounded concurrency: a single Subduction connection
+	// Fetch all leaves concurrently: a single Subduction connection
 	// multiplexes concurrent `repo.find`s, so per-doc sync round-trips overlap
-	// instead of serializing. PUSHWORK_FETCH_CONCURRENCY=1 restores the old
-	// serial behavior (useful for A/B benchmarks).
-	const envConcurrency = Number(process.env.PUSHWORK_FETCH_CONCURRENCY);
-	const concurrency = Number.isFinite(envConcurrency) && envConcurrency > 0
-		? envConcurrency
-		: 16;
-	const entries = [...leaves];
+	// instead of serializing (benched vs serial and vs the old worker pool in
+	// ADR-031/032). The transport's own receive-credit windowing is the
+	// backpressure; no artificial cap here.
 	const desired = new Map<string, Uint8Array>();
-	let nextEntry = 0;
 	await Promise.all(
-		Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
-			for (;;) {
-				const i = nextEntry++;
-				if (i >= entries.length) return;
-				const [posixPath, fileUrl] = entries[i];
-				const handle = await repo.find<UnixFileEntry>(fileUrl);
-				desired.set(posixPath, contentToBytes(handle.doc().content));
-			}
+		[...leaves].map(async ([posixPath, fileUrl]) => {
+			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			desired.set(posixPath, contentToBytes(handle.doc().content));
 		}),
 	);
-	dlog("materialize desired: %d files (concurrency=%d)", desired.size, concurrency);
+	dlog("materialize desired: %d files", desired.size);
+	// Invariant: every leaf was fetched. The loop below DELETES anything on
+	// disk that isn't in `desired`, so a silent fetch shortfall must be a loud
+	// error here rather than a tree wipe.
+	if (desired.size !== leaves.size) {
+		throw new Error(
+			`materialize fetched ${desired.size} of ${leaves.size} documents; refusing to reconcile a partial tree`,
+		);
+	}
 
 	const ig = await loadIgnore(root);
 	const present = await walkDir(root, ig);
