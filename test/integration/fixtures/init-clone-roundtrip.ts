@@ -52,10 +52,10 @@ async function main(): Promise<void> {
 	gen(src, N);
 
 	const { url } = await init({ dir: src, backend: "subduction", shape: "vfs", online: false });
+	fs.mkdirSync(path.join(dst, ".pushwork"), { recursive: true });
 	fs.cpSync(
-		path.join(src, ".pushwork", "storage"),
-		path.join(dst, ".pushwork", "storage"),
-		{ recursive: true },
+		path.join(src, ".pushwork", "storage.lmdb"),
+		path.join(dst, ".pushwork", "storage.lmdb"),
 	);
 	await clone({ url, dir: dst, backend: "subduction", shape: "vfs", online: false });
 

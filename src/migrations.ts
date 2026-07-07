@@ -16,7 +16,9 @@
  *        CRDT data lives in `.pushwork/storage/`.
  *     2  adds `version: 2`, `shape`, `artifactDirectories`.
  *     3  adds `branches: boolean`.
- *     4  drops `branches` (current).
+ *     4  drops `branches`.
+ *     5  moves CRDT storage from the nodefs chunk tree (`.pushwork/storage/`)
+ *        into a single LMDB database (`.pushwork/storage.lmdb`) (current).
  *
  * Each migration is a small, pure-ish step stored in {@link migrations}. The
  * "-"→1 step is the only one that touches the filesystem (it relocates the
@@ -174,12 +176,53 @@ async function migrate3To4(_root: string, raw: RawConfig): Promise<RawConfig> {
 	return { ...rest, version: 4 };
 }
 
+/**
+ * 4 → 5: move CRDT storage from the nodefs chunk tree (`.pushwork/storage/`,
+ * one file per chunk) into a single LMDB database (`.pushwork/storage.lmdb`).
+ *
+ * All chunks are copied in one LMDB transaction (all-or-nothing), then the
+ * old tree is renamed to `.pushwork/storage.nodefs.bak` — kept as a backup
+ * rather than deleted, matching the `.bak` precedent of earlier migrations.
+ * A repo with no nodefs tree (or an empty one) just gets the version stamp.
+ */
+async function migrate4To5(root: string, raw: RawConfig): Promise<RawConfig> {
+	const storage = path.join(pushworkDir(root), "storage");
+	const lmdbPath = `${storage}.lmdb`;
+
+	if (await exists(storage)) {
+		const { NodeFSStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-nodefs"
+		);
+		const { LMDBStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-lmdb"
+		);
+		// The empty prefix enumerates the whole store (conformance-suite
+		// guaranteed as of the storage-lmdb publish train).
+		const chunks = await new NodeFSStorageAdapter(storage).loadRange([]);
+		const entries = chunks.flatMap((c) =>
+			c.data ? [[[...c.key], c.data] as [string[], Uint8Array]] : [],
+		);
+		if (entries.length > 0) {
+			const lmdb = new LMDBStorageAdapter(lmdbPath);
+			try {
+				await lmdb.saveBatch(entries);
+			} finally {
+				await lmdb.close();
+			}
+		}
+		await fs.rename(storage, `${storage}.nodefs.bak`);
+	}
+
+	return { ...raw, version: 5 };
+}
+
 /** Every migration, in order. Add new steps to the end as the format evolves. */
 export const migrations: Migration[] = [
 	{ from: UNVERSIONED, to: 1, run: migrateUnversionedTo1 },
 	{ from: 1, to: 2, run: migrate1To2 },
 	{ from: 2, to: 3, run: migrate2To3 },
 	{ from: 3, to: 4, run: migrate3To4 },
+	{ from: 4, to: 5, run: migrate4To5 },
 ];
 
 export interface MigrateResult {

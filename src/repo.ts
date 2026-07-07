@@ -3,12 +3,13 @@ import {
 	WorkerWebSocketEndpoint,
 	initSubduction,
 	setLoggerFactory,
+	setSubductionLogLevel,
 	type AutomergeUrl,
 	type DocHandle,
 	type NetworkAdapterInterface,
 } from "@automerge/automerge-repo";
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
-import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
+import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 import debug from "debug";
 import type { Backend } from "./config.js";
 import { log } from "./log.js";
@@ -61,33 +62,24 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
-// Real ESM import() from CJS-compiled code (tsc would rewrite a plain
-// `import()` to `require()`, which loads the CJS build — a SECOND Wasm
-// instance whose log level is not the one automerge-repo uses).
-const importEsm = new Function("s", "return import(s)") as (
-	s: string,
-) => Promise<{ setSubductionLogLevel?: (level: string) => void }>;
-
 // The Rust (Wasm) side logs through its own tracing writer straight to the
 // console — setLoggerFactory doesn't route it. SubductionSource's constructor
 // pins the filter to "warn", which lets benign close-path warnings (e.g.
 // "connection closed, removing conn" from the worker transport's teardown)
 // leak into CLI output. Drop it to "error" unless the user asked for
 // subduction debugging; must run AFTER `new Repo()` (the constructor re-pins).
-// Imports the same ESM module instance automerge-repo's graph loaded.
+// `setSubductionLogLevel` is re-exported by automerge-repo, so this reaches
+// the same Wasm instance the Repo uses.
 //
 // Runs on ALL backends deliberately: `new Repo()` constructs a
 // SubductionSource unconditionally (offline and legacy included), and its
 // constructor pins the global Rust filter to "warn" every time — the storage
 // bridge and shutdown quiesce can warn even with no connection. The filter is
-// a per-Wasm-instance singleton, so backend-gating would isolate nothing; and
-// the import() is served from Node's ESM cache (loaded by initSubduction),
-// so this costs a cache lookup once per openRepo.
-async function quietSubductionRustLogs(): Promise<void> {
+// a per-Wasm-instance singleton, so backend-gating would isolate nothing.
+function quietSubductionRustLogs(): void {
 	if (/subduction/i.test(process.env.DEBUG ?? "")) return;
 	try {
-		const m = await importEsm("@automerge/automerge-subduction/slim");
-		m.setSubductionLogLevel?.("error");
+		setSubductionLogLevel("error");
 	} catch (err) {
 		dlog("quietSubductionRustLogs failed: %s", errMessage(err));
 	}
@@ -101,7 +93,12 @@ export async function openRepo(
 	dlog("openRepo backend=%s storage=%s offline=%s", backend, storageDir, !!opts.offline);
 	installAmrepoLogging();
 	await initSubduction();
-	const storage = new NodeFSStorageAdapter(storageDir);
+	// LMDB single-file database next to (not inside) the legacy nodefs chunk
+	// tree: `<storage>.lmdb`. One env, a handful of fds, transactional
+	// saveBatch. NOTE (test rig): repos created before the LMDB switch still
+	// have their data in the nodefs tree at `<storage>/` and read as empty —
+	// no migration yet.
+	const storage = new LMDBStorageAdapter(`${storageDir}.lmdb`);
 	const finish = async (repo: Repo): Promise<Repo> => {
 		await quietSubductionRustLogs();
 		return repo;
