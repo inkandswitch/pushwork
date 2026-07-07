@@ -1,5 +1,3 @@
-import * as path from "path";
-import { MessageChannel, Worker } from "worker_threads";
 import {
 	Repo,
 	WorkerWebSocketEndpoint,
@@ -8,7 +6,6 @@ import {
 	type AutomergeUrl,
 	type DocHandle,
 	type NetworkAdapterInterface,
-	type WorkerPortLike,
 } from "@automerge/automerge-repo";
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
@@ -38,6 +35,8 @@ export function setAmrepoErrorSink(sink: AmrepoErrorSink): void {
 // `DEBUG=automerge-repo:subduction:*`), except `error` → the sink above.
 // Installed in openRepo so it also covers the shard worker threads.
 let amrepoLoggingInstalled = false;
+
+
 function installAmrepoLogging(): void {
 	if (amrepoLoggingInstalled) return;
 	amrepoLoggingInstalled = true;
@@ -62,6 +61,30 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
+// Real ESM import() from CJS-compiled code (tsc would rewrite a plain
+// `import()` to `require()`, which loads the CJS build — a SECOND Wasm
+// instance whose log level is not the one automerge-repo uses).
+const importEsm = new Function("s", "return import(s)") as (
+	s: string,
+) => Promise<{ setSubductionLogLevel?: (level: string) => void }>;
+
+// The Rust (Wasm) side logs through its own tracing writer straight to the
+// console — setLoggerFactory doesn't route it. SubductionSource's constructor
+// pins the filter to "warn", which lets benign close-path warnings (e.g.
+// "connection closed, removing conn" from the worker transport's teardown)
+// leak into CLI output. Drop it to "error" unless the user asked for
+// subduction debugging; must run AFTER `new Repo()` (the constructor re-pins).
+// Imports the same ESM module instance automerge-repo's graph loaded.
+async function quietSubductionRustLogs(): Promise<void> {
+	if (/subduction/i.test(process.env.DEBUG ?? "")) return;
+	try {
+		const m = await importEsm("@automerge/automerge-subduction/slim");
+		m.setSubductionLogLevel?.("error");
+	} catch (err) {
+		dlog("quietSubductionRustLogs failed: %s", errMessage(err));
+	}
+}
+
 export async function openRepo(
 	backend: Backend,
 	storageDir: string,
@@ -71,8 +94,12 @@ export async function openRepo(
 	installAmrepoLogging();
 	await initSubduction();
 	const storage = new NodeFSStorageAdapter(storageDir);
+	const finish = async (repo: Repo): Promise<Repo> => {
+		await quietSubductionRustLogs();
+		return repo;
+	};
 	if (opts.offline) {
-		return new Repo({ storage, network: [] });
+		return finish(new Repo({ storage, network: [] }));
 	}
 	if (backend === "legacy") {
 		const endpoint = legacyUrl();
@@ -80,66 +107,31 @@ export async function openRepo(
 		const adapter = new WebSocketClientAdapter(
 			endpoint,
 		) as unknown as NetworkAdapterInterface;
-		return new Repo({ storage, network: [adapter] });
+		return finish(new Repo({ storage, network: [adapter] }));
 	}
 	const endpoint = subductionUrl();
 	if (process.env.PUSHWORK_WS_INLINE === "1") {
 		dlog("subduction ws endpoint=%s (in-thread)", endpoint);
-		return new Repo({
+		return finish(
+			new Repo({
+				storage,
+				network: [],
+				subductionWebsocketEndpoints: [endpoint],
+			}),
+		);
+	}
+	// Socket + frame relay live in a worker_threads thread (auto-spawned by
+	// upstream since subduction.41; torn down by repo.shutdown() via the
+	// endpoint's teardown hook), so a busy main thread never stalls reads or
+	// keepalives.
+	dlog("subduction ws endpoint=%s (worker-hosted)", endpoint);
+	return finish(
+		new Repo({
 			storage,
 			network: [],
-			subductionWebsocketEndpoints: [endpoint],
-		});
-	}
-	dlog("subduction ws endpoint=%s (worker-hosted)", endpoint);
-	const { endpoint: workerEndpoint, terminate } = spawnWorkerEndpoint(endpoint);
-	const repo = new Repo({
-		storage,
-		network: [],
-		subductionWebsocketEndpoints: [workerEndpoint],
-	});
-	socketWorkers.set(repo, terminate);
-	return repo;
-}
-
-// Terminators for the per-repo socket-host worker threads. BYO-port endpoints
-// are never terminated by repo.shutdown() (upstream contract), so safeShutdown
-// runs these after the repo is down.
-const socketWorkers = new WeakMap<Repo, () => Promise<void>>();
-
-/**
- * Spawn a Node worker thread hosting the WebSocket for one endpoint and wrap
- * it as a {@link WorkerWebSocketEndpoint}.
- *
- * Upstream auto-spawns only browser dedicated Workers (and throws in Node), so
- * we BYO port: one end of a MessageChannel goes to the worker
- * (dist/workers/subduction-ws-host.js, which calls upstream's
- * `attachWebSocketHost`), the other satisfies `WorkerPortLike` — Node's
- * MessagePort is an EventTarget with `start()`.
- */
-function spawnWorkerEndpoint(url: string): {
-	endpoint: WorkerWebSocketEndpoint;
-	terminate: () => Promise<void>;
-} {
-	const { port1, port2 } = new MessageChannel();
-	const worker = new Worker(path.join(__dirname, "workers", "subduction-ws-host.js"), {
-		workerData: { port: port2 },
-		transferList: [port2],
-	});
-	worker.on("error", (err) => dlog("ws host worker error: %s", errMessage(err)));
-	// Don't let the socket-host thread keep the process alive on its own —
-	// teardown is explicit via terminate(), and unref covers crash paths.
-	worker.unref();
-	const endpoint = new WorkerWebSocketEndpoint(url, {
-		worker: port1 as unknown as WorkerPortLike,
-	});
-	return {
-		endpoint,
-		terminate: async () => {
-			await endpoint.shutdown?.();
-			await worker.terminate();
-		},
-	};
+			subductionWebsocketEndpoints: [new WorkerWebSocketEndpoint(endpoint)],
+		}),
+	);
 }
 
 // Above am-repo's own ~5s shutdown quiesce (so last-mile delivery completes),
@@ -170,17 +162,6 @@ export async function safeShutdown(
 				isTransportError(err) ? "transport error" : "error",
 				errMessage(err),
 			);
-		}
-		// The BYO-port socket-host worker outlives repo.shutdown() by design;
-		// terminate it once the repo has flushed.
-		const terminate = socketWorkers.get(repo);
-		if (terminate) {
-			socketWorkers.delete(repo);
-			try {
-				await terminate();
-			} catch (err) {
-				dlog("safeShutdown: ws worker terminate failed: %s", errMessage(err));
-			}
 		}
 	})();
 
