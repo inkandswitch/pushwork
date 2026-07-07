@@ -33,7 +33,7 @@ export function setAmrepoErrorSink(sink: AmrepoErrorSink): void {
 
 // Route automerge-repo logging through `debug` (silent by default; opt in with
 // `DEBUG=automerge-repo:subduction:*`), except `error` → the sink above.
-// Installed in openRepo so it also covers the shard worker threads.
+// Installed in openRepo before any Repo construction.
 let amrepoLoggingInstalled = false;
 
 

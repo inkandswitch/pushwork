@@ -3,9 +3,9 @@
  * promptly (not hang on teardown), report an honest not-synced verdict, and keep
  * the sync layer's connection logs out of the CLI output.
  *
- * Uses a *sharded* init so the guard also covers the worker threads (each opens
- * its own Repo, so log suppression must live in openRepo, not only the CLI).
- * Network-free: the endpoint is a closed localhost port (immediate ECONNREFUSED).
+ * Log suppression must live in openRepo (not only the CLI) so it covers every
+ * Repo construction path. Network-free: the endpoint is a closed localhost
+ * port (immediate ECONNREFUSED).
  */
 import { describe, it, expect } from "vitest";
 import * as fs from "fs/promises";
@@ -24,10 +24,9 @@ tmp.setGracefulCleanup();
 
 describe("unreachable sync server", () => {
 	it(
-		"sharded init finishes promptly, reports offline, and stays quiet (main + workers)",
+		"init against a dead server finishes promptly, reports offline, and stays quiet",
 		async () => {
 			const dir = tmp.dirSync({ unsafeCleanup: true }).name;
-			// Enough files to trip the shard-ingest worker pool (SHARD_MIN_ITEMS=8).
 			await Promise.all(
 				Array.from({ length: 40 }, (_, i) =>
 					fs.writeFile(path.join(dir, `file_${i}.txt`), `content ${i}\n`),
@@ -43,7 +42,6 @@ describe("unreachable sync server", () => {
 					env: {
 						...process.env,
 						PUSHWORK_SUBDUCTION_SERVER: DEAD_SERVER,
-						PUSHWORK_PARALLEL_INGEST: "shard",
 						FORCE_COLOR: "0",
 						NO_COLOR: "1",
 					},

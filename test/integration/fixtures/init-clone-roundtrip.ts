@@ -1,23 +1,21 @@
 /**
- * Offline shard round-trip used by shard.test.ts.
+ * Offline init → clone round-trip used by roundtrip.test.ts.
  *
  * Generates a multi-file tree (text + binary + nested dirs), `init`s it
  * offline, copies the automerge storage into a fresh dir, `clone`s offline
- * from that storage, and byte-compares source vs clone. Exercises both the
- * shard-ingest and shard-clone worker pools when PUSHWORK_PARALLEL_INGEST is
- * set. Exits non-zero (with a printed reason) on any mismatch.
+ * from that storage, and byte-compares source vs clone. Exits non-zero
+ * (with a printed reason) on any mismatch.
  *
- * Run as a plain-node subprocess against the built dist (Node strips the types):
- * the worker scripts must resolve as compiled CommonJS and the Subduction Wasm
- * must load as a single consistent instance — the same reason the bench runs
- * compiled rather than under tsx.
+ * Run as a plain-node subprocess against the built dist (Node strips the
+ * types): the Subduction Wasm must load as a single consistent instance —
+ * the same reason the bench runs compiled rather than under tsx.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clone, init } from "../../../dist/index.js";
 
-const N = Number(process.env.SHARD_FIXTURE_FILES) || 40;
+const N = Number(process.env.ROUNDTRIP_FIXTURE_FILES) || 40;
 
 function gen(root: string, n: number): void {
 	for (let i = 0; i < n; i++) {
@@ -46,7 +44,7 @@ function listFiles(root: string): Map<string, Buffer> {
 }
 
 async function main(): Promise<void> {
-	const base = fs.mkdtempSync(path.join(os.tmpdir(), "shard-roundtrip-"));
+	const base = fs.mkdtempSync(path.join(os.tmpdir(), "pw-roundtrip-"));
 	const src = path.join(base, "src");
 	const dst = path.join(base, "dst");
 	fs.mkdirSync(src);
@@ -74,10 +72,10 @@ async function main(): Promise<void> {
 
 	fs.rmSync(base, { recursive: true, force: true });
 	if (problems.length > 0) {
-		console.error("shard round-trip FAILED:\n  " + problems.join("\n  "));
+		console.error("round-trip FAILED:\n  " + problems.join("\n  "));
 		process.exit(1);
 	}
-	console.log(`shard round-trip OK: ${a.size} files byte-identical`);
+	console.log(`round-trip OK: ${a.size} files byte-identical`);
 }
 
 main().catch((e) => {

@@ -29,7 +29,7 @@ This puts `pushwork` on your PATH. The examples below assume that.
 git clone <repo-url> pushwork
 cd pushwork
 pnpm install
-pnpm build        # compiles TypeScript to dist/ (required — workers run from dist/)
+pnpm build        # compiles TypeScript to dist/
 ```
 
 This produces the `pushwork` binary at `dist/cli.js`. You can then either:
@@ -42,7 +42,7 @@ pnpm link --global              # expose `pushwork` on your PATH
 
 > [!NOTE]
 >
-> A build is required even when developing, because parallel ingest spins up worker threads that load compiled scripts from `dist/workers/`.
+> The compiled `dist/` is what the CLI runs (and what the tests exercise), so build before running from source.
 
 ## Quick start
 
@@ -328,13 +328,13 @@ type CloneOpts = InitOpts & {
 | --- | --- | --- |
 | `PUSHWORK_SUBDUCTION_SERVER` | `wss://subduction.sync.inkandswitch.com` | Subduction sync endpoint. |
 | `PUSHWORK_LEGACY_SERVER` | `wss://sync3.automerge.org` | Legacy WebSocket sync endpoint. |
-| `PUSHWORK_PARALLEL_INGEST` | adaptive | `shard`/`2` forces worker pools on; `off`/`0` forces them off. |
-| `PUSHWORK_WORKERS` | `8` | Maximum worker-pool size for parallel ingest/clone. |
+| `PUSHWORK_FETCH_CONCURRENCY` | `16` | Max concurrent per-file document fetches during clone/pull (`1` = serial). |
+| `PUSHWORK_WS_INLINE` | _off_ | Set to `1` to open the sync WebSocket on the main thread instead of a worker thread. |
 | `DEBUG` | _off_ | Set `DEBUG=true` (rewritten to `DEBUG=*`) to enable `pushwork:*` debug logs. |
 
-### Parallel ingest
+### Concurrency
 
-For large trees, pushwork shards file ingest (push) and clone (pull) across worker threads, each owning its own Automerge `Repo` over the shared `.pushwork/storage`. Sharding kicks in automatically at roughly 8+ files and falls back to the main thread on any per-worker failure. Tune or disable it with `PUSHWORK_PARALLEL_INGEST` and `PUSHWORK_WORKERS`.
+pushwork runs a single Automerge `Repo` over one sync connection. The WebSocket (and its frame decoding) lives in a worker thread so a busy main thread never stalls reads or keepalives, and per-file document fetches during clone/pull are pipelined over that one connection (`PUSHWORK_FETCH_CONCURRENCY`). Every synced document sits under the same delivery check, so the final `SYNCED`/`PENDING` verdict covers the whole tree.
 
 ## Development
 

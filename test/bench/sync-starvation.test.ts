@@ -69,9 +69,9 @@ async function runBench(files: number): Promise<BenchSummary> {
 		{
 			cwd: REPO_ROOT,
 			maxBuffer: 64 * 1024 * 1024,
-			// This guard measures the MAIN-THREAD ingest path (macrotask yields).
-			// Ingest now shards by count, so force it off to exercise that path.
-			env: { ...process.env, PUSHWORK_PARALLEL_INGEST: "off" },
+			// This guard measures the main-thread ingest path (macrotask yields) —
+			// the only ingest path since the shard pool was removed.
+			env: { ...process.env },
 		},
 	);
 	const lastLine = stdout.trim().split("\n").pop() ?? "{}";
