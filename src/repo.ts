@@ -95,9 +95,9 @@ export async function openRepo(
 	await initSubduction();
 	// LMDB single-file database next to (not inside) the legacy nodefs chunk
 	// tree: `<storage>.lmdb`. One env, a handful of fds, transactional
-	// saveBatch. NOTE (test rig): repos created before the LMDB switch still
-	// have their data in the nodefs tree at `<storage>/` and read as empty —
-	// no migration yet.
+	// saveBatch. Repos created before the LMDB switch are carried over by the
+	// 4 → 5 config migration (`pushwork migrate`, which readConfig's version
+	// check directs users to).
 	const storage = new LMDBStorageAdapter(`${storageDir}.lmdb`);
 	const finish = async (repo: Repo): Promise<Repo> => {
 		await quietSubductionRustLogs();

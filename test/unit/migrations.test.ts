@@ -268,6 +268,46 @@ describe("migrate from intermediate versions", () => {
 		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(true);
 	});
 
+	it("4 → 5 removes an empty nodefs tree without creating a .bak", async () => {
+		await fs.mkdir(pushwork("storage", "tmp"), { recursive: true });
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+		expect(await exists(pushwork("storage"))).toBe(false);
+		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(false);
+		expect(await exists(pushwork("storage.lmdb"))).toBe(false);
+	});
+
+	it("4 → 5 picks a collision-free .bak name", async () => {
+		const { NodeFSStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-nodefs"
+		);
+		const nodefs = new NodeFSStorageAdapter(pushwork("storage"));
+		await nodefs.save(["doc1", "snapshot", "aaaa"], new Uint8Array([1]));
+		// A leftover backup from an earlier migration attempt.
+		await fs.mkdir(pushwork("storage.nodefs.bak"), { recursive: true });
+		await fs.writeFile(pushwork("storage.nodefs.bak", "old"), "x");
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+		// Old backup untouched; new tree landed at .bak.1.
+		expect(await fs.readFile(pushwork("storage.nodefs.bak", "old"), "utf8")).toBe("x");
+		expect(await exists(pushwork("storage.nodefs.bak.1"))).toBe(true);
+		expect(await exists(pushwork("storage"))).toBe(false);
+	});
+
 	it("4 → 5 without a nodefs tree just stamps the version", async () => {
 		await writeConfigRaw({
 			version: 4,
