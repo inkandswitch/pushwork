@@ -99,8 +99,8 @@ export async function openRepo(
 	// 4 → 5 config migration (`pushwork migrate`, which readConfig's version
 	// check directs users to).
 	const storage = new LMDBStorageAdapter(`${storageDir}.lmdb`);
-	const finish = async (repo: Repo): Promise<Repo> => {
-		await quietSubductionRustLogs();
+	const finish = (repo: Repo): Repo => {
+		quietSubductionRustLogs();
 		return repo;
 	};
 	if (opts.offline) {

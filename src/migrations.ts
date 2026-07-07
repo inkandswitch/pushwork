@@ -189,6 +189,11 @@ async function migrate3To4(_root: string, raw: RawConfig): Promise<RawConfig> {
  * Crash-safe by construction: if a previous run copied into the LMDB file
  * but died before the rename/config write, re-running overwrites the same
  * keys with the same bytes (idempotent) and finishes the rename.
+ *
+ * Memory: the whole store is materialized once (`loadRange([])` returns an
+ * array; the copy into LMDB shares the chunk buffers, so peak ≈ store size).
+ * Fine for the repo sizes pushwork targets; a streaming enumeration API in
+ * the storage interface would lift this if multi-GB stores ever appear.
  */
 async function migrate4To5(root: string, raw: RawConfig): Promise<RawConfig> {
 	const storage = path.join(pushworkDir(root), "storage");
