@@ -200,11 +200,13 @@ export async function init(
 			undefined,
 			isArtifactPath,
 		);
+		const folderDocUrls: AutomergeUrl[] = [];
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
 			title,
 			isArtifactDir: isArtifactPath,
+			onDocChanged: (u) => folderDocUrls.push(u),
 		});
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
@@ -215,9 +217,15 @@ export async function init(
 				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
 			);
 			stampLastSyncAt(folderHandle);
-			// Confirm the leaf docs alongside the folder doc — a clone is only
-			// viable once the server holds both.
-			const leafConfirm = confirmDocs(repo, changedUrls, opts.backend, connWait);
+			// Confirm leaf AND intermediate folder docs alongside the root doc — a
+			// clone resolves the whole tree against the server, so every doc must
+			// land, not just the root (nested-tree clones flaked on exactly this).
+			const leafConfirm = confirmDocs(
+				repo,
+				[...changedUrls, ...folderDocUrls.filter((u) => u !== folderUrl)],
+				opts.backend,
+				connWait,
+			);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
 				maxMs: 15000,
@@ -734,12 +742,14 @@ async function commitWorkdir(
 		);
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
+		const folderDocUrls: AutomergeUrl[] = [];
 		if (changed) {
 			await shape.encode({
 				repo,
 				tree: newTree,
 				previousRoot: folderHandle,
 				isArtifactDir: isArtifactPath,
+				onDocChanged: (u) => folderDocUrls.push(u),
 			});
 		}
 
@@ -771,9 +781,17 @@ async function commitWorkdir(
 			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
-			// Confirm changed leaf docs alongside the folder doc — peers resolve
-			// the folder's entries against the server, so both must land.
-			const leafConfirm = confirmDocs(repo, changedUrls, config.backend, connWait);
+			// Confirm changed leaf AND intermediate folder docs alongside the root
+			// doc — peers resolve the tree against the server, so all must land.
+			const leafConfirm = confirmDocs(
+				repo,
+				[
+					...changedUrls,
+					...folderDocUrls.filter((u) => u !== config.rootUrl),
+				],
+				config.backend,
+				connWait,
+			);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
@@ -1164,18 +1182,19 @@ async function confirmDocs(
 	connWait: Promise<Connection> | undefined,
 	{ maxMs = 15000 }: { maxMs?: number } = {},
 ): Promise<void> {
-	if (urls.length === 0) return;
+	const unique = [...new Set(urls)];
+	if (unique.length === 0) return;
 	// No confirmation is possible without a server; don't burn the budget
 	// (e.g. init against an unreachable server must still finish promptly).
 	if (connWait && !(await connWait).connected) return;
 	// One global deadline across all batches — a many-file commit on a dead-ish
 	// link degrades to a single bounded wait, not maxMs per batch.
 	const deadline = Date.now() + maxMs;
-	for (let i = 0; i < urls.length; i += CONFIRM_CONCURRENCY) {
+	for (let i = 0; i < unique.length; i += CONFIRM_CONCURRENCY) {
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) return;
 		await Promise.all(
-			urls.slice(i, i + CONFIRM_CONCURRENCY).map(async (url) => {
+			unique.slice(i, i + CONFIRM_CONCURRENCY).map(async (url) => {
 				const handle = await repo.find<unknown>(stripHeads(url));
 				await waitForServerSync(repo, handle, backend, {
 					idleMs: 1500,

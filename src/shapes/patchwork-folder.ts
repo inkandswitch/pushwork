@@ -100,6 +100,7 @@ async function createFolder(
 	title: string,
 	dirPath: string,
 	isArtifact: IsArtifactDir,
+	onDocChanged?: (url: AutomergeUrl) => void,
 ): Promise<{ handle: DocHandle<FolderDoc>; frozen: boolean }> {
 	if (tree.kind !== "dir") throw new Error("createFolder: not a dir");
 	const links: DocLink[] = [];
@@ -113,6 +114,7 @@ async function createFolder(
 				name,
 				childPath(dirPath, name),
 				isArtifact,
+				onDocChanged,
 			);
 			links.push({
 				name,
@@ -126,6 +128,7 @@ async function createFolder(
 		title,
 		docs: links,
 	});
+	onDocChanged?.(handle.url);
 	dlog("createFolder title=%s docs=%d url=%s", title, links.length, handle.url);
 	return { handle, frozen: isArtifact(dirPath) };
 }
@@ -136,6 +139,7 @@ async function syncFolder(
 	tree: VfsNode,
 	dirPath: string,
 	isArtifact: IsArtifactDir,
+	onDocChanged?: (url: AutomergeUrl) => void,
 ): Promise<boolean> {
 	if (tree.kind !== "dir") throw new Error("syncFolder: not a dir");
 
@@ -166,6 +170,7 @@ async function syncFolder(
 					child,
 					childPath(dirPath, name),
 					isArtifact,
+					onDocChanged,
 				);
 				nextLinks.push({
 					name,
@@ -181,6 +186,7 @@ async function syncFolder(
 			name,
 			childPath(dirPath, name),
 			isArtifact,
+			onDocChanged,
 		);
 		nextLinks.push({
 			name,
@@ -194,6 +200,7 @@ async function syncFolder(
 		if (typeof d.title !== "string") d.title = "pushwork";
 		d.docs = nextLinks;
 	});
+	onDocChanged?.(handle.url);
 	return isArtifact(dirPath);
 }
 
