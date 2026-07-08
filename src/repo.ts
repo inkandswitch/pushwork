@@ -219,10 +219,21 @@ export function isTransportError(err: unknown): boolean {
  * already flushed — but it surfaces as an unhandled rejection. Suppressed
  * like transport blips until upstream drains dispatch before closing
  * storage (reported; see .ignore/TODO.md).
+ *
+ * Deliberately narrow: the CLI feeds this to process-level handlers, so a
+ * bare "already closed" (sockets, streams, …) must NOT match — only
+ * database/environment-shaped messages (LMDB: "Can not read from a closed
+ * database", "The environment is already closed").
  */
 export function isClosedStorageError(err: unknown): boolean {
 	const msg = errMessage(err).toLowerCase();
-	return msg.includes("closed database") || msg.includes("already closed");
+	return (
+		msg.includes("closed database") ||
+		(msg.includes("already closed") &&
+			(msg.includes("database") ||
+				msg.includes("environment") ||
+				msg.includes("lmdb")))
+	);
 }
 
 const errMessage = (err: unknown): string =>
