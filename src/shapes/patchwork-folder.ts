@@ -59,7 +59,7 @@ const childPath = (dirPath: string, name: string) =>
 	dirPath ? `${dirPath}/${name}` : name;
 
 export const patchworkFolderShape: Shape = {
-	async encode({ repo, tree, previousRoot, isArtifactDir }) {
+	async encode({ repo, tree, previousRoot, isArtifactDir, onDocChanged }) {
 		if (tree.kind !== "dir") throw new Error("folder: root must be a dir");
 		const isArtifact: IsArtifactDir = isArtifactDir ?? (() => false);
 
@@ -68,11 +68,18 @@ export const patchworkFolderShape: Shape = {
 			const handle = previousRoot as DocHandle<FolderDoc>;
 			// Root path is "" — never an artifact dir — so the returned flag is
 			// ignored; callers track the repo by this bare URL.
-			await syncFolder(repo, handle, tree, "", isArtifact);
+			await syncFolder(repo, handle, tree, "", isArtifact, onDocChanged);
 			return handle.url;
 		}
 		dlog("encode creating new root");
-		const { handle } = await createFolder(repo, tree, "pushwork", "", isArtifact);
+		const { handle } = await createFolder(
+			repo,
+			tree,
+			"pushwork",
+			"",
+			isArtifact,
+			onDocChanged,
+		);
 		dlog("encode new root=%s", handle.url);
 		return handle.url;
 	},
