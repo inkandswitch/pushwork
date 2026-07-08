@@ -16,7 +16,9 @@
  *        CRDT data lives in `.pushwork/storage/`.
  *     2  adds `version: 2`, `shape`, `artifactDirectories`.
  *     3  adds `branches: boolean`.
- *     4  drops `branches` (current).
+ *     4  drops `branches`.
+ *     5  moves CRDT storage from the nodefs chunk tree (`.pushwork/storage/`)
+ *        into a single LMDB database (`.pushwork/storage.lmdb`) (current).
  *
  * Each migration is a small, pure-ish step stored in {@link migrations}. The
  * "-"→1 step is the only one that touches the filesystem (it relocates the
@@ -174,12 +176,76 @@ async function migrate3To4(_root: string, raw: RawConfig): Promise<RawConfig> {
 	return { ...rest, version: 4 };
 }
 
+/**
+ * 4 → 5: move CRDT storage from the nodefs chunk tree (`.pushwork/storage/`,
+ * one file per chunk) into a single LMDB database (`.pushwork/storage.lmdb`).
+ *
+ * All chunks are copied in one LMDB transaction (all-or-nothing), then the
+ * old tree is renamed to `.pushwork/storage.nodefs.bak` (collision-safe:
+ * `.bak.N` when taken) — kept as a backup rather than deleted, matching the
+ * `.bak` precedent of earlier migrations. An empty tree has nothing to back
+ * up and is removed; a repo with no tree at all just gets the version stamp.
+ *
+ * Crash-safe by construction: if a previous run copied into the LMDB file
+ * but died before the rename/config write, re-running overwrites the same
+ * keys with the same bytes (idempotent) and finishes the rename.
+ *
+ * Memory: the whole store is materialized once (`loadRange([])` returns an
+ * array; the copy into LMDB shares the chunk buffers, so peak ≈ store size).
+ * Fine for the repo sizes pushwork targets; a streaming enumeration API in
+ * the storage interface would lift this if multi-GB stores ever appear.
+ */
+async function migrate4To5(root: string, raw: RawConfig): Promise<RawConfig> {
+	const storage = path.join(pushworkDir(root), "storage");
+	const lmdbPath = `${storage}.lmdb`;
+
+	if (await exists(storage)) {
+		const { NodeFSStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-nodefs"
+		);
+		const { LMDBStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-lmdb"
+		);
+		// The empty prefix enumerates the whole store (conformance-suite
+		// guaranteed as of the storage-lmdb publish train).
+		const chunks = await new NodeFSStorageAdapter(storage).loadRange([]);
+		const entries = chunks.flatMap((c) =>
+			c.data ? [[[...c.key], c.data] as [string[], Uint8Array]] : [],
+		);
+		if (entries.length > 0) {
+			const lmdb = new LMDBStorageAdapter(lmdbPath);
+			try {
+				await lmdb.saveBatch(entries);
+			} finally {
+				await lmdb.close();
+			}
+			await fs.rename(storage, await freeBakPath(`${storage}.nodefs.bak`));
+		} else {
+			// Nothing to back up: the tree held no chunks (at most staged tmp
+			// writes, which the two-phase contract says are discardable).
+			await fs.rm(storage, { recursive: true, force: true });
+		}
+	}
+
+	return { ...raw, version: 5 };
+}
+
+/** First of `base`, `base.1`, `base.2`, … that doesn't exist yet. */
+async function freeBakPath(base: string): Promise<string> {
+	if (!(await exists(base))) return base;
+	for (let n = 1; ; n++) {
+		const candidate = `${base}.${n}`;
+		if (!(await exists(candidate))) return candidate;
+	}
+}
+
 /** Every migration, in order. Add new steps to the end as the format evolves. */
 export const migrations: Migration[] = [
 	{ from: UNVERSIONED, to: 1, run: migrateUnversionedTo1 },
 	{ from: 1, to: 2, run: migrate1To2 },
 	{ from: 2, to: 3, run: migrate2To3 },
 	{ from: 3, to: 4, run: migrate3To4 },
+	{ from: 4, to: 5, run: migrate4To5 },
 ];
 
 export interface MigrateResult {

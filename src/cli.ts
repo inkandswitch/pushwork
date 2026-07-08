@@ -21,6 +21,7 @@ import {
 import { log } from "./log.js";
 import { out } from "./output.js";
 import {
+	isClosedStorageError,
 	isTransportError,
 	legacyUrl,
 	setAmrepoErrorSink,
@@ -44,17 +45,17 @@ process.on("warning", (w) => {
 // suppress those transport blips (Node would otherwise dump a stack trace or
 // exit), and let genuine faults through.
 process.on("uncaughtException", (err) => {
-	if (isTransportError(err)) {
-		dlog("suppressed uncaught transport error: %s", err.message);
+	if (isTransportError(err) || isClosedStorageError(err)) {
+		dlog("suppressed uncaught teardown error: %s", err.message);
 		return;
 	}
 	out.error(err);
 	out.exit(1);
 });
 process.on("unhandledRejection", (reason) => {
-	if (isTransportError(reason)) {
+	if (isTransportError(reason) || isClosedStorageError(reason)) {
 		dlog(
-			"suppressed transport rejection: %s",
+			"suppressed teardown rejection: %s",
 			reason instanceof Error ? reason.message : String(reason),
 		);
 		return;
@@ -70,7 +71,14 @@ setAmrepoErrorSink((namespace, message, ...args) => {
 	const detail = args
 		.map((a) => (a instanceof Error ? a.message : String(a)))
 		.join(" ");
-	out.warn(`${tag}: ${message}${detail ? ` ${detail}` : ""}`);
+	const full = `${tag}: ${message}${detail ? ` ${detail}` : ""}`;
+	// The dispatch-after-shutdown race also arrives here as a Rust-side ERROR
+	// log; keep it out of the UI like the rejection handlers do.
+	if (isClosedStorageError(full)) {
+		dlog("suppressed teardown storage error log: %s", full);
+		return;
+	}
+	out.warn(full);
 });
 
 const collect = (value: string, prev: string[] | undefined) =>

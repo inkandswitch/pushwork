@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import type { Repo } from "@automerge/automerge-repo";
 import {
 	claimResync,
+	isClosedStorageError,
 	isTransportError,
 	safeShutdown,
 	syncVerdict,
@@ -38,6 +39,33 @@ describe("isTransportError", () => {
 			42,
 		]) {
 			expect(isTransportError(e)).toBe(false);
+		}
+	});
+});
+
+describe("isClosedStorageError", () => {
+	it("classifies LMDB closed-env teardown errors", () => {
+		for (const e of [
+			new Error("Can not read from a closed database"),
+			new Error("The environment is already closed"),
+			"Database is already closed",
+			"LMDB store already closed",
+		]) {
+			expect(isClosedStorageError(e)).toBe(true);
+		}
+	});
+
+	it("does not swallow unrelated 'already closed' errors", () => {
+		for (const e of [
+			new Error("socket already closed"),
+			new Error("stream already closed"),
+			new Error("WebSocket already closed"),
+			new Error("invalid automerge URL"),
+			undefined,
+			null,
+			42,
+		]) {
+			expect(isClosedStorageError(e)).toBe(false);
 		}
 	});
 });

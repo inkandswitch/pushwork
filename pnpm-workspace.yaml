@@ -1,9 +1,14 @@
 allowBuilds:
   cbor-extract: true
   esbuild: true
+  # lmdb and msgpackr-extract ship prebuilt binaries for mainstream platforms
+  # (no script needed there), but fall back to a node-gyp build elsewhere —
+  # allow it so exotic platforms aren't broken by blocked scripts.
+  lmdb: true
+  msgpackr-extract: true
 
 # Force a single @automerge/automerge so there is exactly one Wasm/CRDT
 # instance in the tree (ADR-021). Lives here, not in package.json's `pnpm`
-# field, which pnpm >=10.3 ignores (ADR-024/ADR-030).
+# field, which pnpm >=10.3 ignores.
 overrides:
   "@automerge/automerge": 3.3.0-fragments.2

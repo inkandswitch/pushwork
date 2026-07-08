@@ -97,9 +97,11 @@ describe("versionLabel", () => {
 describe("migrate '-' (original pushwork) → current", () => {
 	it("rewrites config, relocates storage, and drops snapshot.json", async () => {
 		await writeConfigRaw(mainConfig());
-		// original layout: CRDT data in automerge/, plus a snapshot.json
-		await fs.mkdir(pushwork("automerge"), { recursive: true });
-		await fs.writeFile(pushwork("automerge", "blob"), "crdt-bytes");
+		// original layout: CRDT data in automerge/, plus a snapshot.json. Use a
+		// real nodefs chunk layout (two-char fan-out dir + remainder + name) so
+		// the 4 → 5 step can carry the chunk into LMDB.
+		await fs.mkdir(pushwork("automerge", "do", "c1"), { recursive: true });
+		await fs.writeFile(pushwork("automerge", "do", "c1", "snapshot"), "crdt-bytes");
 		await fs.writeFile(
 			pushwork("snapshot.json"),
 			JSON.stringify({ rootDirectoryUrl: SOME_URL }),
@@ -109,13 +111,26 @@ describe("migrate '-' (original pushwork) → current", () => {
 
 		expect(result.from).toBe(UNVERSIONED);
 		expect(result.to).toBe(CONFIG_VERSION);
-		expect(result.steps).toEqual(["- → 1", "1 → 2", "2 → 3", "3 → 4"]);
+		expect(result.steps).toEqual(["- → 1", "1 → 2", "2 → 3", "3 → 4", "4 → 5"]);
 
-		// storage moved automerge/ → storage/, contents preserved
+		// storage moved automerge/ → storage/ ("-" → 1), then storage/ → LMDB
+		// with a .bak of the tree (4 → 5); contents preserved in both places
 		expect(await exists(pushwork("automerge"))).toBe(false);
-		expect(await fs.readFile(pushwork("storage", "blob"), "utf8")).toBe(
-			"crdt-bytes",
+		expect(await exists(pushwork("storage"))).toBe(false);
+		expect(
+			await fs.readFile(pushwork("storage.nodefs.bak", "do", "c1", "snapshot"), "utf8"),
+		).toBe("crdt-bytes");
+		const { LMDBStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-lmdb"
 		);
+		const lmdb = new LMDBStorageAdapter(pushwork("storage.lmdb"));
+		try {
+			expect(await lmdb.load(["doc1", "snapshot"])).toEqual(
+				new TextEncoder().encode("crdt-bytes"),
+			);
+		} finally {
+			await lmdb.close();
+		}
 		// stale snapshot removed
 		expect(await exists(pushwork("snapshot.json"))).toBe(false);
 
@@ -167,7 +182,7 @@ describe("migrate from intermediate versions", () => {
 		await writeConfigRaw({ rootUrl: SOME_URL, backend: "subduction" });
 		const result = await migrate(root);
 		expect(result.from).toBe(1);
-		expect(result.steps).toEqual(["1 → 2", "2 → 3", "3 → 4"]);
+		expect(result.steps).toEqual(["1 → 2", "2 → 3", "3 → 4", "4 → 5"]);
 		const cfg = await readConfig(root);
 		expect(cfg).toEqual({
 			version: CONFIG_VERSION,
@@ -188,7 +203,7 @@ describe("migrate from intermediate versions", () => {
 		});
 		const result = await migrate(root);
 		expect(result.from).toBe(2);
-		expect(result.steps).toEqual(["2 → 3", "3 → 4"]);
+		expect(result.steps).toEqual(["2 → 3", "3 → 4", "4 → 5"]);
 		const cfg = await readConfig(root);
 		expect(cfg.shape).toBe("patchwork-folder");
 		expect(cfg.artifactDirectories).toEqual(["assets"]);
@@ -205,10 +220,106 @@ describe("migrate from intermediate versions", () => {
 		});
 		const result = await migrate(root);
 		expect(result.from).toBe(3);
-		expect(result.steps).toEqual(["3 → 4"]);
+		expect(result.steps).toEqual(["3 → 4", "4 → 5"]);
 		const raw = await readRawConfig(root);
 		expect(raw).not.toHaveProperty("branches");
 		expect(raw.version).toBe(CONFIG_VERSION);
+	});
+
+	it("4 → 5 copies nodefs chunks into LMDB and keeps a .bak of the tree", async () => {
+		const { NodeFSStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-nodefs"
+		);
+		const { LMDBStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-lmdb"
+		);
+		// Seed a nodefs chunk tree the way a v4 repo would have one.
+		const nodefs = new NodeFSStorageAdapter(pushwork("storage"));
+		await nodefs.save(["doc1", "snapshot", "aaaa"], new Uint8Array([1, 2, 3]));
+		await nodefs.save(["doc1", "incremental", "bbbb"], new Uint8Array([4, 5]));
+		await nodefs.save(["storage-adapter-id"], new Uint8Array([9]));
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+
+		// Data landed in the LMDB database…
+		const lmdb = new LMDBStorageAdapter(pushwork("storage.lmdb"));
+		try {
+			expect(await lmdb.load(["doc1", "snapshot", "aaaa"])).toEqual(
+				new Uint8Array([1, 2, 3]),
+			);
+			expect((await lmdb.loadRange(["doc1"])).length).toBe(2);
+			expect(await lmdb.load(["storage-adapter-id"])).toEqual(
+				new Uint8Array([9]),
+			);
+		} finally {
+			await lmdb.close();
+		}
+
+		// …and the old tree was renamed, not deleted.
+		expect(await exists(pushwork("storage"))).toBe(false);
+		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(true);
+	});
+
+	it("4 → 5 removes an empty nodefs tree without creating a .bak", async () => {
+		await fs.mkdir(pushwork("storage", "tmp"), { recursive: true });
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+		expect(await exists(pushwork("storage"))).toBe(false);
+		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(false);
+		expect(await exists(pushwork("storage.lmdb"))).toBe(false);
+	});
+
+	it("4 → 5 picks a collision-free .bak name", async () => {
+		const { NodeFSStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-nodefs"
+		);
+		const nodefs = new NodeFSStorageAdapter(pushwork("storage"));
+		await nodefs.save(["doc1", "snapshot", "aaaa"], new Uint8Array([1]));
+		// A leftover backup from an earlier migration attempt.
+		await fs.mkdir(pushwork("storage.nodefs.bak"), { recursive: true });
+		await fs.writeFile(pushwork("storage.nodefs.bak", "old"), "x");
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+		// Old backup untouched; new tree landed at .bak.1.
+		expect(await fs.readFile(pushwork("storage.nodefs.bak", "old"), "utf8")).toBe("x");
+		expect(await exists(pushwork("storage.nodefs.bak.1"))).toBe(true);
+		expect(await exists(pushwork("storage"))).toBe(false);
+	});
+
+	it("4 → 5 without a nodefs tree just stamps the version", async () => {
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+		expect(await exists(pushwork("storage.lmdb"))).toBe(false);
+		expect((await readRawConfig(root)).version).toBe(CONFIG_VERSION);
 	});
 });
 
