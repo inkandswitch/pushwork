@@ -194,7 +194,12 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		const { tree, changedUrls } = await pushFiles(
+			repo,
+			fsFiles,
+			undefined,
+			isArtifactPath,
+		);
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
@@ -210,10 +215,14 @@ export async function init(
 				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
 			);
 			stampLastSyncAt(folderHandle);
+			// Confirm the leaf docs alongside the folder doc — a clone is only
+			// viable once the server holds both.
+			const leafConfirm = confirmDocs(repo, changedUrls, opts.backend, connWait);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
 				maxMs: 15000,
 			});
+			await leafConfirm;
 		}
 
 		await writeConfig(root, {
@@ -251,6 +260,10 @@ export async function clone(
 	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		report("Fetching repository");
+		// Gate the initial find on the server handshake: with an empty local
+		// store and a socket still connecting, `find` can resolve "unavailable"
+		// before the server was ever asked.
+		if (connWait) await connWait;
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
 		if (online) {
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
@@ -479,8 +492,13 @@ export async function yoink(
 	const root = path.resolve(cwd);
 	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
 
-	const { repo, cleanup } = await openDetachedRepo(root, backend);
+	const { repo, backend: resolvedBackend, cleanup } = await openDetachedRepo(
+		root,
+		backend,
+	);
 	try {
+		// Don't race the socket: find + settle are useless before the handshake.
+		await waitForConnection(repo, resolvedBackend);
 		const handle = await repo.find<UnixFileEntry>(docUrl);
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
 		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
@@ -533,6 +551,9 @@ export async function yeet(
 		backend,
 	);
 	try {
+		// Don't race the socket: the catch-up and confirmation below are
+		// meaningless before the handshake completes.
+		await waitForConnection(repo, resolvedBackend);
 		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
 		// Catch up to the server before overwriting, then confirm our write made
 		// it back to the server.
@@ -705,7 +726,7 @@ async function commitWorkdir(
 		const fsFiles = await walkDir(root, ig);
 
 		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
+		const { tree: newTree, changedUrls } = await pushFiles(
 			repo,
 			fsFiles,
 			previousFiles,
@@ -750,10 +771,14 @@ async function commitWorkdir(
 			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
+			// Confirm changed leaf docs alongside the folder doc — peers resolve
+			// the folder's entries against the server, so both must land.
+			const leafConfirm = confirmDocs(repo, changedUrls, config.backend, connWait);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
+			await leafConfirm;
 		}
 
 		if (online) report("Writing changes");
@@ -1072,8 +1097,9 @@ async function pushFiles(
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
 	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
+): Promise<{ tree: VfsNode; changedUrls: AutomergeUrl[] }> {
 	const root = newDir();
+	const changedUrls: AutomergeUrl[] = [];
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
@@ -1098,12 +1124,14 @@ async function pushFiles(
 			const handle = await repo.find<UnixFileEntry>(refreshUrl);
 			applyFileEntry(handle, fresh);
 			baseUrl = refreshUrl;
+			changedUrls.push(refreshUrl);
 			updated++;
 			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		} else {
 			// New path: create a fresh file doc.
 			const handle = repo.create<UnixFileEntry>(fresh);
 			baseUrl = handle.url;
+			changedUrls.push(handle.url);
 			created++;
 			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		}
@@ -1114,7 +1142,48 @@ async function pushFiles(
 		setFileAt(root, segments, finalUrl);
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
-	return root;
+	return { tree: root, changedUrls };
+}
+
+// Bounded fan-out for post-commit push-confirmation of changed file docs.
+const CONFIRM_CONCURRENCY = 16;
+
+/**
+ * Push-confirm each changed file doc with the server, not just the folder
+ * doc. Without this, freshly created/updated leaf docs ride solely on the
+ * shutdown quiesce; on a slow link the process can exit before they land,
+ * leaving the folder entry pointing at a doc the server never received
+ * (the clone-unavailable / propagation flake family). Callers pass only the
+ * docs changed this run — the server may not have advertised heads for
+ * untouched docs, and waiting on those would burn the whole budget.
+ */
+async function confirmDocs(
+	repo: Repo,
+	urls: readonly AutomergeUrl[],
+	backend: Backend,
+	connWait: Promise<Connection> | undefined,
+	{ maxMs = 15000 }: { maxMs?: number } = {},
+): Promise<void> {
+	if (urls.length === 0) return;
+	// No confirmation is possible without a server; don't burn the budget
+	// (e.g. init against an unreachable server must still finish promptly).
+	if (connWait && !(await connWait).connected) return;
+	// One global deadline across all batches — a many-file commit on a dead-ish
+	// link degrades to a single bounded wait, not maxMs per batch.
+	const deadline = Date.now() + maxMs;
+	for (let i = 0; i < urls.length; i += CONFIRM_CONCURRENCY) {
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) return;
+		await Promise.all(
+			urls.slice(i, i + CONFIRM_CONCURRENCY).map(async (url) => {
+				const handle = await repo.find<unknown>(stripHeads(url));
+				await waitForServerSync(repo, handle, backend, {
+					idleMs: 1500,
+					maxMs: remaining,
+				});
+			}),
+		);
+	}
 }
 
 /**
