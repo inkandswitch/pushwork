@@ -22,6 +22,8 @@ import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
 import { log } from "./log.js";
 import {
+	confirmDelivery,
+	findBounded,
 	openRepo,
 	safeShutdown,
 	waitForConnection,
@@ -118,6 +120,14 @@ export type InitOpts = {
 	shape: string;
 	artifactDirectories?: readonly string[];
 	online?: boolean; // default: true
+	/**
+	 * Delivery-confirmation stalled with docs outstanding (after the built-in
+	 * retries): resolve true to keep waiting, false to finish as PENDING.
+	 * Omitted ⇒ finish as PENDING (non-interactive behavior).
+	 */
+	onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+	/** Confirmation progress ticks (for progress bars); default: phase report. */
+	onConfirmProgress?: (confirmed: number, total: number) => void;
 };
 
 export type CloneOpts = {
@@ -225,12 +235,19 @@ export async function init(
 				[...changedUrls, ...folderDocUrls.filter((u) => u !== folderUrl)],
 				opts.backend,
 				connWait,
+				{
+					onProgress:
+						opts.onConfirmProgress ??
+						((confirmed, total) =>
+							report(`Confirming delivery (${confirmed}/${total})`)),
+					onStalled: opts.onConfirmStalled,
+				},
 			);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
 				maxMs: 15000,
 			});
-			await leafConfirm;
+			sync = degradeUnconfirmed(sync, await leafConfirm);
 		}
 
 		await writeConfig(root, {
@@ -272,7 +289,10 @@ export async function clone(
 		// store and a socket still connecting, `find` can resolve "unavailable"
 		// before the server was ever asked.
 		if (connWait) await connWait;
-		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
+		let folderHandle: DocHandle<unknown> = await findBounded<unknown>(
+			repo,
+			opts.url as AutomergeUrl,
+		);
 		if (online) {
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
 		}
@@ -293,7 +313,7 @@ export async function clone(
 				branches,
 			});
 			dlog("clone branches doc → chose %s", chosenUrl);
-			folderHandle = await repo.find<unknown>(chosenUrl);
+			folderHandle = await findBounded<unknown>(repo, chosenUrl);
 			if (online) {
 				await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
 			}
@@ -507,7 +527,7 @@ export async function yoink(
 	try {
 		// Don't race the socket: find + settle are useless before the handshake.
 		await waitForConnection(repo, resolvedBackend);
-		const handle = await repo.find<UnixFileEntry>(docUrl);
+		const handle = await findBounded<UnixFileEntry>(repo, docUrl as AutomergeUrl);
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
 		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
 
@@ -562,7 +582,10 @@ export async function yeet(
 		// Don't race the socket: the catch-up and confirmation below are
 		// meaningless before the handshake completes.
 		await waitForConnection(repo, resolvedBackend);
-		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
+		const handle = await findBounded<UnixFileEntry>(
+			repo,
+			stripHeads(docUrl as AutomergeUrl),
+		);
 		// Catch up to the server before overwriting, then confirm our write made
 		// it back to the server.
 		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
@@ -583,7 +606,11 @@ export async function yeet(
 
 export async function sync(
 	cwd: string,
-	opts: { nuclear?: boolean } = {},
+	opts: {
+		nuclear?: boolean;
+		onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+		onConfirmProgress?: (confirmed: number, total: number) => void;
+	} = {},
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<SyncSnapshot | undefined> {
@@ -593,7 +620,16 @@ export async function sync(
 		report("Publishing to sync server");
 		return await publishCurrentTree(cwd);
 	}
-	return await commitWorkdir(cwd, { online: true }, report, warn);
+	return await commitWorkdir(
+		cwd,
+		{
+			online: true,
+			onConfirmStalled: opts.onConfirmStalled,
+			onConfirmProgress: opts.onConfirmProgress,
+		},
+		report,
+		warn,
+	);
 }
 
 /**
@@ -705,7 +741,15 @@ export async function save(
 
 async function commitWorkdir(
 	cwd: string,
-	{ online }: { online: boolean },
+	{
+		online,
+		onConfirmStalled,
+		onConfirmProgress,
+	}: {
+		online: boolean;
+		onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+		onConfirmProgress?: (confirmed: number, total: number) => void;
+	},
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<SyncSnapshot | undefined> {
@@ -791,12 +835,19 @@ async function commitWorkdir(
 				],
 				config.backend,
 				connWait,
+				{
+					onProgress:
+						onConfirmProgress ??
+						((confirmed, total) =>
+							report(`Confirming delivery (${confirmed}/${total})`)),
+					onStalled: onConfirmStalled,
+				},
 			);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
-			await leafConfirm;
+			sync = degradeUnconfirmed(sync, await leafConfirm);
 		}
 
 		if (online) report("Writing changes");
@@ -1163,8 +1214,23 @@ async function pushFiles(
 	return { tree: root, changedUrls };
 }
 
-// Bounded fan-out for post-commit push-confirmation of changed file docs.
-const CONFIRM_CONCURRENCY = 16;
+
+
+/**
+ * Fold the leaf/folder confirmation result into the root verdict: a SYNCED
+ * root with unconfirmed children is not synced — report PENDING (with the
+ * in-flight count carried on the snapshot for display) instead of silently
+ * declaring victory with docs peers would still see as "unavailable".
+ */
+function degradeUnconfirmed(
+	sync: SyncSnapshot | undefined,
+	{ unconfirmed }: { unconfirmed: number },
+): SyncSnapshot | undefined {
+	if (unconfirmed === 0 || !sync) return sync;
+	// Disconnected: OFFLINE already tells the story — don't relabel it PENDING.
+	if (!sync.connected) return sync;
+	return { ...sync, synced: false, pending: true, unconfirmed };
+}
 
 /**
  * Push-confirm each changed file doc with the server, not just the folder
@@ -1180,29 +1246,25 @@ async function confirmDocs(
 	urls: readonly AutomergeUrl[],
 	backend: Backend,
 	connWait: Promise<Connection> | undefined,
-	{ maxMs = 15000 }: { maxMs?: number } = {},
-): Promise<void> {
+	{
+		onProgress,
+		onStalled,
+	}: {
+		onProgress?: (confirmed: number, total: number) => void;
+		onStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+	} = {},
+): Promise<{ unconfirmed: number }> {
 	const unique = [...new Set(urls)];
-	if (unique.length === 0) return;
-	// No confirmation is possible without a server; don't burn the budget
+	if (unique.length === 0) return { unconfirmed: 0 };
+	// No confirmation is possible without a server; don't burn any budget
 	// (e.g. init against an unreachable server must still finish promptly).
-	if (connWait && !(await connWait).connected) return;
-	// One global deadline across all batches — a many-file commit on a dead-ish
-	// link degrades to a single bounded wait, not maxMs per batch.
-	const deadline = Date.now() + maxMs;
-	for (let i = 0; i < unique.length; i += CONFIRM_CONCURRENCY) {
-		const remaining = deadline - Date.now();
-		if (remaining <= 0) return;
-		await Promise.all(
-			unique.slice(i, i + CONFIRM_CONCURRENCY).map(async (url) => {
-				const handle = await repo.find<unknown>(stripHeads(url));
-				await waitForServerSync(repo, handle, backend, {
-					idleMs: 1500,
-					maxMs: remaining,
-				});
-			}),
-		);
+	if (connWait && !(await connWait).connected) {
+		return { unconfirmed: unique.length };
 	}
+	const handles = await Promise.all(
+		unique.map((url) => repo.find<unknown>(stripHeads(url))),
+	);
+	return confirmDelivery(repo, handles, backend, { onProgress, onStalled });
 }
 
 /**
@@ -1250,7 +1312,8 @@ async function readFileBytes(
 ): Promise<Map<string, { url: AutomergeUrl; bytes: Uint8Array }>> {
 	const out = new Map<string, { url: AutomergeUrl; bytes: Uint8Array }>();
 	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
+		// Possibly remote (a peer's new doc arriving via sync): bound the fetch.
+		const handle = await findBounded<UnixFileEntry>(repo, fileUrl);
 		out.set(posixPath, {
 			url: fileUrl,
 			bytes: contentToBytes(handle.doc().content),
@@ -1274,7 +1337,7 @@ async function materializeTree(
 	const desired = new Map<string, Uint8Array>();
 	await Promise.all(
 		[...leaves].map(async ([posixPath, fileUrl]) => {
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			const handle = await findBounded<UnixFileEntry>(repo, fileUrl);
 			desired.set(posixPath, contentToBytes(handle.doc().content));
 		}),
 	);

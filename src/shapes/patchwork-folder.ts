@@ -6,6 +6,7 @@ import {
 	type Repo,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
+import { findBounded } from "../repo.js";
 import { pinUrl, stripHeads } from "./file.js";
 import { newDir, type Shape, type VfsNode } from "./types.js";
 
@@ -215,7 +216,9 @@ async function readFolder(
 		if (!link?.name) continue;
 		if (!isValidAutomergeUrl(link.url)) continue;
 		if (link.type === "folder") {
-			const sub = await repo.find<FolderDoc>(link.url);
+			// Possibly remote (clone / sync pull): bound the fetch so a wedged
+			// transport can't hang the whole command.
+			const sub = await findBounded<FolderDoc>(repo, link.url);
 			if (isFolderDoc(sub.doc())) {
 				const subTree = await readFolder(repo, sub);
 				if (tree.kind === "dir") tree.entries.set(link.name, subTree);
