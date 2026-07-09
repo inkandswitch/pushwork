@@ -143,6 +143,18 @@ export class Output {
 		this.task(message);
 	}
 
+	/**
+	 * Update the live spinner's text in place — no new line per tick. The
+	 * latest text becomes the phase's completion line, so the final state
+	 * (e.g. a full progress bar) persists. Porcelain/plain/quiet: no-op; those
+	 * modes get one completion line per phase and shouldn't be tick-spammed.
+	 */
+	progress(message: string): void {
+		if (!this.spinner) return;
+		this.taskMessage = message;
+		this.spinner.message(message);
+	}
+
 	done(message?: string, showTime = true): void {
 		if (this.taskStart == null) return;
 		let text = message ?? this.taskMessage ?? "done";

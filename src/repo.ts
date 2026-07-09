@@ -1,4 +1,5 @@
 import {
+	parseAutomergeUrl,
 	Repo,
 	WorkerWebSocketEndpoint,
 	initSubduction,
@@ -242,6 +243,41 @@ const errMessage = (err: unknown): string =>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * `repo.find` with a deadline and one retry — the only unbounded await in a
+ * pushwork command is a doc fetch, and a transport that wedges without
+ * closing (frames stop, socket stays "open") leaves it pending forever: the
+ * doc never turns ready, and "unavailable" needs a peer to actually answer.
+ * The retry re-issues the request after evicting the stuck load, which also
+ * recovers the case where a reconnect dropped the original request.
+ */
+export async function findBounded<T>(
+	repo: Repo,
+	url: AutomergeUrl,
+	{ maxMs = 30000, retries = 1 }: { maxMs?: number; retries?: number } = {},
+): Promise<DocHandle<T>> {
+	for (let attempt = 0; ; attempt++) {
+		const ctl = new AbortController();
+		const timer = setTimeout(
+			() => ctl.abort(new Error(`fetching ${url} timed out after ${maxMs}ms`)),
+			maxMs,
+		);
+		try {
+			return await repo.find<T>(url, { signal: ctl.signal });
+		} catch (err) {
+			if (!ctl.signal.aborted || attempt >= retries) throw err;
+			dlog("findBounded: %s timed out; evicting and retrying", url);
+			try {
+				await repo.removeFromCache(parseAutomergeUrl(url).documentId);
+			} catch {
+				// eviction is best-effort; the retry may still hit the stuck load
+			}
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+}
+
+/**
  * Where a document stands relative to the Subduction sync server. Returned by
  * {@link waitForServerSync}; the CLI renders the two head sets so you can see at
  * a glance that your repo and the server agree.
@@ -267,6 +303,12 @@ export type SyncSnapshot = {
 	connected: boolean;
 	/** The sync server's peer id (its verifying key), once the handshake is done. */
 	serverPeerId?: string;
+	/**
+	 * Docs changed this run whose delivery the server hadn't confirmed before
+	 * the deadline (set by the CLI's confirm pass, not by waitForServerSync).
+	 * They finish uploading during the shutdown quiesce or on the next sync.
+	 */
+	unconfirmed?: number;
 	/** Our current Automerge heads for the doc. */
 	localHeads: string[];
 	/** The heads the server last advertised for the doc (Subduction sedimentree heads). */
@@ -290,6 +332,26 @@ async function connectedServerPeer(repo: Repo): Promise<string | undefined> {
 	}
 }
 
+/**
+ * Resolve the server peer and the key under which `DocHandle.getSyncInfo`
+ * tracks its advertised heads. Subduction keys sync info by the peer id
+ * itself; classic sync keys it by the peer's announced storageId — `syncKey`
+ * is undefined until the relevant handshake has completed (and stays
+ * undefined for a legacy relay that never announces a storageId).
+ */
+async function serverSyncTarget(
+	repo: Repo,
+	backend: Backend,
+): Promise<{ peerId?: string; syncKey?: string }> {
+	if (backend === "subduction") {
+		const peerId = await connectedServerPeer(repo);
+		return { peerId, syncKey: peerId };
+	}
+	const peerId = repo.peers[0];
+	if (peerId === undefined) return {};
+	return { peerId, syncKey: repo.getStorageIdOfPeer(peerId) };
+}
+
 export type Connection = {
 	connected: boolean;
 	/** ms from this call until the connection was established (0 if already up). */
@@ -310,7 +372,37 @@ export async function waitForConnection(
 	{ maxMs = 15000 }: { maxMs?: number } = {},
 ): Promise<Connection> {
 	const start = Date.now();
-	if (backend !== "subduction") return { connected: false, connectMs: 0 };
+	if (backend !== "subduction") {
+		// Legacy: the WebSocketClientAdapter connects asynchronously and there is
+		// no subduction handshake to observe — wait for the classic "peer" event
+		// instead. Without this gate, a command's local settle (~1.5s) can finish
+		// before the socket even opens, and the repo shuts down having sent
+		// nothing (the legacy-flake family: clone-after-init unavailable, yeet
+		// never delivered).
+		const firstPeer = () => repo.peers[0] as string | undefined;
+		if (firstPeer() !== undefined) {
+			return { connected: true, connectMs: 0, serverPeerId: firstPeer() };
+		}
+		const connected = await new Promise<boolean>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const net = repo.networkSubsystem;
+			const onPeer = () => {
+				if (timer) clearTimeout(timer);
+				net.off("peer", onPeer);
+				resolve(true);
+			};
+			net.on("peer", onPeer);
+			timer = setTimeout(() => {
+				net.off("peer", onPeer);
+				resolve(firstPeer() !== undefined);
+			}, maxMs);
+		});
+		return {
+			connected,
+			connectMs: Date.now() - start,
+			serverPeerId: connected ? firstPeer() : undefined,
+		};
+	}
 	if (repo.isSubductionConnected()) {
 		return { connected: true, connectMs: 0, serverPeerId: await connectedServerPeer(repo) };
 	}
@@ -433,8 +525,11 @@ export function syncVerdict(args: {
  * direction; we additionally gate on a brief local-heads settle so our own edit
  * has flushed before we trust the result.
  *
- * On the legacy backend there is no Subduction peer to hear from, so this falls
- * back to {@link waitForSync} and reports connected=false with empty serverHeads.
+ * The legacy backend speaks the classic sync protocol, but a relay that
+ * announces a storageId (the stock automerge sync server does) still yields
+ * per-doc sync info — so both backends get the same push-confirmed verdict.
+ * Only a relay without a storageId falls back to {@link waitForSync}'s
+ * local settle.
  */
 export async function waitForServerSync<T>(
 	repo: Repo,
@@ -448,31 +543,24 @@ export async function waitForServerSync<T>(
 	}: { idleMs?: number; maxMs?: number; pollMs?: number; resyncAfterMs?: number } = {},
 ): Promise<SyncSnapshot> {
 	const headsOf = () => [...(handle.heads() ?? [])] as string[];
-
-	// Legacy backend never speaks Subduction: there are no server heads to
-	// compare against, so settle locally and report what little we can.
-	if (backend !== "subduction") {
-		await waitForSync(handle, { idleMs, maxMs });
-		return {
-			url: handle.url,
-			synced: true,
-			pending: false,
-			connected: false,
-			localHeads: headsOf(),
-			serverHeads: [],
-		};
-	}
+	const isConnected = () =>
+		backend === "subduction"
+			? repo.isSubductionConnected()
+			: repo.peers.length > 0;
 
 	const documentId = handle.documentId;
 	dlog("waitForServerSync url=%s idleMs=%d maxMs=%d", handle.url, idleMs, maxMs);
 
 	// Wake the poll loop the instant the server advertises new heads for this doc
-	// (otherwise we just notice on the next poll tick).
+	// (otherwise we just notice on the next poll tick). Subduction advertises via
+	// the repo-level event; classic sync via the handle-level one.
 	let wake: (() => void) | null = null;
 	const onRemoteHeads = (p: { documentId: string }) => {
 		if (p.documentId === documentId) wake?.();
 	};
 	repo.on("subduction-remote-heads", onRemoteHeads);
+	const onHandleRemoteHeads = () => wake?.();
+	handle.on("remote-heads", onHandleRemoteHeads);
 
 	const start = Date.now();
 	let lastHeads = JSON.stringify(handle.heads());
@@ -489,12 +577,36 @@ export async function waitForServerSync<T>(
 			}
 			const localQuiet = now - lastHeadsChange >= idleMs;
 
-			const serverPeerId = await connectedServerPeer(repo);
+			const { peerId: serverPeerId, syncKey } = await serverSyncTarget(
+				repo,
+				backend,
+			);
+
+			// A legacy relay that never announces a storageId can't be
+			// push-confirmed at all — settle locally for the remaining budget
+			// (the pre-verdict legacy behavior).
+			if (backend !== "subduction" && serverPeerId && syncKey === undefined) {
+				dlog("waitForServerSync legacy peer has no storageId; settling url=%s", handle.url);
+				await waitForSync(handle, {
+					idleMs,
+					maxMs: Math.max(pollMs, maxMs - (now - start)),
+				});
+				return {
+					url: handle.url,
+					synced: true,
+					pending: false,
+					connected: true,
+					serverPeerId,
+					localHeads: headsOf(),
+					serverHeads: [],
+				};
+			}
+
 			let serverHeads: string[] = [];
 			let synced = false;
 			let pending = false;
-			if (serverPeerId) {
-				const info = handle.getSyncInfo(serverPeerId as never);
+			if (syncKey) {
+				const info = handle.getSyncInfo(syncKey as never);
 				if (info && info.lastHeads.length > 0) {
 					({ synced, pending } = syncVerdict({
 						localQuiet,
@@ -520,7 +632,7 @@ export async function waitForServerSync<T>(
 					url: handle.url,
 					synced,
 					pending: synced ? false : pending,
-					connected: repo.isSubductionConnected(),
+					connected: isConnected(),
 					serverPeerId,
 					localHeads: headsOf(),
 					serverHeads,
@@ -530,7 +642,12 @@ export async function waitForServerSync<T>(
 			// Behind for a while and the scheduler isn't catching us up — re-arm a
 			// single fresh sync round (the technique's stuck-doc nudge, without the
 			// full per-doc exponential backoff a long-lived client would keep).
-			if (!resynced && serverPeerId && now - start >= resyncAfterMs) {
+			if (
+				backend === "subduction" &&
+				!resynced &&
+				serverPeerId &&
+				now - start >= resyncAfterMs
+			) {
 				resynced = true; // don't reconsider within this call regardless
 				if (claimResync(repo, documentId)) {
 					dlog("waitForServerSync nudging resync url=%s", handle.url);
@@ -551,6 +668,158 @@ export async function waitForServerSync<T>(
 		}
 	} finally {
 		repo.off("subduction-remote-heads", onRemoteHeads);
+		handle.off("remote-heads", onHandleRemoteHeads);
+	}
+}
+
+/**
+ * Drain-style delivery confirmation for a set of docs written earlier in this
+ * command: one repo-level listener + one loop, instead of a poll loop per doc
+ * (which convoys on the slowest doc in each batch). A doc counts as confirmed
+ * when the server's advertised heads cover its Automerge frontier — the same
+ * push-confirmation rule as {@link waitForServerSync}, minus the local-settle
+ * gate (nothing local is racing; the writes happened before this call).
+ *
+ * The server advertises heads on its own sync schedule, not as a per-doc
+ * receipt, so stragglers get a collective `resyncSubduction` nudge after
+ * `nudgeAfterMs`, and again on every stall (no confirmation for `stallMs`)
+ * up to `retries` times. When retries are exhausted, `onStalled` is consulted:
+ * resolve true to keep waiting (retries reset), false to give up and report
+ * the remainder — the CLI wires this to an interactive prompt, so a user can
+ * choose to keep waiting out a slow server or bail to PENDING. A legacy relay
+ * without a storageId can't confirm anything; delivery is entrusted to the
+ * shutdown quiesce as before.
+ */
+export async function confirmDelivery(
+	repo: Repo,
+	handles: readonly DocHandle<unknown>[],
+	backend: Backend,
+	{
+		stallMs = 10000,
+		nudgeAfterMs = 3000,
+		pollMs = 500,
+		retries = 2,
+		onProgress,
+		onStalled,
+	}: {
+		stallMs?: number;
+		nudgeAfterMs?: number;
+		pollMs?: number;
+		/** Extra nudge rounds after a stall before consulting `onStalled`. */
+		retries?: number;
+		onProgress?: (confirmed: number, total: number) => void;
+		/** Called when retries are exhausted; true = keep waiting, false = bail. */
+		onStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+	} = {},
+): Promise<{ unconfirmed: number }> {
+	const pending = new Map<string, DocHandle<unknown>>();
+	for (const h of handles) pending.set(h.documentId, h);
+	const total = pending.size;
+	if (total === 0) return { unconfirmed: 0 };
+
+	const isConfirmed = (h: DocHandle<unknown>, syncKey: string): boolean => {
+		const info = h.getSyncInfo(syncKey as never);
+		if (!info || info.lastHeads.length === 0) return false;
+		const advertised = new Set<string>(info.lastHeads);
+		const frontier = [...(h.heads() ?? [])] as string[];
+		return frontier.length > 0 && frontier.every((x) => advertised.has(x));
+	};
+
+	// One wake channel for all docs: repo-level for subduction, handle-level
+	// for classic sync.
+	let wake: (() => void) | null = null;
+	const onRepoRemoteHeads = (p: { documentId: string }) => {
+		if (pending.has(p.documentId)) wake?.();
+	};
+	repo.on("subduction-remote-heads", onRepoRemoteHeads);
+	const handleListeners: Array<[DocHandle<unknown>, () => void]> = [];
+	for (const h of pending.values()) {
+		const fn = () => wake?.();
+		h.on("remote-heads", fn);
+		handleListeners.push([h, fn]);
+	}
+
+	const nudgePending = (viaClaim: boolean) => {
+		for (const h of pending.values()) {
+			if (viaClaim && !claimResync(repo, h.documentId)) continue;
+			try {
+				repo.resyncSubduction(h.documentId);
+			} catch {
+				// no Subduction source / doc not attached
+			}
+		}
+	};
+
+	const start = Date.now();
+	let lastCount = total;
+	let lastProgress = start;
+	let nudged = false;
+	let retriesLeft = retries;
+	try {
+		for (;;) {
+			const { peerId, syncKey } = await serverSyncTarget(repo, backend);
+			if (syncKey) {
+				for (const [id, h] of pending) {
+					if (isConfirmed(h, syncKey)) pending.delete(id);
+				}
+			} else if (backend !== "subduction" && peerId) {
+				// Relay never announces a storageId: unconfirmable by design;
+				// trust the settle + shutdown quiesce (pre-verdict legacy behavior).
+				dlog("confirmDelivery: legacy relay has no storageId; trusting quiesce");
+				return { unconfirmed: 0 };
+			}
+
+			const now = Date.now();
+			if (pending.size < lastCount) {
+				lastCount = pending.size;
+				lastProgress = now;
+				onProgress?.(total - pending.size, total);
+			}
+			if (pending.size === 0) return { unconfirmed: 0 };
+
+			// The server stores long before it advertises; prod it once for the
+			// stragglers instead of waiting out its gossip schedule.
+			if (backend === "subduction" && !nudged && now - start >= nudgeAfterMs) {
+				nudged = true;
+				nudgePending(true);
+				dlog("confirmDelivery: nudged %d stragglers", pending.size);
+			}
+
+			if (now - lastProgress >= stallMs) {
+				if (retriesLeft > 0) {
+					retriesLeft--;
+					lastProgress = now;
+					if (backend === "subduction") nudgePending(false);
+					dlog(
+						"confirmDelivery: stall retry (%d left) with %d/%d unconfirmed",
+						retriesLeft,
+						pending.size,
+						total,
+					);
+					continue;
+				}
+				if (onStalled && (await onStalled(pending.size, total))) {
+					retriesLeft = retries;
+					lastProgress = Date.now();
+					if (backend === "subduction") nudgePending(false);
+					continue;
+				}
+				dlog(
+					"confirmDelivery: stalled with %d/%d unconfirmed",
+					pending.size,
+					total,
+				);
+				return { unconfirmed: pending.size };
+			}
+
+			await sleepOrWake(pollMs, (fn) => {
+				wake = fn;
+			});
+			wake = null;
+		}
+	} finally {
+		repo.off("subduction-remote-heads", onRepoRemoteHeads);
+		for (const [h, fn] of handleListeners) h.off("remote-heads", fn);
 	}
 }
 

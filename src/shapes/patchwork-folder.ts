@@ -6,6 +6,7 @@ import {
 	type Repo,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
+import { findBounded } from "../repo.js";
 import { pinUrl, stripHeads } from "./file.js";
 import { newDir, type Shape, type VfsNode } from "./types.js";
 
@@ -59,7 +60,7 @@ const childPath = (dirPath: string, name: string) =>
 	dirPath ? `${dirPath}/${name}` : name;
 
 export const patchworkFolderShape: Shape = {
-	async encode({ repo, tree, previousRoot, isArtifactDir }) {
+	async encode({ repo, tree, previousRoot, isArtifactDir, onDocChanged }) {
 		if (tree.kind !== "dir") throw new Error("folder: root must be a dir");
 		const isArtifact: IsArtifactDir = isArtifactDir ?? (() => false);
 
@@ -68,11 +69,18 @@ export const patchworkFolderShape: Shape = {
 			const handle = previousRoot as DocHandle<FolderDoc>;
 			// Root path is "" — never an artifact dir — so the returned flag is
 			// ignored; callers track the repo by this bare URL.
-			await syncFolder(repo, handle, tree, "", isArtifact);
+			await syncFolder(repo, handle, tree, "", isArtifact, onDocChanged);
 			return handle.url;
 		}
 		dlog("encode creating new root");
-		const { handle } = await createFolder(repo, tree, "pushwork", "", isArtifact);
+		const { handle } = await createFolder(
+			repo,
+			tree,
+			"pushwork",
+			"",
+			isArtifact,
+			onDocChanged,
+		);
 		dlog("encode new root=%s", handle.url);
 		return handle.url;
 	},
@@ -93,6 +101,7 @@ async function createFolder(
 	title: string,
 	dirPath: string,
 	isArtifact: IsArtifactDir,
+	onDocChanged?: (url: AutomergeUrl) => void,
 ): Promise<{ handle: DocHandle<FolderDoc>; frozen: boolean }> {
 	if (tree.kind !== "dir") throw new Error("createFolder: not a dir");
 	const links: DocLink[] = [];
@@ -106,6 +115,7 @@ async function createFolder(
 				name,
 				childPath(dirPath, name),
 				isArtifact,
+				onDocChanged,
 			);
 			links.push({
 				name,
@@ -119,6 +129,7 @@ async function createFolder(
 		title,
 		docs: links,
 	});
+	onDocChanged?.(handle.url);
 	dlog("createFolder title=%s docs=%d url=%s", title, links.length, handle.url);
 	return { handle, frozen: isArtifact(dirPath) };
 }
@@ -129,6 +140,7 @@ async function syncFolder(
 	tree: VfsNode,
 	dirPath: string,
 	isArtifact: IsArtifactDir,
+	onDocChanged?: (url: AutomergeUrl) => void,
 ): Promise<boolean> {
 	if (tree.kind !== "dir") throw new Error("syncFolder: not a dir");
 
@@ -159,6 +171,7 @@ async function syncFolder(
 					child,
 					childPath(dirPath, name),
 					isArtifact,
+					onDocChanged,
 				);
 				nextLinks.push({
 					name,
@@ -174,6 +187,7 @@ async function syncFolder(
 			name,
 			childPath(dirPath, name),
 			isArtifact,
+			onDocChanged,
 		);
 		nextLinks.push({
 			name,
@@ -187,6 +201,7 @@ async function syncFolder(
 		if (typeof d.title !== "string") d.title = "pushwork";
 		d.docs = nextLinks;
 	});
+	onDocChanged?.(handle.url);
 	return isArtifact(dirPath);
 }
 
@@ -201,7 +216,9 @@ async function readFolder(
 		if (!link?.name) continue;
 		if (!isValidAutomergeUrl(link.url)) continue;
 		if (link.type === "folder") {
-			const sub = await repo.find<FolderDoc>(link.url);
+			// Possibly remote (clone / sync pull): bound the fetch so a wedged
+			// transport can't hang the whole command.
+			const sub = await findBounded<FolderDoc>(repo, link.url);
 			if (isFolderDoc(sub.doc())) {
 				const subTree = await readFolder(repo, sub);
 				if (tree.kind === "dir") tree.entries.set(link.name, subTree);

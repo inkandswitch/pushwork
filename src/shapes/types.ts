@@ -30,6 +30,13 @@ export interface Shape {
 		 * the whole subtree reads as frozen. Omitted ⇒ no folder is pinned.
 		 */
 		isArtifactDir?: (posixPath: string) => boolean;
+		/**
+		 * Invoked with the bare URL of every directory doc this encode created or
+		 * rewrote (root included). Callers push-confirm these with the sync server
+		 * before declaring the tree published — leaf file docs are tracked
+		 * separately, but intermediate folder docs exist only inside the shape.
+		 */
+		onDocChanged?: (url: AutomergeUrl) => void;
 	}): Promise<AutomergeUrl>;
 	decode(args: {
 		repo: Repo;
