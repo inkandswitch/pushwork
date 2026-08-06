@@ -5,5 +5,11 @@
 	"bracketSpacing": false,
 	"trailingComma": "es5",
 	"arrowParens": "avoid",
-	"objectWrap": "collapse"
+	"objectWrap": "collapse",
+	"overrides": [
+		{
+			"files": "*.md",
+			"options": {"proseWrap": "never"}
+		}
+	]
 }

@@ -5,7 +5,7 @@ import { stripHeads } from "./shapes/file.js";
 
 export type Backend = "legacy" | "subduction";
 
-export const CONFIG_VERSION = 4;
+export const CONFIG_VERSION = 5;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;

@@ -20,17 +20,14 @@ import {
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
-import {
-	shardClone,
-	shardIngest,
-	shouldShardClone,
-	shouldShardIngest,
-} from "./ingest-pool.js";
 import { log } from "./log.js";
 import {
 	openRepo,
+	safeShutdown,
+	waitForConnection,
 	waitForSync,
 	waitForServerSync,
+	type Connection,
 	type SyncSnapshot,
 } from "./repo.js";
 import {
@@ -186,6 +183,8 @@ export async function init(
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
+	// Start measuring the connection now so the local walk/encode overlaps it.
+	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		const shape = await resolveShape(opts.shape);
 		const ig = await loadIgnore(root);
@@ -195,9 +194,7 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = shouldShardIngest(fsFiles.size)
-			? await ingestSharded(repo, root, opts.backend, online, fsFiles, isArtifactPath)
-			: await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
@@ -209,7 +206,9 @@ export async function init(
 
 		let sync: SyncSnapshot | undefined;
 		if (online) {
-			report("Publishing to sync server");
+			report(
+				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
+			);
 			stampLastSyncAt(folderHandle);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
@@ -224,10 +223,11 @@ export async function init(
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
 		return { url: folderUrl, files: fsFiles.size, sync };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -248,6 +248,7 @@ export async function clone(
 
 	const online = opts.online ?? true;
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
+	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		report("Fetching repository");
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
@@ -289,7 +290,7 @@ export async function clone(
 		const tree = await shape.decode({ repo, root: folderHandle });
 		const fileCount = flattenLeaves(tree).size;
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
-		await materializeTree(repo, root, tree, { backend: opts.backend, online });
+		await materializeTree(repo, root, tree);
 
 		// Now that the tree (including any `.pushworkattributes`) is on disk,
 		// decide what to record locally. If the repo carries its own artifact
@@ -316,10 +317,11 @@ export async function clone(
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
 		return { url: storedUrl, files: fileCount, sync };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -439,7 +441,7 @@ async function openDetachedRepo(
 		const repo = await openRepo(resolved, storageDir(root), {
 			offline: false,
 		});
-		return { repo, backend: resolved, cleanup: () => repo.shutdown() };
+		return { repo, backend: resolved, cleanup: () => safeShutdown(repo) };
 	}
 	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-"));
 	dlog("openDetachedRepo no config; ephemeral storage=%s", tmp);
@@ -449,7 +451,7 @@ async function openDetachedRepo(
 		repo,
 		backend: resolved,
 		cleanup: async () => {
-			await repo.shutdown();
+			await safeShutdown(repo);
 			await fs.rm(tmp, { recursive: true, force: true });
 		},
 	};
@@ -577,6 +579,7 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 	dlog("publish root=%s", root);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	const connWait = waitForConnection(repo, config.backend);
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -590,10 +593,11 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 			idleMs: 1500,
 			maxMs: 15000,
 		});
+		await attachConnectMs(sync, connWait);
 		dlog("publish complete synced=%s", sync.synced);
 		return sync;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -658,7 +662,7 @@ export async function nuclearizeRepo(
 			isArtifactDir: isArtifactPath,
 		});
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -688,6 +692,7 @@ async function commitWorkdir(
 	const repo = await openRepo(config.backend, storageDir(root), {
 		offline: !online,
 	});
+	const connWait = online ? waitForConnection(repo, config.backend) : undefined;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -720,41 +725,45 @@ async function commitWorkdir(
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
-			// First catch up to the server (we hold everything it advertises)
-			// before refreshing pins, so pinned leaves capture each file doc's
-			// post-merge heads.
-			await waitForServerSync(repo, folderHandle, config.backend, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
+			// Only artifact (pinned) leaves need a pre-refresh catch-up (to pin to
+			// the server's merged heads). No artifacts → the single confirm-wait
+			// below both pulls peer changes and pushes our stamp.
+			const hasArtifacts = [...flattenLeaves(newTree).keys()].some(isArtifactPath);
 
-			// After peer changes have settled, refresh the folder doc so its
-			// pinned (artifact) leaves reference each file doc's current
-			// heads. Bare URLs already track current heads implicitly.
-			const refreshed = await refreshFolderPins(
-				repo,
-				folderHandle,
-				shape,
-				isArtifactPath,
-			);
+			let refreshed = false;
+			if (hasArtifacts) {
+				// Catch up so the re-pin captures each file doc's post-merge heads.
+				await waitForServerSync(repo, folderHandle, config.backend, {
+					idleMs: 1500,
+					maxMs: 15000,
+				});
+				// Bare URLs already track current heads implicitly; only pins move.
+				refreshed = await refreshFolderPins(
+					repo,
+					folderHandle,
+					shape,
+					isArtifactPath,
+				);
+			}
 
 			// Always stamp lastSyncAt — a sync is also a checkpoint that
-			// "we reconciled with the server at this time" — and re-confirm the
+			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
-				maxMs: refreshed ? 10000 : 5000,
+				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
 		}
 
 		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
 		await materializeTree(repo, root, finalTree);
+		await attachConnectMs(sync, connWait);
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -809,7 +818,7 @@ export async function heads(
 		out.sort((a, b) => a.path.localeCompare(b.path));
 		return out;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -838,7 +847,7 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 		const diff = computeDiff(previousFiles, fsFiles);
 		return { diff };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -875,7 +884,7 @@ export async function diff(
 		}
 		return out;
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -934,7 +943,7 @@ export async function cutWorkdir(
 		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
 		return { id: snarf.id, entries: entries.length };
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 }
 
@@ -966,7 +975,7 @@ export async function pasteSnarf(
 			);
 		}
 	} finally {
-		await repo.shutdown();
+		await safeShutdown(repo);
 	}
 
 	const snarf = await takeSnarf(root, selector);
@@ -1007,6 +1016,22 @@ function stampLastSyncAt(handle: DocHandle<unknown>): void {
 	(handle as DocHandle<Stamped>).change((d: Stamped) => {
 		d.lastSyncAt = Date.now();
 	});
+}
+
+/**
+ * Await the connection probe started at repo-open and stamp its measured connect
+ * time (and any server peer id) onto the sync snapshot.
+ */
+async function attachConnectMs(
+	sync: SyncSnapshot | undefined,
+	connWait: Promise<Connection> | undefined,
+): Promise<void> {
+	if (!connWait) return;
+	const conn = await connWait;
+	if (sync) {
+		sync.connectMs = conn.connectMs;
+		if (sync.serverPeerId == null) sync.serverPeerId = conn.serverPeerId;
+	}
 }
 
 function normalizeDirs(dirs: readonly string[]): string[] {
@@ -1093,49 +1118,6 @@ async function pushFiles(
 }
 
 /**
- * Like `pushFiles` for the all-new case (init), but builds the file documents
- * across the shared-nothing worker pool: workers create + persist (+ upload)
- * their shard and report `{path, url, heads}`; this thread only stitches the
- * URLs into the tree (pinning artifacts from the reported heads) and falls
- * back to main-thread creation for any path a worker could not handle.
- */
-async function ingestSharded(
-	repo: Repo,
-	root: string,
-	backend: Backend,
-	online: boolean,
-	fsFiles: Map<string, Uint8Array>,
-	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
-	const { created, failed } = await shardIngest({
-		root,
-		backend,
-		online,
-		files: fsFiles,
-		isArtifact: isArtifactPath,
-	});
-
-	const tree = newDir();
-	for (const [posixPath, url] of created) {
-		setFileAt(tree, posixPath.split("/").filter(Boolean), url);
-	}
-
-	for (const posixPath of failed) {
-		const bytes = fsFiles.get(posixPath);
-		if (!bytes) continue;
-		const isArtifact = isArtifactPath(posixPath);
-		const handle = repo.create<UnixFileEntry>(
-			makeFileEntry(posixPath, bytes, isArtifact),
-		);
-		const url = isArtifact ? pinUrl(handle) : handle.url;
-		setFileAt(tree, posixPath.split("/").filter(Boolean), url);
-	}
-
-	dlog("ingestSharded created=%d main-fallback=%d", created.size, failed.length);
-	return tree;
-}
-
-/**
  * Re-pin every artifact leaf in the folder doc to its file doc's current
  * heads. Bare (non-artifact) URLs are left as-is since they already track
  * current heads implicitly. Returns true if any leaf URL was rewritten.
@@ -1193,24 +1175,30 @@ async function materializeTree(
 	repo: Repo,
 	root: string,
 	tree: VfsNode,
-	shardCtx?: { backend: Backend; online: boolean },
 ): Promise<void> {
 	const leaves = flattenLeaves(tree);
 
-	// Clone path: fan the per-file download + write out to the worker pool.
-	// Only the caller that knows the working tree is freshly materialized
-	// (clone) passes shardCtx, so writing every leaf is correct here.
-	if (shardCtx && shouldShardClone(leaves.size)) {
-		await materializeSharded(repo, root, leaves, shardCtx);
-		return;
-	}
-
+	// Fetch all leaves concurrently: a single Subduction connection
+	// multiplexes concurrent `repo.find`s, so per-doc sync round-trips overlap
+	// instead of serializing (benched vs serial and vs the old worker pool in
+	// ADR-031/032). The transport's own receive-credit windowing is the
+	// backpressure; no artificial cap here.
 	const desired = new Map<string, Uint8Array>();
-	for (const [posixPath, fileUrl] of leaves) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
-		desired.set(posixPath, contentToBytes(handle.doc().content));
-	}
+	await Promise.all(
+		[...leaves].map(async ([posixPath, fileUrl]) => {
+			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			desired.set(posixPath, contentToBytes(handle.doc().content));
+		}),
+	);
 	dlog("materialize desired: %d files", desired.size);
+	// Invariant: every leaf was fetched. The loop below DELETES anything on
+	// disk that isn't in `desired`, so a silent fetch shortfall must be a loud
+	// error here rather than a tree wipe.
+	if (desired.size !== leaves.size) {
+		throw new Error(
+			`materialize fetched ${desired.size} of ${leaves.size} documents; refusing to reconcile a partial tree`,
+		);
+	}
 
 	const ig = await loadIgnore(root);
 	const present = await walkDir(root, ig);
@@ -1233,52 +1221,6 @@ async function materializeTree(
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
 	dlog("materialize done: %d written, %d removed", written, removed);
-}
-
-async function materializeSharded(
-	repo: Repo,
-	root: string,
-	leaves: Map<string, AutomergeUrl>,
-	shardCtx: { backend: Backend; online: boolean },
-): Promise<void> {
-	const { written, failed } = await shardClone({
-		root,
-		backend: shardCtx.backend,
-		online: shardCtx.online,
-		leaves,
-	});
-
-	// Main-thread fallback for any leaf a worker could not write.
-	for (const posixPath of failed) {
-		const url = leaves.get(posixPath);
-		if (!url) continue;
-		const handle = await repo.find<UnixFileEntry>(url);
-		await writeFileAtomic(
-			path.join(root, fromPosix(posixPath)),
-			contentToBytes(handle.doc().content),
-		);
-	}
-
-	// Remove anything on disk the tree no longer references.
-	const ig = await loadIgnore(root);
-	const present = await walkDir(root, ig);
-	let removed = 0;
-	for (const posixPath of present.keys()) {
-		if (leaves.has(posixPath)) continue;
-		try {
-			await fs.unlink(path.join(root, fromPosix(posixPath)));
-			removed++;
-		} catch {
-			// already gone
-		}
-		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
-	}
-	dlog(
-		"materialize (shard) written=%d main-fallback=%d removed=%d",
-		written.size,
-		failed.length,
-		removed,
-	);
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);

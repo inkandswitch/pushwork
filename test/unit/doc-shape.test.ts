@@ -23,7 +23,7 @@ import {
 	type DocHandle,
 	type Repo,
 } from "@automerge/automerge-repo";
-import { NodeFSStorageAdapter } from "@automerge/automerge-repo-storage-nodefs";
+import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 import { Repo as RepoCtor } from "@automerge/automerge-repo";
 
 import {
@@ -39,7 +39,8 @@ import { readConfig } from "../../src/config.js";
 
 async function openOfflineRepo(storage: string): Promise<Repo> {
 	await initSubduction();
-	const adapter = new NodeFSStorageAdapter(storage);
+	// Same layout as src/repo.ts openRepo: single-file LMDB at `<storage>.lmdb`.
+	const adapter = new LMDBStorageAdapter(`${storage}.lmdb`);
 	return new RepoCtor({ storage: adapter, network: [] });
 }
 
