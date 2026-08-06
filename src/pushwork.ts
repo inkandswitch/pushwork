@@ -22,6 +22,8 @@ import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
 import { log } from "./log.js";
 import {
+	confirmDelivery,
+	findBounded,
 	openRepo,
 	safeShutdown,
 	waitForConnection,
@@ -118,6 +120,14 @@ export type InitOpts = {
 	shape: string;
 	artifactDirectories?: readonly string[];
 	online?: boolean; // default: true
+	/**
+	 * Delivery-confirmation stalled with docs outstanding (after the built-in
+	 * retries): resolve true to keep waiting, false to finish as PENDING.
+	 * Omitted ⇒ finish as PENDING (non-interactive behavior).
+	 */
+	onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+	/** Confirmation progress ticks (for progress bars); default: phase report. */
+	onConfirmProgress?: (confirmed: number, total: number) => void;
 };
 
 export type CloneOpts = {
@@ -194,12 +204,19 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		const { tree, changedUrls } = await pushFiles(
+			repo,
+			fsFiles,
+			undefined,
+			isArtifactPath,
+		);
+		const folderDocUrls: AutomergeUrl[] = [];
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
 			title,
 			isArtifactDir: isArtifactPath,
+			onDocChanged: (u) => folderDocUrls.push(u),
 		});
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
@@ -210,10 +227,27 @@ export async function init(
 				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
 			);
 			stampLastSyncAt(folderHandle);
+			// Confirm leaf AND intermediate folder docs alongside the root doc — a
+			// clone resolves the whole tree against the server, so every doc must
+			// land, not just the root (nested-tree clones flaked on exactly this).
+			const leafConfirm = confirmDocs(
+				repo,
+				[...changedUrls, ...folderDocUrls.filter((u) => u !== folderUrl)],
+				opts.backend,
+				connWait,
+				{
+					onProgress:
+						opts.onConfirmProgress ??
+						((confirmed, total) =>
+							report(`Confirming delivery (${confirmed}/${total})`)),
+					onStalled: opts.onConfirmStalled,
+				},
+			);
 			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
 				idleMs: 1500,
 				maxMs: 15000,
 			});
+			sync = degradeUnconfirmed(sync, await leafConfirm);
 		}
 
 		await writeConfig(root, {
@@ -251,7 +285,14 @@ export async function clone(
 	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		report("Fetching repository");
-		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
+		// Gate the initial find on the server handshake: with an empty local
+		// store and a socket still connecting, `find` can resolve "unavailable"
+		// before the server was ever asked.
+		if (connWait) await connWait;
+		let folderHandle: DocHandle<unknown> = await findBounded<unknown>(
+			repo,
+			opts.url as AutomergeUrl,
+		);
 		if (online) {
 			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
 		}
@@ -272,7 +313,7 @@ export async function clone(
 				branches,
 			});
 			dlog("clone branches doc → chose %s", chosenUrl);
-			folderHandle = await repo.find<unknown>(chosenUrl);
+			folderHandle = await findBounded<unknown>(repo, chosenUrl);
 			if (online) {
 				await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
 			}
@@ -479,9 +520,14 @@ export async function yoink(
 	const root = path.resolve(cwd);
 	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
 
-	const { repo, cleanup } = await openDetachedRepo(root, backend);
+	const { repo, backend: resolvedBackend, cleanup } = await openDetachedRepo(
+		root,
+		backend,
+	);
 	try {
-		const handle = await repo.find<UnixFileEntry>(docUrl);
+		// Don't race the socket: find + settle are useless before the handshake.
+		await waitForConnection(repo, resolvedBackend);
+		const handle = await findBounded<UnixFileEntry>(repo, docUrl as AutomergeUrl);
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
 		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
 
@@ -533,7 +579,13 @@ export async function yeet(
 		backend,
 	);
 	try {
-		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
+		// Don't race the socket: the catch-up and confirmation below are
+		// meaningless before the handshake completes.
+		await waitForConnection(repo, resolvedBackend);
+		const handle = await findBounded<UnixFileEntry>(
+			repo,
+			stripHeads(docUrl as AutomergeUrl),
+		);
 		// Catch up to the server before overwriting, then confirm our write made
 		// it back to the server.
 		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
@@ -554,7 +606,11 @@ export async function yeet(
 
 export async function sync(
 	cwd: string,
-	opts: { nuclear?: boolean } = {},
+	opts: {
+		nuclear?: boolean;
+		onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+		onConfirmProgress?: (confirmed: number, total: number) => void;
+	} = {},
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<SyncSnapshot | undefined> {
@@ -564,7 +620,16 @@ export async function sync(
 		report("Publishing to sync server");
 		return await publishCurrentTree(cwd);
 	}
-	return await commitWorkdir(cwd, { online: true }, report, warn);
+	return await commitWorkdir(
+		cwd,
+		{
+			online: true,
+			onConfirmStalled: opts.onConfirmStalled,
+			onConfirmProgress: opts.onConfirmProgress,
+		},
+		report,
+		warn,
+	);
 }
 
 /**
@@ -676,7 +741,15 @@ export async function save(
 
 async function commitWorkdir(
 	cwd: string,
-	{ online }: { online: boolean },
+	{
+		online,
+		onConfirmStalled,
+		onConfirmProgress,
+	}: {
+		online: boolean;
+		onConfirmStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+		onConfirmProgress?: (confirmed: number, total: number) => void;
+	},
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<SyncSnapshot | undefined> {
@@ -705,7 +778,7 @@ async function commitWorkdir(
 		const fsFiles = await walkDir(root, ig);
 
 		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
+		const { tree: newTree, changedUrls } = await pushFiles(
 			repo,
 			fsFiles,
 			previousFiles,
@@ -713,12 +786,14 @@ async function commitWorkdir(
 		);
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
+		const folderDocUrls: AutomergeUrl[] = [];
 		if (changed) {
 			await shape.encode({
 				repo,
 				tree: newTree,
 				previousRoot: folderHandle,
 				isArtifactDir: isArtifactPath,
+				onDocChanged: (u) => folderDocUrls.push(u),
 			});
 		}
 
@@ -750,10 +825,29 @@ async function commitWorkdir(
 			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
+			// Confirm changed leaf AND intermediate folder docs alongside the root
+			// doc — peers resolve the tree against the server, so all must land.
+			const leafConfirm = confirmDocs(
+				repo,
+				[
+					...changedUrls,
+					...folderDocUrls.filter((u) => u !== config.rootUrl),
+				],
+				config.backend,
+				connWait,
+				{
+					onProgress:
+						onConfirmProgress ??
+						((confirmed, total) =>
+							report(`Confirming delivery (${confirmed}/${total})`)),
+					onStalled: onConfirmStalled,
+				},
+			);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
+			sync = degradeUnconfirmed(sync, await leafConfirm);
 		}
 
 		if (online) report("Writing changes");
@@ -1072,8 +1166,9 @@ async function pushFiles(
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
 	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
+): Promise<{ tree: VfsNode; changedUrls: AutomergeUrl[] }> {
 	const root = newDir();
+	const changedUrls: AutomergeUrl[] = [];
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
@@ -1098,12 +1193,14 @@ async function pushFiles(
 			const handle = await repo.find<UnixFileEntry>(refreshUrl);
 			applyFileEntry(handle, fresh);
 			baseUrl = refreshUrl;
+			changedUrls.push(refreshUrl);
 			updated++;
 			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		} else {
 			// New path: create a fresh file doc.
 			const handle = repo.create<UnixFileEntry>(fresh);
 			baseUrl = handle.url;
+			changedUrls.push(handle.url);
 			created++;
 			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		}
@@ -1114,7 +1211,60 @@ async function pushFiles(
 		setFileAt(root, segments, finalUrl);
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
-	return root;
+	return { tree: root, changedUrls };
+}
+
+
+
+/**
+ * Fold the leaf/folder confirmation result into the root verdict: a SYNCED
+ * root with unconfirmed children is not synced — report PENDING (with the
+ * in-flight count carried on the snapshot for display) instead of silently
+ * declaring victory with docs peers would still see as "unavailable".
+ */
+function degradeUnconfirmed(
+	sync: SyncSnapshot | undefined,
+	{ unconfirmed }: { unconfirmed: number },
+): SyncSnapshot | undefined {
+	if (unconfirmed === 0 || !sync) return sync;
+	// Disconnected: OFFLINE already tells the story — don't relabel it PENDING.
+	if (!sync.connected) return sync;
+	return { ...sync, synced: false, pending: true, unconfirmed };
+}
+
+/**
+ * Push-confirm each changed file doc with the server, not just the folder
+ * doc. Without this, freshly created/updated leaf docs ride solely on the
+ * shutdown quiesce; on a slow link the process can exit before they land,
+ * leaving the folder entry pointing at a doc the server never received
+ * (the clone-unavailable / propagation flake family). Callers pass only the
+ * docs changed this run — the server may not have advertised heads for
+ * untouched docs, and waiting on those would burn the whole budget.
+ */
+async function confirmDocs(
+	repo: Repo,
+	urls: readonly AutomergeUrl[],
+	backend: Backend,
+	connWait: Promise<Connection> | undefined,
+	{
+		onProgress,
+		onStalled,
+	}: {
+		onProgress?: (confirmed: number, total: number) => void;
+		onStalled?: (unconfirmed: number, total: number) => Promise<boolean>;
+	} = {},
+): Promise<{ unconfirmed: number }> {
+	const unique = [...new Set(urls)];
+	if (unique.length === 0) return { unconfirmed: 0 };
+	// No confirmation is possible without a server; don't burn any budget
+	// (e.g. init against an unreachable server must still finish promptly).
+	if (connWait && !(await connWait).connected) {
+		return { unconfirmed: unique.length };
+	}
+	const handles = await Promise.all(
+		unique.map((url) => repo.find<unknown>(stripHeads(url))),
+	);
+	return confirmDelivery(repo, handles, backend, { onProgress, onStalled });
 }
 
 /**
@@ -1162,7 +1312,8 @@ async function readFileBytes(
 ): Promise<Map<string, { url: AutomergeUrl; bytes: Uint8Array }>> {
 	const out = new Map<string, { url: AutomergeUrl; bytes: Uint8Array }>();
 	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
+		// Possibly remote (a peer's new doc arriving via sync): bound the fetch.
+		const handle = await findBounded<UnixFileEntry>(repo, fileUrl);
 		out.set(posixPath, {
 			url: fileUrl,
 			bytes: contentToBytes(handle.doc().content),
@@ -1186,7 +1337,7 @@ async function materializeTree(
 	const desired = new Map<string, Uint8Array>();
 	await Promise.all(
 		[...leaves].map(async ([posixPath, fileUrl]) => {
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			const handle = await findBounded<UnixFileEntry>(repo, fileUrl);
 			desired.set(posixPath, contentToBytes(handle.doc().content));
 		}),
 	);

@@ -29,7 +29,7 @@ const isDirectoryDoc = (doc: unknown): doc is DirectoryDoc => {
 const RESERVED = new Set([META, "lastSyncAt"]);
 
 export const vfsShape: Shape = {
-	async encode({ repo, tree, previousRoot, title }) {
+	async encode({ repo, tree, previousRoot, title, onDocChanged }) {
 		if (tree.kind !== "dir") throw new Error("vfs: root must be a dir");
 		const flat = flattenLeaves(tree);
 		dlog("encode keys=%d previousRoot=%s", flat.size, previousRoot?.url ?? "<new>");
@@ -52,6 +52,7 @@ export const vfsShape: Shape = {
 			}
 		});
 
+		onDocChanged?.(handle.url);
 		dlog("encode complete url=%s", handle.url);
 		return handle.url;
 	},

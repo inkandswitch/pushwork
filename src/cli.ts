@@ -84,6 +84,26 @@ setAmrepoErrorSink((namespace, message, ...args) => {
 const collect = (value: string, prev: string[] | undefined) =>
 	(prev ?? []).concat(value);
 
+/**
+ * Delivery confirmation stalled after its built-in retries: interactively ask
+ * whether to keep waiting. Non-interactive (CI, pipes) defaults to no — the
+ * command finishes as PENDING and the docs ride the shutdown quiesce.
+ */
+const confirmStallPrompt = (unconfirmed: number, total: number) =>
+	out.confirm(
+		`${unconfirmed} of ${total} documents still unconfirmed by the sync server — keep waiting?`,
+		false,
+	);
+
+/** In-place spinner progress bar: `Confirming delivery ████░░░░ 123/250`. */
+const confirmProgressBar = (confirmed: number, total: number) => {
+	const width = 24;
+	const filled = total > 0 ? Math.round((confirmed / total) * width) : width;
+	out.progress(
+		`Confirming delivery ${"█".repeat(filled)}${"░".repeat(width - filled)} ${confirmed}/${total}`,
+	);
+};
+
 const backendOf = (opts: { sub?: boolean; legacy?: boolean }) =>
 	opts.legacy || opts.sub === false ? "legacy" : "subduction";
 
@@ -129,6 +149,7 @@ function reportSync(sync: SyncSnapshot | undefined): void {
 			`sync\t${sync.synced ? "synced" : sync.pending ? "pending" : sync.connected ? "behind" : "offline"}`,
 		);
 		out.log(`connect\t${sync.connectMs ?? ""}`);
+		if (sync.unconfirmed) out.log(`uploading\t${sync.unconfirmed}`);
 		out.log(`root\t${sync.url}\t${sync.localHeads.join(" ")}`);
 		out.log(`server\t${sync.serverPeerId ?? ""}\t${sync.serverHeads.join(" ")}`);
 		return;
@@ -147,6 +168,13 @@ function reportSync(sync: SyncSnapshot | undefined): void {
 		"sync server": sync.serverPeerId ?? "(not connected)",
 		"root heads": fmtHeads(sync.localHeads),
 		"server heads": fmtHeads(sync.serverHeads),
+		...(sync.unconfirmed
+			? {
+					uploading: `${sync.unconfirmed} document${
+						sync.unconfirmed === 1 ? "" : "s"
+					} still syncing — finishes in the background or on the next sync`,
+				}
+			: {}),
 	});
 }
 
@@ -239,7 +267,14 @@ program
 		out.intro("pushwork init");
 		out.task("Connecting to sync server");
 		const info = await init(
-			{ dir: root, backend, shape: opts.shape, artifactDirectories: opts.artifactDir },
+			{
+				dir: root,
+				backend,
+				shape: opts.shape,
+				artifactDirectories: opts.artifactDir,
+				onConfirmStalled: confirmStallPrompt,
+				onConfirmProgress: confirmProgressBar,
+			},
 			report,
 			warn,
 		);
@@ -367,7 +402,16 @@ program
 		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
 		out.intro(opts.nuclear ? "pushwork sync --nuclear" : "pushwork sync");
 		out.task("Connecting to sync server");
-		const snapshot = await sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
+		const snapshot = await sync(
+			process.cwd(),
+			{
+				nuclear: opts.nuclear,
+				onConfirmStalled: confirmStallPrompt,
+				onConfirmProgress: confirmProgressBar,
+			},
+			report,
+			warn,
+		);
 		out.done(); // complete the final phase line before the summary
 		reportSync(snapshot);
 		out.outro(opts.nuclear ? "nuclear synced" : "synced");

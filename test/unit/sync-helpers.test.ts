@@ -131,19 +131,30 @@ function fakeRepo(init: {
 	shutdown?: () => Promise<void>;
 	connected?: boolean;
 	peerIds?: string[];
+	legacyPeers?: string[];
 }) {
 	let connected = init.connected ?? false;
+	const peers: string[] = [...(init.legacyPeers ?? [])];
 	const listeners = new Map<string, Set<Handler>>();
+	const addListener = (event: string, fn: Handler) => {
+		(listeners.get(event) ?? listeners.set(event, new Set()).get(event)!).add(fn);
+	};
+	const removeListener = (event: string, fn: Handler) => {
+		listeners.get(event)?.delete(fn);
+	};
 	const repo = {
 		shutdown: init.shutdown ?? (async () => {}),
 		isSubductionConnected: () => connected,
 		connectedSubductionPeerIds: async () => init.peerIds ?? [],
-		on: (event: string, fn: Handler) => {
-			(listeners.get(event) ?? listeners.set(event, new Set()).get(event)!).add(fn);
+		get peers() {
+			return peers;
 		},
-		off: (event: string, fn: Handler) => {
-			listeners.get(event)?.delete(fn);
+		networkSubsystem: {
+			on: (event: string, fn: Handler) => addListener(`net:${event}`, fn),
+			off: (event: string, fn: Handler) => removeListener(`net:${event}`, fn),
 		},
+		on: addListener,
+		off: removeListener,
 	};
 	return {
 		repo: repo as unknown as Repo,
@@ -153,8 +164,17 @@ function fakeRepo(init: {
 				fn({ connected: value });
 			}
 		},
+		emitPeer(peerId: string) {
+			peers.push(peerId);
+			for (const fn of listeners.get("net:peer") ?? []) {
+				fn({ peerId });
+			}
+		},
 		listenerCount() {
-			return listeners.get("subduction-connection")?.size ?? 0;
+			return (
+				(listeners.get("subduction-connection")?.size ?? 0) +
+				(listeners.get("net:peer")?.size ?? 0)
+			);
 		},
 	};
 }
@@ -193,12 +213,35 @@ describe("safeShutdown", () => {
 });
 
 describe("waitForConnection", () => {
-	it("short-circuits on the legacy backend (no Subduction source)", async () => {
-		const { repo } = fakeRepo({});
+	it("legacy: reports 0ms and the peer when already connected", async () => {
+		const { repo } = fakeRepo({ legacyPeers: ["legacy-server"] });
 		await expect(waitForConnection(repo, "legacy")).resolves.toEqual({
-			connected: false,
+			connected: true,
 			connectMs: 0,
+			serverPeerId: "legacy-server",
 		});
+	});
+
+	it("legacy: resolves when the peer event fires, timing the handshake", async () => {
+		const fake = fakeRepo({});
+		const p = waitForConnection(fake.repo, "legacy", { maxMs: 5000 });
+		setTimeout(() => fake.emitPeer("legacy-server"), 60);
+		const conn = await p;
+		expect(conn.connected).toBe(true);
+		expect(conn.serverPeerId).toBe("legacy-server");
+		expect(conn.connectMs).toBeGreaterThanOrEqual(40);
+		expect(conn.connectMs).toBeLessThan(2000);
+		expect(fake.listenerCount()).toBe(0);
+	});
+
+	it("legacy: gives up (connected=false) after maxMs without hanging", async () => {
+		const fake = fakeRepo({});
+		const start = Date.now();
+		const conn = await waitForConnection(fake.repo, "legacy", { maxMs: 120 });
+		expect(conn.connected).toBe(false);
+		expect(conn.serverPeerId).toBeUndefined();
+		expect(Date.now() - start).toBeGreaterThanOrEqual(100);
+		expect(fake.listenerCount()).toBe(0);
 	});
 
 	it("reports 0ms and the server peer when already connected", async () => {
