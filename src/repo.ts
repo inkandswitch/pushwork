@@ -468,14 +468,24 @@ export async function waitForServerSync<T>(
 	}
 
 	const deadline = Date.now() + maxMs;
+	// Flush is a best-effort durability hint; if it stalls (e.g. a slow or
+	// stuck LMDB write) we must not let it block the entire sync budget.
+	// Race it against the deadline so the rest of the path always runs.
 	try {
-		await repo.flush([handle.documentId]);
+		await Promise.race([
+			repo.flush([handle.documentId]),
+			sleep(Math.max(0, deadline - Date.now())),
+		]);
 	} catch (err) {
 		dlog("waitForServerSync flush failed: %s", errMessage(err));
 	}
 
+	// Only take the fast path when the round fully confirmed the push and
+	// pulled every commit the server advertised.  A pending result means the
+	// remote heads haven't been applied yet; fall through to pollForServerSync
+	// so the full poll budget is still available to wait them out.
 	const direct = await confirmViaSubduction(repo, handle, deadline, opts);
-	if (direct) return direct;
+	if (direct?.synced) return direct;
 
 	dlog("waitForServerSync falling back to advertised heads url=%s", handle.url);
 	return await pollForServerSync(repo, handle, {
