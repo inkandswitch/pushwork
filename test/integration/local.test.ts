@@ -96,6 +96,49 @@ describe("pushwork local-only commands", () => {
 			},
 			TEST_TIMEOUT,
 		);
+
+		// The stat cache lets an unchanged path skip being read at all, so an
+		// edit that leaves size untouched and lands right after the cache was
+		// written is exactly what a too-eager cache would swallow.
+		it(
+			"sees a same-size edit made immediately after a warming status",
+			async () => {
+				await initRepo();
+				// Warms .pushwork/stat-cache.json for a.txt.
+				expect((await pushwork(["status"], workRoot)).stdout).toContain(
+					"nothing to save",
+				);
+
+				await fs.writeFile(path.join(workRoot, "a.txt"), "world\n");
+				expect((await pushwork(["status"], workRoot)).stdout).toContain(
+					"modified:   a.txt",
+				);
+
+				await pushwork(["save"], workRoot);
+				expect((await pushwork(["status"], workRoot)).stdout).toContain(
+					"nothing to save",
+				);
+				expect(await readText(path.join(workRoot, "a.txt"))).toBe("world\n");
+			},
+			TEST_TIMEOUT,
+		);
+
+		it(
+			"survives a corrupt stat cache",
+			async () => {
+				await initRepo();
+				await pushwork(["status"], workRoot);
+				await fs.writeFile(
+					path.join(workRoot, ".pushwork", "stat-cache.json"),
+					"{ not json",
+				);
+				await fs.writeFile(path.join(workRoot, "a.txt"), "changed\n");
+				expect((await pushwork(["status"], workRoot)).stdout).toContain(
+					"modified:   a.txt",
+				);
+			},
+			TEST_TIMEOUT,
+		);
 	});
 
 	describe("save (offline commit)", () => {
