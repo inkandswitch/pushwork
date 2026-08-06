@@ -162,10 +162,10 @@ async function main(): Promise<void> {
 				shape: args.shape,
 				online: false,
 			})).url;
-			await fs.cp(
-				path.join(srcRoot, ".pushwork", "storage"),
-				path.join(root, ".pushwork", "storage"),
-				{ recursive: true },
+			await fs.mkdir(path.join(root, ".pushwork"), { recursive: true });
+			await fs.copyFile(
+				path.join(srcRoot, ".pushwork", "storage.lmdb"),
+				path.join(root, ".pushwork", "storage.lmdb"),
 			);
 		}
 
