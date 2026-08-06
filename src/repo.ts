@@ -62,6 +62,18 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
+function withFlushingShutdown(repo: Repo): Repo {
+	const shutdown = repo.shutdown.bind(repo);
+	repo.shutdown = async () => {
+		try {
+			await repo.flush();
+		} finally {
+			await shutdown();
+		}
+	};
+	return repo;
+}
+
 // The Rust (Wasm) side logs through its own tracing writer straight to the
 // console — setLoggerFactory doesn't route it. SubductionSource's constructor
 // pins the filter to "warn", which lets benign close-path warnings (e.g.
@@ -101,7 +113,7 @@ export async function openRepo(
 	const storage = new LMDBStorageAdapter(`${storageDir}.lmdb`);
 	const finish = (repo: Repo): Repo => {
 		quietSubductionRustLogs();
-		return repo;
+		return withFlushingShutdown(repo);
 	};
 	if (opts.offline) {
 		return finish(new Repo({ storage, network: [] }));
