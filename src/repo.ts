@@ -1,13 +1,20 @@
 import {
 	Repo,
 	WorkerWebSocketEndpoint,
+	documentIdToBinary,
 	initSubduction,
 	setLoggerFactory,
 	setSubductionLogLevel,
 	type AutomergeUrl,
 	type DocHandle,
+	type DocumentId,
 	type NetworkAdapterInterface,
 } from "@automerge/automerge-repo";
+import type {
+	PeerBatchSyncResult,
+	SedimentreeId,
+	Subduction,
+} from "@automerge/automerge-subduction";
 import { WebSocketClientAdapter } from "@automerge/automerge-repo-network-websocket";
 import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 import debug from "debug";
@@ -218,7 +225,7 @@ export function isTransportError(err: unknown): boolean {
  * throws "Can not read from a closed database". Harmless — the repo has
  * already flushed — but it surfaces as an unhandled rejection. Suppressed
  * like transport blips until upstream drains dispatch before closing
- * storage (reported; see .ignore/TODO.md).
+ * storage.
  *
  * Deliberately narrow: the CLI feeds this to process-level handlers, so a
  * bare "already closed" (sockets, streams, …) must NOT match — only
@@ -250,17 +257,16 @@ export type SyncSnapshot = {
 	/** The document this snapshot describes (the root folder doc, for `sync`). */
 	url: AutomergeUrl;
 	/**
-	 * True only when confirmed both ways: we hold every commit the server
-	 * advertised AND it has advertised our frontier back (push-confirmed). Never
-	 * true on a bare pull-settle, so the CLI won't print SYNCED before our change
-	 * has demonstrably landed.
+	 * True only when confirmed both ways: the server took our commits and we
+	 * hold everything it has. Never true on a bare local settle, so the CLI
+	 * won't print SYNCED before our change has demonstrably landed.
 	 */
 	synced: boolean;
 	/**
-	 * Connected and pull-complete, but our push wasn't confirmed before the
-	 * deadline — shown as PENDING. Usually transient; can be a false-negative if
-	 * the server compacted our change into a differently-id'd fragment (see
-	 * `.ignore/FIXME.md`).
+	 * Reconciled with the server but not fully caught up before the deadline —
+	 * shown as PENDING. Usually transient. On the advertised-heads fallback it
+	 * can also be a false negative, if the server compacted our change into a
+	 * differently-id'd fragment.
 	 */
 	pending: boolean;
 	/** Whether the repo currently has a live Subduction connection to a server. */
@@ -419,35 +425,33 @@ export function syncVerdict(args: {
 }
 
 /**
- * Wait until `handle` is in sync with the Subduction sync server, judging
- * "synced" against the *server's* advertised heads rather than a local-settle
- * heuristic.
+ * Wait until `handle` is in sync with the Subduction sync server.
  *
- * The server advertises Subduction sedimentree heads (loose-commit and
- * fragment-boundary commit ids), which are NOT the Automerge frontier — so we
- * never compare them to `handle.heads()` for equality. Instead we ask whether we
- * already hold every commit the server advertises (`DocHandle.containsHeads`): if
- * we do, there is nothing left to pull, so we are caught up. This is
- * pull-completeness only — per Automerge's own note a peer can hold our latest
- * change inside a compacted fragment, so head comparison can't confirm the push
- * direction; we additionally gate on a brief local-heads settle so our own edit
- * has flushed before we trust the result.
+ * The direct route asks Subduction itself: flush the document's pending
+ * changes into its sedimentree, then run one sync round against the connected
+ * peers and read the result. A successful round means the server took our
+ * commits — an answer, where head-watching can only ever be an inference.
  *
- * On the legacy backend there is no Subduction peer to hear from, so this falls
- * back to {@link waitForSync} and reports connected=false with empty serverHeads.
+ * When the document can't be located in Subduction (nothing has been written
+ * to it yet, or the DocumentId → SedimentreeId mapping upstream calls
+ * temporary has moved) this falls back to {@link pollForServerSync}, which
+ * infers the same verdict from the heads the server advertises.
+ *
+ * On the legacy backend there is no Subduction peer at all, so it settles
+ * locally and reports connected=false with empty serverHeads.
  */
 export async function waitForServerSync<T>(
 	repo: Repo,
 	handle: DocHandle<T>,
 	backend: Backend,
-	{
-		idleMs = 1500,
-		maxMs = 15000,
-		pollMs = 200,
-		resyncAfterMs = 6000,
-	}: { idleMs?: number; maxMs?: number; pollMs?: number; resyncAfterMs?: number } = {},
+	opts: {
+		idleMs?: number;
+		maxMs?: number;
+		pollMs?: number;
+		resyncAfterMs?: number;
+	} = {},
 ): Promise<SyncSnapshot> {
-	const headsOf = () => [...(handle.heads() ?? [])] as string[];
+	const { idleMs = 1500, maxMs = 15000 } = opts;
 
 	// Legacy backend never speaks Subduction: there are no server heads to
 	// compare against, so settle locally and report what little we can.
@@ -458,13 +462,171 @@ export async function waitForServerSync<T>(
 			synced: true,
 			pending: false,
 			connected: false,
-			localHeads: headsOf(),
+			localHeads: [...(handle.heads() ?? [])],
 			serverHeads: [],
 		};
 	}
 
+	const deadline = Date.now() + maxMs;
+	// Flush is a best-effort durability hint; if it stalls (e.g. a slow or
+	// stuck LMDB write) we must not let it block the entire sync budget.
+	// Race it against the deadline so the rest of the path always runs.
+	try {
+		await Promise.race([
+			repo.flush([handle.documentId]),
+			sleep(Math.max(0, deadline - Date.now())),
+		]);
+	} catch (err) {
+		dlog("waitForServerSync flush failed: %s", errMessage(err));
+	}
+
+	// Only take the fast path when the round fully confirmed the push and
+	// pulled every commit the server advertised.  A pending result means the
+	// remote heads haven't been applied yet; fall through to pollForServerSync
+	// so the full poll budget is still available to wait them out.
+	const direct = await confirmViaSubduction(repo, handle, deadline, opts);
+	if (direct?.synced) return direct;
+
+	dlog("waitForServerSync falling back to advertised heads url=%s", handle.url);
+	return await pollForServerSync(repo, handle, {
+		...opts,
+		maxMs: Math.max(1000, deadline - Date.now()),
+	});
+}
+
+/**
+ * The SedimentreeId Subduction holds for `documentId`, or undefined if it
+ * holds none.
+ *
+ * Found by prefix rather than constructed: upstream currently zero-pads the
+ * 16-byte DocumentId into a 32-byte SedimentreeId and marks that temporary, so
+ * we assume only that the DocumentId's bytes lead. Taking the id from
+ * Subduction's own list also keeps every id we hand back to it one it made.
+ */
+async function findSedimentreeId(
+	sub: Subduction,
+	documentId: DocumentId,
+): Promise<SedimentreeId | undefined> {
+	const want = documentIdToBinary(documentId);
+	if (!want) return undefined;
+	const ids = await sub.sedimentreeIds();
+	return ids.find((id) => {
+		const bytes = id.toBytes();
+		if (bytes.length < want.length) return false;
+		return want.every((b, i) => bytes[i] === b);
+	});
+}
+
+// Budget for applying what a sync round brought back. Local work, so this is
+// generous rather than tuned.
+const APPLY_MS = 2000;
+
+/**
+ * Run one Subduction sync round for `handle` and judge from its result.
+ * Undefined means "couldn't ask" — the caller falls back to head-watching.
+ */
+async function confirmViaSubduction<T>(
+	repo: Repo,
+	handle: DocHandle<T>,
+	deadline: number,
+	{ pollMs = 200 }: { pollMs?: number },
+): Promise<SyncSnapshot | undefined> {
+	if (!repo.isSubductionConnected()) return undefined;
+
+	let sedimentreeId: SedimentreeId | undefined;
+	let results: PeerBatchSyncResult[];
+	try {
+		const sub = await repo.subduction;
+		sedimentreeId = await findSedimentreeId(sub, handle.documentId);
+		if (!sedimentreeId) {
+			dlog("confirmViaSubduction: no sedimentree for %s", handle.url);
+			return undefined;
+		}
+		// Held back from the round's timeout so a round that runs long still
+		// leaves time to apply what it brought back — otherwise we'd report
+		// PENDING for a sync that succeeded.
+		results = (
+			await sub.syncWithAllPeers(
+				sedimentreeId,
+				false,
+				Math.max(1000, deadline - Date.now() - APPLY_MS),
+			)
+		).entries();
+	} catch (err) {
+		dlog("confirmViaSubduction failed: %s", errMessage(err));
+		return undefined;
+	}
+
+	const round = results.find((r) => r.success);
+	if (!round) {
+		dlog("confirmViaSubduction: no peer completed a round for %s", handle.url);
+		return undefined;
+	}
+
+	// The round tells us the server took our commits. What it sent back still
+	// has to be applied into the document, which happens off this call stack —
+	// so poll until we hold it rather than judging immediately.
+	const advertised = round.stats.remoteHeads.map((c) => c.toHexString());
+	const applyDeadline = Date.now() + APPLY_MS;
+	let pullComplete = holdsAll(handle, advertised);
+	while (!pullComplete && Date.now() < applyDeadline) {
+		await sleep(pollMs);
+		pullComplete = holdsAll(handle, advertised);
+	}
+
+	dlog(
+		"confirmViaSubduction url=%s sent=%d received=%d pullComplete=%s",
+		handle.url,
+		round.stats.totalSent,
+		round.stats.totalReceived,
+		pullComplete,
+	);
+	return {
+		url: handle.url,
+		synced: pullComplete,
+		pending: !pullComplete,
+		connected: true,
+		serverPeerId: await connectedServerPeer(repo),
+		localHeads: [...(handle.heads() ?? [])],
+		serverHeads: trimSeenHeads(handle, advertised),
+	};
+}
+
+// Whether we already hold every commit in `heads`. Undecidable heads (a
+// view-only handle, say) count as not held rather than silently as held.
+function holdsAll<T>(handle: DocHandle<T>, heads: readonly string[]): boolean {
+	if (heads.length === 0) return true;
+	try {
+		return handle.containsHeads(heads as never);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Judge sync from the heads the server advertises: we are caught up when we
+ * hold every commit it names (`DocHandle.containsHeads`), and push-confirmed
+ * when it names our frontier back.
+ *
+ * Weaker than {@link confirmViaSubduction} on purpose — it is the fallback.
+ * The server advertises sedimentree heads (loose-commit and fragment-boundary
+ * commit ids), not the Automerge frontier, so a change of ours that the server
+ * compacted into a fragment may never be advertised back and this reports
+ * PENDING for a push that did land.
+ */
+async function pollForServerSync<T>(
+	repo: Repo,
+	handle: DocHandle<T>,
+	{
+		idleMs = 1500,
+		maxMs = 15000,
+		pollMs = 200,
+		resyncAfterMs = 6000,
+	}: { idleMs?: number; maxMs?: number; pollMs?: number; resyncAfterMs?: number } = {},
+): Promise<SyncSnapshot> {
+	const headsOf = () => [...(handle.heads() ?? [])] as string[];
 	const documentId = handle.documentId;
-	dlog("waitForServerSync url=%s idleMs=%d maxMs=%d", handle.url, idleMs, maxMs);
+	dlog("pollForServerSync url=%s idleMs=%d maxMs=%d", handle.url, idleMs, maxMs);
 
 	// Wake the poll loop the instant the server advertises new heads for this doc
 	// (otherwise we just notice on the next poll tick).
@@ -511,7 +673,7 @@ export async function waitForServerSync<T>(
 
 			if (synced || now - start >= maxMs) {
 				dlog(
-					"waitForServerSync %s url=%s elapsed=%dms",
+					"pollForServerSync %s url=%s elapsed=%dms",
 					synced ? "synced" : pending ? "pending" : "timed out",
 					handle.url,
 					now - start,
@@ -533,14 +695,14 @@ export async function waitForServerSync<T>(
 			if (!resynced && serverPeerId && now - start >= resyncAfterMs) {
 				resynced = true; // don't reconsider within this call regardless
 				if (claimResync(repo, documentId)) {
-					dlog("waitForServerSync nudging resync url=%s", handle.url);
+					dlog("pollForServerSync nudging resync url=%s", handle.url);
 					try {
 						repo.resyncSubduction(documentId);
 					} catch {
 						// no Subduction source / doc not attached
 					}
 				} else {
-					dlog("waitForServerSync resync already nudged this run url=%s", handle.url);
+					dlog("pollForServerSync resync already nudged this run url=%s", handle.url);
 				}
 			}
 

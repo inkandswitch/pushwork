@@ -11,13 +11,13 @@ sequenceDiagram
     participant S as Sync server
 
     Note over L,S: 1. Open repo, start connection wait (overlapped)
-    W->>L: walk tree, diff against decoded doc tree
+    W->>L: scan tree, diff against decoded doc tree
     L->>L: encode local changes (shape.encode)
     S-->>L: remote commits arrive as docs are found
     L->>W: write remote changes to disk (atomic)
     Note over L,S: 2. waitForServerSync on the root folder doc
-    L->>S: push un-broadcast commits
-    S-->>L: advertise heads back
+    L->>S: flush, then one sync round
+    S-->>L: round result (sent/received, remote heads)
     Note over L,S: 3. Verdict: SYNCED / PENDING / timeout
 ```
 
@@ -25,11 +25,28 @@ Key properties:
 
 - `repo.find` is what triggers delivery — every file leaf is touched so the network layer announces it to peers.
 - The connection wait (`waitForConnection`) starts immediately after `openRepo` so local tree work overlaps the Subduction handshake.
-- Big fresh clones/ingests shard across worker threads (`ingest-pool.ts`) past a size threshold.
+- Document fan-out (`repo.find` per leaf) is uncapped: one Subduction connection multiplexes the round-trips and the transport's receive-credit windowing is the backpressure. Filesystem fan-out _is_ capped (`pool.ts`), because unbounded reads exhaust file descriptors.
+
+## The Scan
+
+`scanWorkdir` compares the working tree to the doc tree. Neither side is read in full: `.pushwork/stat-cache.json` records, per path, the filesystem identity of the bytes (`size`, `mtimeNs`, `ctimeNs`, `ino`) and the file doc's heads at the last moment the two were confirmed equal. A path whose stat signature _and_ heads both still match is known-unchanged without reading the file or decoding the document.
+
+Both halves are load-bearing: heads alone would miss a local edit, a stat signature alone would miss an edit that arrived from a peer. Anything unknown, mismatched, or written within the same timestamp tick as the cache (git's "racily clean") falls back to a full byte comparison, so a stale or absent cache costs speed and never correctness.
 
 ## The Sync Verdict
 
-The CLI must not claim SYNCED unless the server demonstrably has our data. `syncVerdict` (in `repo.ts`) judges against the _server's_ advertised state, not a local-settle heuristic:
+The CLI must not claim SYNCED unless the server demonstrably has our data. `waitForServerSync` asks Subduction rather than inferring: `repo.flush` drains the document's pending changes into its sedimentree, then `syncWithAllPeers` runs one round and returns a `PeerBatchSyncResult`.
+
+```
+SYNCED  = round.success ∧ pull-complete
+PENDING = round.success ∧ ¬pull-complete
+```
+
+A successful round means the server took our commits — that _is_ push confirmation, so there is nothing left to infer. Pull-completeness is still a `containsHeads` check against `stats.remoteHeads`, polled briefly because commits received in the round are applied to the document off the call stack.
+
+### Fallback: advertised heads
+
+When the document can't be located in Subduction — nothing written to it yet, or the DocumentId → SedimentreeId mapping (which upstream marks temporary) has moved — `pollForServerSync` takes over with the older, weaker inference:
 
 | Condition | Meaning |
 | --- | --- |
@@ -37,28 +54,21 @@ The CLI must not claim SYNCED unless the server demonstrably has our data. `sync
 | _pull-complete_ | We hold every commit the server advertised (`containsHeads`) |
 | _push-confirmed_ | The server advertised our current frontier back to us |
 
-```
-SYNCED  = local-quiet ∧ pull-complete ∧ push-confirmed
-PENDING = local-quiet ∧ pull-complete ∧ ¬push-confirmed
-```
-
 > [!NOTE]
 >
-> Server heads are Subduction _sedimentree_ heads (loose-commit and fragment-boundary ids), NOT the Automerge frontier — they are never compared to `handle.heads()` for equality. Pull-completeness asks "do we already contain everything advertised?"; push-confirmation asks "is our frontier a subset of what the server advertises?".
+> Server heads are Subduction _sedimentree_ heads (loose-commit and fragment-boundary ids), NOT the Automerge frontier — they are never compared to `handle.heads()` for equality.
 
-### Known false negative
-
-A server that compacts our change into a fragment may re-advertise it under a different id, so push-confirmation fails and the CLI shows PENDING even though the data landed. This is deliberate — a conservative false-PENDING replaced the old false-SYNCED. Only a server-ack (`awaitSynced()`-style) API in automerge-repo closes the gap completely.
+This path keeps the known false negative: a server that compacts our change into a fragment re-advertises it under a different id, push-confirmation fails, and the CLI shows PENDING for data that landed. The direct route above is not subject to it.
 
 ### Stuck-doc nudge
 
-If we're behind for `resyncAfterMs` (default 6 s) and the scheduler isn't catching us up, `waitForServerSync` re-arms a single fresh sync round via `repo.resyncSubduction(documentId)` — once per document per run (`claimResync`).
+If the fallback is behind for `resyncAfterMs` (default 6 s) and the scheduler isn't catching us up, it re-arms a single fresh sync round via `repo.resyncSubduction(documentId)` — once per document per run (`claimResync`).
 
 ## Backends
 
 | Backend | Selection | Verdict basis |
 | --- | --- | --- |
-| Subduction (default) | unflagged | server-advertised heads (above) |
+| Subduction (default) | unflagged | Subduction sync round; advertised heads as fallback |
 | Legacy WebSocket relay | `--legacy`/`--no-sub` | local head-stability settle only |
 
 The backend is persisted per-repo in the config; both share the same `automerge-repo` API surface.

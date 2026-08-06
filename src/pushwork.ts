@@ -19,7 +19,21 @@ import {
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
-import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
+import {
+	byteEq,
+	statSig,
+	walkDir,
+	writeFileAtomic,
+	type FileTree,
+} from "./fs-tree.js";
+import { FS_CONCURRENCY, pooled } from "./pool.js";
+import {
+	cacheEntry,
+	isUnchanged,
+	readStatCache,
+	writeStatCache,
+	type StatCache,
+} from "./stat-cache.js";
 import { log } from "./log.js";
 import {
 	openRepo,
@@ -187,14 +201,20 @@ export async function init(
 	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		const shape = await resolveShape(opts.shape);
-		const ig = await loadIgnore(root);
 		report("Reading working tree");
-		const fsFiles = await walkDir(root, ig);
-		dlog("init walked %d files", fsFiles.size);
+		// No documents yet, so every file on disk scans as added.
+		const scan = await scanWorkdir({
+			repo,
+			root,
+			tree: newDir(),
+			cache: new Map(),
+		});
+		const fileCount = scan.files.size;
+		dlog("init walked %d files", fileCount);
 
 		const title = path.basename(root) || undefined;
-		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		report(`Encoding ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
+		const tree = await pushFiles(repo, scan, isArtifactPath);
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
@@ -207,13 +227,10 @@ export async function init(
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report(
-				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
+				`Publishing ${fileCount} ${fileCount === 1 ? "file" : "files"} to the sync server`,
 			);
 			stampLastSyncAt(folderHandle);
-			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
+			sync = await waitForServerSync(repo, folderHandle, opts.backend);
 		}
 
 		await writeConfig(root, {
@@ -224,8 +241,8 @@ export async function init(
 			artifactDirectories: artifactDirs,
 		});
 		await attachConnectMs(sync, connWait);
-		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
-		return { url: folderUrl, files: fsFiles.size, sync };
+		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fileCount, sync?.synced);
+		return { url: folderUrl, files: fileCount, sync };
 	} finally {
 		await safeShutdown(repo);
 	}
@@ -290,7 +307,9 @@ export async function clone(
 		const tree = await shape.decode({ repo, root: folderHandle });
 		const fileCount = flattenLeaves(tree).size;
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
-		await materializeTree(repo, root, tree);
+		// Everything we write here is current by construction, so the cache
+		// starts warm and the first `status` after a clone reads nothing.
+		await writeStatCache(root, await materializeTree(repo, root, tree));
 
 		// Now that the tree (including any `.pushworkattributes`) is on disk,
 		// decide what to record locally. If the repo carries its own artifact
@@ -585,14 +604,13 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const tree = await shape.decode({ repo, root: folderHandle });
 		// Touch every leaf so the network adapter knows to push it.
-		for (const [, fileUrl] of flattenLeaves(tree)) {
-			await repo.find<UnixFileEntry>(fileUrl);
-		}
+		await Promise.all(
+			[...flattenLeaves(tree).values()].map((fileUrl) =>
+				repo.find<UnixFileEntry>(fileUrl),
+			),
+		);
 		stampLastSyncAt(folderHandle);
-		const sync = await waitForServerSync(repo, folderHandle, config.backend, {
-			idleMs: 1500,
-			maxMs: 15000,
-		});
+		const sync = await waitForServerSync(repo, folderHandle, config.backend);
 		await attachConnectMs(sync, connWait);
 		dlog("publish complete synced=%s", sync.synced);
 		return sync;
@@ -635,23 +653,25 @@ export async function nuclearizeRepo(
 
 		// For each leaf: read content, create a fresh UnixFileEntry doc.
 		const newTree = newDir();
-		for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
-			const bare = stripHeads(fileUrl);
-			const oldFileHandle = await repo.find<UnixFileEntry>(bare);
-			const oldDoc = oldFileHandle.doc();
-			const newFileHandle = repo.create<UnixFileEntry>({
-				"@patchwork": { type: "file" },
-				name: oldDoc.name,
-				extension: oldDoc.extension,
-				mimeType: oldDoc.mimeType,
-				content: oldDoc.content,
-			});
-			let finalUrl: AutomergeUrl = newFileHandle.url;
-			if (isArtifactPath(posixPath)) {
-				finalUrl = pinUrl(newFileHandle);
-			}
-			setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
-		}
+		await Promise.all(
+			[...flattenLeaves(oldTree)].map(async ([posixPath, fileUrl]) => {
+				const oldFileHandle = await repo.find<UnixFileEntry>(
+					stripHeads(fileUrl),
+				);
+				const oldDoc = oldFileHandle.doc();
+				const newFileHandle = repo.create<UnixFileEntry>({
+					"@patchwork": { type: "file" },
+					name: oldDoc.name,
+					extension: oldDoc.extension,
+					mimeType: oldDoc.mimeType,
+					content: oldDoc.content,
+				});
+				const finalUrl = isArtifactPath(posixPath)
+					? pinUrl(newFileHandle)
+					: newFileHandle.url;
+				setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
+			}),
+		);
 
 		// Mutate the existing folder doc in place — same URL, new file leaves.
 		await shape.encode({
@@ -698,19 +718,13 @@ async function commitWorkdir(
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
 
-		const ig = await loadIgnore(root);
 		report("Scanning working tree");
-		const fsFiles = await walkDir(root, ig);
+		const cache = await readStatCache(root);
+		const scan = await scanWorkdir({ repo, root, tree: previousTree, cache });
 
 		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
-			repo,
-			fsFiles,
-			previousFiles,
-			isArtifactPath,
-		);
+		const newTree = await pushFiles(repo, scan, isArtifactPath);
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
 		if (changed) {
@@ -730,35 +744,30 @@ async function commitWorkdir(
 			// below both pulls peer changes and pushes our stamp.
 			const hasArtifacts = [...flattenLeaves(newTree).keys()].some(isArtifactPath);
 
-			let refreshed = false;
 			if (hasArtifacts) {
 				// Catch up so the re-pin captures each file doc's post-merge heads.
-				await waitForServerSync(repo, folderHandle, config.backend, {
-					idleMs: 1500,
-					maxMs: 15000,
-				});
+				await waitForServerSync(repo, folderHandle, config.backend);
 				// Bare URLs already track current heads implicitly; only pins move.
-				refreshed = await refreshFolderPins(
-					repo,
-					folderHandle,
-					shape,
-					isArtifactPath,
-				);
+				await refreshFolderPins(repo, folderHandle, shape, isArtifactPath);
 			}
 
 			// Always stamp lastSyncAt — a sync is also a checkpoint that
 			// "we reconciled with the server at this time" — then confirm the
 			// server has caught up to the stamped (and any refreshed) state.
 			stampLastSyncAt(folderHandle);
-			sync = await waitForServerSync(repo, folderHandle, config.backend, {
-				idleMs: 1500,
-				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
-			});
+			sync = await waitForServerSync(repo, folderHandle, config.backend);
 		}
 
 		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
-		await materializeTree(repo, root, finalTree);
+		// `scan.files` is the working tree as we found it, before the sync wait.
+		// Reconciling against a fresh walk would delete anything the user created
+		// while we were talking to the server.
+		const verified = await materializeTree(repo, root, finalTree, {
+			present: scan.files,
+			cache,
+		});
+		await writeStatCache(root, verified);
 		await attachConnectMs(sync, connWait);
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
@@ -805,15 +814,18 @@ export async function heads(
 			});
 		}
 
-		for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-			if (!matches(posixPath)) continue;
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
-			out.push({
-				path: posixPath,
-				url: fileUrl,
-				heads: handle.heads() ?? [],
-			});
-		}
+		await Promise.all(
+			[...flattenLeaves(tree)]
+				.filter(([posixPath]) => matches(posixPath))
+				.map(async ([posixPath, fileUrl]) => {
+					const handle = await repo.find<UnixFileEntry>(fileUrl);
+					out.push({
+						path: posixPath,
+						url: fileUrl,
+						heads: handle.heads() ?? [],
+					});
+				}),
+		);
 
 		out.sort((a, b) => a.path.localeCompare(b.path));
 		return out;
@@ -839,13 +851,10 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const diff = computeDiff(previousFiles, fsFiles);
-		return { diff };
+		const cache = await readStatCache(root);
+		const scan = await scanWorkdir({ repo, root, tree: previousTree, cache });
+		await writeStatCache(root, scan.verified);
+		return { diff: computeDiff(scan) };
 	} finally {
 		await safeShutdown(repo);
 	}
@@ -863,26 +872,19 @@ export async function diff(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const cache = await readStatCache(root);
+		const scan = await scanWorkdir({ repo, root, tree: previousTree, cache });
+		await writeStatCache(root, scan.verified);
 
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const out: Array<{ path: string; kind: "added" | "modified" | "deleted"; before?: Uint8Array; after?: Uint8Array }> = [];
-		for (const [p, bytes] of fsFiles) {
-			if (limitToPath && p !== limitToPath) continue;
-			const prev = previousFiles.get(p);
-			if (!prev) {
-				out.push({ path: p, kind: "added", after: bytes });
-			} else if (!byteEq(prev.bytes, bytes)) {
-				out.push({ path: p, kind: "modified", before: prev.bytes, after: bytes });
-			}
-		}
-		for (const [p, prev] of previousFiles) {
-			if (limitToPath && p !== limitToPath) continue;
-			if (!fsFiles.has(p)) out.push({ path: p, kind: "deleted", before: prev.bytes });
-		}
-		return out;
+		const wanted = [...scan.changes]
+			.filter(([p]) => !limitToPath || p === limitToPath)
+			.sort(([a], [b]) => a.localeCompare(b));
+		return await pooled(wanted, FS_CONCURRENCY, async ([p, kind]) => ({
+			path: p,
+			kind,
+			before: scan.docBytes.get(p),
+			after: kind === "deleted" ? undefined : await scan.files.get(p)!.read(),
+		}));
 	} finally {
 		await safeShutdown(repo);
 	}
@@ -906,32 +908,24 @@ export async function cutWorkdir(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const cache = await readStatCache(root);
+		const scan = await scanWorkdir({ repo, root, tree: previousTree, cache });
 
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const entries: SnarfEntry[] = [];
-		for (const [p, bytes] of fsFiles) {
-			const prev = previousFiles.get(p);
-			if (!prev) {
-				entries.push({ path: p, kind: "added", contentBase64: encodeBytes(bytes) });
-			} else if (!byteEq(prev.bytes, bytes)) {
-				entries.push({
-					path: p,
-					kind: "modified",
-					contentBase64: encodeBytes(bytes),
-				});
-			}
-		}
-		for (const [p] of previousFiles) {
-			if (!fsFiles.has(p)) entries.push({ path: p, kind: "deleted" });
-		}
-
-		if (entries.length === 0) {
+		if (scan.changes.size === 0) {
 			throw new Error("nothing to cut: working tree clean");
 		}
-		entries.sort((a, b) => a.path.localeCompare(b.path));
+		const entries: SnarfEntry[] = await pooled(
+			[...scan.changes].sort(([a], [b]) => a.localeCompare(b)),
+			FS_CONCURRENCY,
+			async ([p, kind]) =>
+				kind === "deleted"
+					? { path: p, kind }
+					: {
+							path: p,
+							kind,
+							contentBase64: encodeBytes(await scan.files.get(p)!.read()),
+						},
+		);
 
 		const snarf = await appendSnarf(root, {
 			name: opts.name,
@@ -939,7 +933,11 @@ export async function cutWorkdir(
 		});
 
 		// Reset working tree to the saved state.
-		await materializeTree(repo, root, previousTree);
+		const verified = await materializeTree(repo, root, previousTree, {
+			present: scan.files,
+			cache,
+		});
+		await writeStatCache(root, verified);
 		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
 		return { id: snarf.id, entries: entries.length };
 	} finally {
@@ -965,11 +963,14 @@ export async function pasteSnarf(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-		const dirty = computeDiff(previousFiles, fsFiles);
-		if (dirty.added.length || dirty.modified.length || dirty.deleted.length) {
+		const scan = await scanWorkdir({
+			repo,
+			root,
+			tree: previousTree,
+			cache: await readStatCache(root),
+		});
+		await writeStatCache(root, scan.verified);
+		if (scan.changes.size > 0) {
 			throw new Error(
 				"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
 			);
@@ -1046,73 +1047,64 @@ function normalizeDirs(dirs: readonly string[]): string[] {
 	return out;
 }
 
-function computeDiff(
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }>,
-	current: Map<string, Uint8Array>,
-): Diff {
-	const added: string[] = [];
-	const modified: string[] = [];
-	const deleted: string[] = [];
-	for (const [p, bytes] of current) {
-		const prev = previous.get(p);
-		if (!prev) added.push(p);
-		else if (!byteEq(prev.bytes, bytes)) modified.push(p);
-	}
-	for (const p of previous.keys()) {
-		if (!current.has(p)) deleted.push(p);
-	}
-	added.sort();
-	modified.sort();
-	deleted.sort();
-	return { added, modified, deleted };
-}
+const computeDiff = (scan: Scan): Diff => ({
+	added: changedPaths(scan, "added"),
+	modified: changedPaths(scan, "modified"),
+	deleted: changedPaths(scan, "deleted"),
+});
 
 async function pushFiles(
 	repo: Repo,
-	fsFiles: Map<string, Uint8Array>,
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
+	scan: Scan,
 	isArtifactPath: IsArtifact,
 ): Promise<VfsNode> {
 	const root = newDir();
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
-	for (const [posixPath, bytes] of fsFiles) {
+
+	await pooled(scan.files, FS_CONCURRENCY, async ([posixPath, file]) => {
 		const segments = posixPath.split("/").filter(Boolean);
 		const isArtifact = isArtifactPath(posixPath);
-		const fresh = makeFileEntry(posixPath, bytes, isArtifact);
-		const prev = previous?.get(posixPath);
+		const change = scan.changes.get(posixPath);
+		const prevUrl = scan.leaves.get(posixPath);
 
 		let baseUrl: AutomergeUrl;
-		if (prev && byteEq(prev.bytes, bytes)) {
+		// Held on to so an artifact's re-pin below doesn't re-find the doc.
+		let handle: DocHandle<UnixFileEntry> | undefined;
+		if (prevUrl && !change) {
 			// Unchanged path: keep the existing file-doc URL. For artifacts
 			// we'll re-pin from the current heads below.
-			baseUrl = stripHeads(prev.url);
+			baseUrl = stripHeads(prevUrl);
 			unchanged++;
-		} else if (prev) {
+		} else if (prevUrl) {
 			// Changed path: mutate the existing file doc in place (see
 			// applyFileEntry). This keeps the file URL stable across edits and
 			// avoids the propagation race where a brand-new file doc URL is
 			// referenced by the folder before its bytes have reached the server.
-			const refreshUrl = stripHeads(prev.url);
-			const handle = await repo.find<UnixFileEntry>(refreshUrl);
-			applyFileEntry(handle, fresh);
-			baseUrl = refreshUrl;
+			const bytes = await file.read();
+			baseUrl = stripHeads(prevUrl);
+			handle = await repo.find<UnixFileEntry>(baseUrl);
+			applyFileEntry(handle, makeFileEntry(posixPath, bytes, isArtifact));
 			updated++;
 			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		} else {
 			// New path: create a fresh file doc.
-			const handle = repo.create<UnixFileEntry>(fresh);
+			const bytes = await file.read();
+			handle = repo.create<UnixFileEntry>(
+				makeFileEntry(posixPath, bytes, isArtifact),
+			);
 			baseUrl = handle.url;
 			created++;
 			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		}
 
 		const finalUrl = isArtifact
-			? pinUrl(await repo.find<UnixFileEntry>(baseUrl))
+			? pinUrl(handle ?? (await repo.find<UnixFileEntry>(baseUrl)))
 			: baseUrl;
 		setFileAt(root, segments, finalUrl);
-	}
+	});
+
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
 	return root;
 }
@@ -1131,19 +1123,21 @@ async function refreshFolderPins(
 	const tree = await shape.decode({ repo, root: folderHandle });
 	const refreshed = newDir();
 	let changed = false;
-	for (const [posixPath, currentUrl] of flattenLeaves(tree)) {
-		const segments = posixPath.split("/").filter(Boolean);
-		let finalUrl: AutomergeUrl = currentUrl;
-		if (isArtifactPath(posixPath)) {
-			const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
-			const repinned = pinUrl(handle);
-			if (repinned !== currentUrl) {
-				finalUrl = repinned;
-				changed = true;
+	await Promise.all(
+		[...flattenLeaves(tree)].map(async ([posixPath, currentUrl]) => {
+			const segments = posixPath.split("/").filter(Boolean);
+			let finalUrl: AutomergeUrl = currentUrl;
+			if (isArtifactPath(posixPath)) {
+				const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
+				const repinned = pinUrl(handle);
+				if (repinned !== currentUrl) {
+					finalUrl = repinned;
+					changed = true;
+				}
 			}
-		}
-		setFileAt(refreshed, segments, finalUrl);
-	}
+			setFileAt(refreshed, segments, finalUrl);
+		}),
+	);
 	if (changed) {
 		dlog("refreshFolderPins: re-pinned artifacts to current heads");
 		await shape.encode({
@@ -1156,62 +1150,158 @@ async function refreshFolderPins(
 	return changed;
 }
 
-async function readFileBytes(
-	repo: Repo,
-	tree: VfsNode,
-): Promise<Map<string, { url: AutomergeUrl; bytes: Uint8Array }>> {
-	const out = new Map<string, { url: AutomergeUrl; bytes: Uint8Array }>();
-	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
-		out.set(posixPath, {
-			url: fileUrl,
-			bytes: contentToBytes(handle.doc().content),
-		});
-	}
-	return out;
+type ChangeKind = "added" | "modified" | "deleted";
+
+/**
+ * The working tree compared against the doc tree. Paths absent from `changes`
+ * are byte-identical on both sides.
+ *
+ * Neither side is read in full: a path whose stat signature and doc heads both
+ * match the stat cache is known-identical without touching the file or
+ * decoding the document, so a repo where little moved costs a walk plus one
+ * `repo.find` per leaf.
+ */
+type Scan = {
+	/** Files on disk, by repo-relative posix path. Bytes read on demand. */
+	files: FileTree;
+	/** File-doc URLs from the doc tree, by path. */
+	leaves: Map<string, AutomergeUrl>;
+	changes: Map<string, ChangeKind>;
+	/** Doc bytes, populated only for the paths we had to decode. */
+	docBytes: Map<string, Uint8Array>;
+	/** Stat-cache entries for every path confirmed identical. */
+	verified: StatCache;
+};
+
+async function scanWorkdir(args: {
+	repo: Repo;
+	root: string;
+	tree: VfsNode;
+	cache: StatCache;
+}): Promise<Scan> {
+	const { repo, root, tree, cache } = args;
+	const ig = await loadIgnore(root);
+	const files = await walkDir(root, ig);
+	const leaves = flattenLeaves(tree);
+
+	const changes = new Map<string, ChangeKind>();
+	const docBytes = new Map<string, Uint8Array>();
+	const verified: StatCache = new Map();
+	let cached = 0;
+
+	const paths = new Set([...files.keys(), ...leaves.keys()]);
+	await pooled(paths, FS_CONCURRENCY, async (posixPath) => {
+		const file = files.get(posixPath);
+		const url = leaves.get(posixPath);
+		if (!url) {
+			changes.set(posixPath, "added");
+			return;
+		}
+		const handle = await repo.find<UnixFileEntry>(url);
+		const heads = handle.heads() ?? [];
+		if (!file) {
+			changes.set(posixPath, "deleted");
+			docBytes.set(posixPath, contentToBytes(handle.doc().content));
+			return;
+		}
+		if (isUnchanged(cache, posixPath, file.stat, heads)) {
+			verified.set(posixPath, cacheEntry(file.stat, heads));
+			cached++;
+			return;
+		}
+		const fromDoc = contentToBytes(handle.doc().content);
+		if (byteEq(fromDoc, await file.read())) {
+			verified.set(posixPath, cacheEntry(file.stat, heads));
+			return;
+		}
+		changes.set(posixPath, "modified");
+		docBytes.set(posixPath, fromDoc);
+	});
+
+	dlog(
+		"scan: %d files, %d leaves, %d changed, %d skipped via cache",
+		files.size,
+		leaves.size,
+		changes.size,
+		cached,
+	);
+	return { files, leaves, changes, docBytes, verified };
 }
 
+const changedPaths = (scan: Scan, kind: ChangeKind): string[] =>
+	[...scan.changes]
+		.filter(([, k]) => k === kind)
+		.map(([p]) => p)
+		.sort();
+
+/**
+ * Reconcile the working tree to `tree`: write the leaves that differ, delete
+ * whatever `present` holds that `tree` doesn't.
+ *
+ * `present` is the disk state to reconcile against. Callers that already
+ * walked pass theirs rather than paying for a second walk — and, more than a
+ * saving, that walk is the one the deletions are judged against: re-walking
+ * here would see files the user created while we were talking to the server
+ * and delete them for not being in the tree.
+ *
+ * Returns stat-cache entries for every leaf that ends up matching its
+ * document, whether it was already identical or we just wrote it.
+ */
 async function materializeTree(
 	repo: Repo,
 	root: string,
 	tree: VfsNode,
-): Promise<void> {
+	opts: { present?: FileTree; cache?: StatCache } = {},
+): Promise<StatCache> {
 	const leaves = flattenLeaves(tree);
+	const cache = opts.cache ?? new Map();
+	const present =
+		opts.present ?? (await walkDir(root, await loadIgnore(root)));
 
 	// Fetch all leaves concurrently: a single Subduction connection
 	// multiplexes concurrent `repo.find`s, so per-doc sync round-trips overlap
-	// instead of serializing (benched vs serial and vs the old worker pool in
-	// ADR-031/032). The transport's own receive-credit windowing is the
-	// backpressure; no artificial cap here.
-	const desired = new Map<string, Uint8Array>();
+	// instead of serializing (benched vs serial and vs the old worker pool).
+	// The transport's own receive-credit windowing is the backpressure; no
+	// artificial cap here.
+	const pending: Array<[string, Uint8Array, string[]]> = [];
+	const verified: StatCache = new Map();
 	await Promise.all(
 		[...leaves].map(async ([posixPath, fileUrl]) => {
 			const handle = await repo.find<UnixFileEntry>(fileUrl);
-			desired.set(posixPath, contentToBytes(handle.doc().content));
+			const heads = handle.heads() ?? [];
+			const file = present.get(posixPath);
+			if (file && isUnchanged(cache, posixPath, file.stat, heads)) {
+				verified.set(posixPath, cacheEntry(file.stat, heads));
+				return;
+			}
+			const bytes = contentToBytes(handle.doc().content);
+			if (file && byteEq(await file.read(), bytes)) {
+				verified.set(posixPath, cacheEntry(file.stat, heads));
+				return;
+			}
+			pending.push([posixPath, bytes, heads]);
 		}),
 	);
-	dlog("materialize desired: %d files", desired.size);
-	// Invariant: every leaf was fetched. The loop below DELETES anything on
-	// disk that isn't in `desired`, so a silent fetch shortfall must be a loud
-	// error here rather than a tree wipe.
-	if (desired.size !== leaves.size) {
+	dlog("materialize: %d to write, %d already current", pending.length, verified.size);
+	// Invariant: every leaf was accounted for. The loop below DELETES anything
+	// on disk that isn't a leaf, so a silent shortfall must be a loud error
+	// here rather than a tree wipe.
+	if (pending.length + verified.size !== leaves.size) {
 		throw new Error(
-			`materialize fetched ${desired.size} of ${leaves.size} documents; refusing to reconcile a partial tree`,
+			`materialize resolved ${pending.length + verified.size} of ${leaves.size} documents; refusing to reconcile a partial tree`,
 		);
 	}
 
-	const ig = await loadIgnore(root);
-	const present = await walkDir(root, ig);
+	await pooled(pending, FS_CONCURRENCY, async ([posixPath, bytes, heads]) => {
+		const target = path.join(root, fromPosix(posixPath));
+		await writeFileAtomic(target, bytes);
+		const stat = await statSig(target);
+		if (stat) verified.set(posixPath, cacheEntry(stat, heads));
+	});
 
-	let written = 0;
 	let removed = 0;
-	for (const [posixPath, bytes] of desired) {
-		if (byteEq(present.get(posixPath), bytes)) continue;
-		await writeFileAtomic(path.join(root, fromPosix(posixPath)), bytes);
-		written++;
-	}
 	for (const posixPath of present.keys()) {
-		if (desired.has(posixPath)) continue;
+		if (leaves.has(posixPath)) continue;
 		try {
 			await fs.unlink(path.join(root, fromPosix(posixPath)));
 			removed++;
@@ -1220,7 +1310,8 @@ async function materializeTree(
 		}
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
-	dlog("materialize done: %d written, %d removed", written, removed);
+	dlog("materialize done: %d written, %d removed", pending.length, removed);
+	return verified;
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);
