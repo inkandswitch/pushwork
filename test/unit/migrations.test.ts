@@ -268,6 +268,42 @@ describe("migrate from intermediate versions", () => {
 		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(true);
 	});
 
+	it("4 → 5 repairs shard-dir case merged by a case-insensitive filesystem", async () => {
+		// The nodefs layout shards a doc ID into a two-char prefix directory
+		// ("3Yk7…" → "3Y/k7…"). On macOS/Windows, doc IDs differing only in
+		// the case of those two chars share one shard directory, which keeps
+		// the case of whichever doc was stored first — so path-based key
+		// reconstruction can produce a wrong-cased doc ID. Simulate the merged
+		// state directly: a chunk of doc 3Yk7… sitting under a "3y" shard dir.
+		// The doc ID's base58check checksum identifies the true case.
+		const doc = "3Yk7TtiVMGtC3xdAj8szm3dcX27z";
+		const chunkDir = pushwork("storage", "3y", doc.slice(2), "snapshot");
+		await fs.mkdir(chunkDir, { recursive: true });
+		await fs.writeFile(path.join(chunkDir, "abcd"), Buffer.from([7]));
+		await writeConfigRaw({
+			version: 4,
+			rootUrl: SOME_URL,
+			backend: "legacy",
+			shape: "vfs",
+			artifactDirectories: [],
+		});
+
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["4 → 5"]);
+
+		const { LMDBStorageAdapter } = await import(
+			"@automerge/automerge-repo-storage-lmdb"
+		);
+		const lmdb = new LMDBStorageAdapter(pushwork("storage.lmdb"));
+		try {
+			expect(await lmdb.load([doc, "snapshot", "abcd"])).toEqual(
+				new Uint8Array([7]),
+			);
+		} finally {
+			await lmdb.close();
+		}
+	});
+
 	it("4 → 5 removes an empty nodefs tree without creating a .bak", async () => {
 		await fs.mkdir(pushwork("storage", "tmp"), { recursive: true });
 		await writeConfigRaw({

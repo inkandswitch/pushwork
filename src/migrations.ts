@@ -26,6 +26,7 @@
  */
 import * as fs from "fs/promises";
 import * as path from "path";
+import { isValidDocumentId } from "@automerge/automerge-repo";
 import { CONFIG_VERSION, pushworkDir } from "./config.js";
 
 /** The "-" (pre-versioned, original-pushwork) format, represented internally. */
@@ -190,28 +191,26 @@ async function migrate3To4(_root: string, raw: RawConfig): Promise<RawConfig> {
  * but died before the rename/config write, re-running overwrites the same
  * keys with the same bytes (idempotent) and finishes the rename.
  *
- * Memory: the whole store is materialized once (`loadRange([])` returns an
- * array; the copy into LMDB shares the chunk buffers, so peak ≈ store size).
- * Fine for the repo sizes pushwork targets; a streaming enumeration API in
- * the storage interface would lift this if multi-GB stores ever appear.
+ * Memory: the whole store is materialized once (the copy into LMDB shares
+ * the chunk buffers, so peak ≈ store size). Fine for the repo sizes pushwork
+ * targets; a streaming enumeration API in the storage interface would lift
+ * this if multi-GB stores ever appear.
+ *
+ * The chunk tree is read directly rather than through NodeFSStorageAdapter:
+ * its `loadRange([])` reads every chunk in one unbounded `Promise.all`,
+ * which on a store of a few hundred thousand chunks exhausts the process's
+ * file-descriptor limit (EMFILE). {@link readChunkTree} walks the same
+ * layout with bounded concurrency.
  */
 async function migrate4To5(root: string, raw: RawConfig): Promise<RawConfig> {
 	const storage = path.join(pushworkDir(root), "storage");
 	const lmdbPath = `${storage}.lmdb`;
 
 	if (await exists(storage)) {
-		const { NodeFSStorageAdapter } = await import(
-			"@automerge/automerge-repo-storage-nodefs"
-		);
 		const { LMDBStorageAdapter } = await import(
 			"@automerge/automerge-repo-storage-lmdb"
 		);
-		// The empty prefix enumerates the whole store (conformance-suite
-		// guaranteed as of the storage-lmdb publish train).
-		const chunks = await new NodeFSStorageAdapter(storage).loadRange([]);
-		const entries = chunks.flatMap((c) =>
-			c.data ? [[[...c.key], c.data] as [string[], Uint8Array]] : [],
-		);
+		const entries = await readChunkTree(storage);
 		if (entries.length > 0) {
 			const lmdb = new LMDBStorageAdapter(lmdbPath);
 			try {
@@ -229,6 +228,84 @@ async function migrate4To5(root: string, raw: RawConfig): Promise<RawConfig> {
 
 	return { ...raw, version: 5 };
 }
+
+/**
+ * Read every chunk in a nodefs storage tree as `[key, bytes]` entries,
+ * reversing the adapter's sharded layout: a key `[first, ...rest]` is stored
+ * at `<base>/<first[0..2]>/<first[2..]>/<...rest>`, so the first two path
+ * segments glue back together into the key's first element. The adapter's
+ * `.tmp/` staging directory holds in-flight writes, not chunks, and is
+ * skipped. Files are read a bounded batch at a time to stay within the
+ * process's file-descriptor limit.
+ */
+async function readChunkTree(base: string): Promise<[string[], Uint8Array][]> {
+	const files: string[] = [];
+	const collect = async (dir: string): Promise<void> => {
+		for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (dir === base && entry.name === ".tmp") continue;
+				await collect(full);
+			} else {
+				files.push(full);
+			}
+		}
+	};
+	await collect(base);
+
+	const entries: [string[], Uint8Array][] = [];
+	const CONCURRENCY = 64;
+	for (let start = 0; start < files.length; start += CONCURRENCY) {
+		const batch = files.slice(start, start + CONCURRENCY);
+		const read = await Promise.all(
+			batch.map(async (file): Promise<[string[], Uint8Array] | undefined> => {
+				const rel = path.relative(base, file).split(path.sep);
+				if (rel.length < 2) return undefined; // not a sharded chunk path
+				const key = [repairShardCase(rel[0], rel[1]), ...rel.slice(2)];
+				return [key, new Uint8Array(await fs.readFile(file))];
+			}),
+		);
+		for (const entry of read) if (entry) entries.push(entry);
+	}
+	return entries;
+}
+
+/**
+ * Reassemble a chunk key's first element from its two on-disk path segments,
+ * repairing case damage from case-insensitive filesystems (macOS, Windows).
+ *
+ * The nodefs layout shards a key's first element into a two-character prefix
+ * directory plus the remainder ("3Yk7…" → "3Y/k7…"). On a case-insensitive
+ * filesystem, documents whose IDs differ only in the case of those first two
+ * characters share one shard directory, whose on-disk name carries the case
+ * of whichever document was stored first — so gluing the path segments back
+ * together can yield a wrong-cased document ID. Harmless for the nodefs
+ * adapter (its lookups go back through the same case-insensitive
+ * filesystem), fatal in LMDB, whose keys are exact. Document IDs are
+ * base58check-encoded, so the checksum identifies the true case: try every
+ * case variant of the two shard characters and return the one that
+ * validates. Non-document keys ("subduction", "storage-adapter-id") never
+ * validate and keep their on-disk spelling.
+ */
+function repairShardCase(shard: string, rest: string): string {
+	const onDisk = shard + rest;
+	if (shard.length !== 2 || isValidDocumentId(onDisk)) return onDisk;
+	for (const a of caseVariants(shard[0])) {
+		for (const b of caseVariants(shard[1])) {
+			const candidate = a + b + rest;
+			if (candidate !== onDisk && isValidDocumentId(candidate)) {
+				return candidate;
+			}
+		}
+	}
+	return onDisk;
+}
+
+const caseVariants = (c: string): string[] => {
+	const lower = c.toLowerCase();
+	const upper = c.toUpperCase();
+	return lower === upper ? [c] : [lower, upper];
+};
 
 /** First of `base`, `base.1`, `base.2`, … that doesn't exist yet. */
 async function freeBakPath(base: string): Promise<string> {
