@@ -433,6 +433,50 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 		);
 
 		it(
+			"merges concurrent edits to the same file from two peers",
+			async () => {
+				const { a, b } = await setupPair();
+
+				await fs.writeFile(
+					path.join(a, "shared.txt"),
+					"line1\nline2\nline3\n",
+				);
+				await syncUntilConverged([a, b]);
+
+				// Concurrent edits to different regions of the same file: A
+				// rewrites the first line, B appends a fourth. Each sync
+				// records its disk edit against the pinned base, so the two
+				// land as concurrent changes that merge in the file doc.
+				// The folder doc's link update is last-writer-wins, though,
+				// so one peer's pin can briefly shadow the other's edit on
+				// disk — the edit lives on in the file doc and a later sync
+				// re-pins the merged tip. Loop until both disks show the
+				// merge; neither edit may be lost.
+				await fs.writeFile(
+					path.join(a, "shared.txt"),
+					"A1\nline2\nline3\n",
+				);
+				await fs.writeFile(
+					path.join(b, "shared.txt"),
+					"line1\nline2\nline3\nline4\n",
+				);
+
+				const merged = "A1\nline2\nline3\nline4\n";
+				let contents: string[] = [];
+				for (let round = 1; round <= 6; round++) {
+					await syncOnce([a, b]);
+					contents = await Promise.all([
+						readText(path.join(a, "shared.txt")),
+						readText(path.join(b, "shared.txt")),
+					]);
+					if (contents.every((c) => c === merged)) break;
+				}
+				expect(contents).toEqual([merged, merged]);
+			},
+			180_000,
+		);
+
+		it(
 			"a third clone catches up to the current state",
 			async () => {
 				const { a, b } = await setupPair();

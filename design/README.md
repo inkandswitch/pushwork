@@ -8,7 +8,7 @@ This directory contains design documents for pushwork: how a directory tree is m
 | --- | --- |
 | [`shapes`](./shapes.md) | The Shape abstraction: encoding a directory tree as docs |
 | [`sync`](./sync.md) | Sync flow, server sync verdicts (SYNCED / PENDING) |
-| [`artifacts`](./artifacts.md) | Artifact directories as heads-pinned, immutable subtrees |
+| [`artifacts`](./artifacts.md) | Universal heads-pinned links; `artifact` as a content attribute |
 | [`config`](./config.md) | Versioned config and stepwise migrations |
 | [`snarf`](./snarf.md) | Offline stash: `cut` / `paste` / `snarfs` |
 
@@ -29,26 +29,29 @@ block-beta
 Every pushwork repo is a tree of Automerge documents rooted at a single folder document, addressed by a shareable `automerge:` URL:
 
 ```
-automerge:<root>                      ← the repo's identity
-  ├── folder doc "src"
-  │     ├── file doc "cli.ts"
-  │     └── file doc "repo.ts"
-  ├── folder doc "dist"  (heads-pinned ⇒ frozen artifact subtree)
-  │     └── file doc "cli.js"  (heads-pinned link)
-  └── file doc "README.md"
+automerge:<root>                      ← the repo's identity (only bare URL)
+  ├── folder doc "src"      (heads-pinned link)
+  │     ├── file doc "cli.ts"   (heads-pinned link)
+  │     └── file doc "repo.ts"  (heads-pinned link)
+  ├── folder doc "dist"     (heads-pinned link)
+  │     └── file doc "cli.js"   (heads-pinned link)
+  └── file doc "README.md"  (heads-pinned link)
 ```
 
-Sync is a decode → diff → encode cycle:
+Every link is pinned at heads, so each URL names an exact published version
+and doubles as the next sync's merge base (see [artifacts](./artifacts.md)).
 
-1. _Decode_ the remote tree (via the configured [shape](./shapes.md)) into an in-memory `VfsNode` tree.
-2. _Diff_ against the working directory (byte comparison, atomic writes).
-3. _Encode_ local changes back into documents and wait for the [server sync verdict](./sync.md).
+Sync is a decode → reconcile → encode cycle:
+
+1. _Decode_ the tree (via the configured [shape](./shapes.md)) into an in-memory `VfsNode` tree; the pinned links give the base content.
+2. _Reconcile_ against the working directory (three-way, with the pin as base; atomic writes).
+3. _Encode_ the re-pinned tree back into documents and wait for the [server sync verdict](./sync.md).
 
 ## Design Principles
 
 - **Shapes are pluggable** — the document layout is a strategy, not a hardcoded schema; `patchwork-folder` (the default) interoperates with Patchwork.
 - **The CRDT is the merge** — no conflict resolution UI; concurrent edits converge via Automerge.
 - **Honest verdicts** — the CLI only prints SYNCED when the server has demonstrably received our changes; otherwise PENDING.
-- **Immutability in the link layer** — artifact subtrees are frozen by pinning heads in URLs, not by content conventions.
+- **Immutability in the link layer** — every published link pins heads in the URL, so references are exact versions, not moving targets.
 - **Strict config versioning** — unknown config versions hard-error and point at `pushwork migrate`; migrations are small stepwise transforms.
 - **Offline-first** — `save`, `status`, `diff`, `heads`, `cut`/`paste` all work without a network connection.

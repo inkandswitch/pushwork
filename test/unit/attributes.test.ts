@@ -1,31 +1,12 @@
 /**
  * Tests for `.pushworkattributes` parsing and matching: gitattributes-style
- * path globs that assign the `artifact` attribute (immutable, heads-pinned).
- * Fully offline — no repo or network.
+ * path globs that assign the `artifact` attribute (ImmutableString content).
+ * Attributes files may sit in any directory, each scoped to its own subtree,
+ * deepest file wins. Fully offline — no repo or network.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as fs from "fs/promises";
-import * as path from "path";
-import * as tmp from "tmp";
+import { describe, it, expect } from "vitest";
 
-import {
-	Attributes,
-	readAttributes,
-	ATTRIBUTES_FILE,
-} from "../../src/attributes.js";
-
-tmp.setGracefulCleanup();
-
-let root: string;
-let cleanup: () => void;
-
-beforeEach(() => {
-	const d = tmp.dirSync({ unsafeCleanup: true });
-	root = d.name;
-	cleanup = d.removeCallback;
-});
-
-afterEach(() => cleanup());
+import { Attributes, attributesTreeOf } from "../../src/attributes.js";
 
 describe("Attributes.parse", () => {
 	it("matches directory and glob patterns", () => {
@@ -66,20 +47,47 @@ describe("Attributes.parse", () => {
 	});
 });
 
-describe("readAttributes", () => {
-	it("returns null when the file is absent", async () => {
-		expect(await readAttributes(root)).toBeNull();
+describe("attributesTreeOf", () => {
+	const enc = (s: string) => new TextEncoder().encode(s);
+
+	it("is empty when no attributes file is in the tree", () => {
+		const tree = attributesTreeOf(new Map([["src/a.ts", enc("x")]]));
+		expect(tree.hasArtifactRules).toBe(false);
+		expect(tree.isArtifact("dist/a.js")).toBe(false);
 	});
 
-	it("reads and parses the file when present", async () => {
-		await fs.writeFile(
-			path.join(root, ATTRIBUTES_FILE),
-			"out/** artifact\n",
-			"utf8",
+	it("scopes each file's rules to its own directory", () => {
+		const tree = attributesTreeOf(
+			new Map([["pkg/.pushworkattributes", enc("dist/** artifact\n")]]),
 		);
-		const a = await readAttributes(root);
-		expect(a).not.toBeNull();
-		expect(a!.isArtifact("out/bundle.js")).toBe(true);
-		expect(a!.isArtifact("src/a.ts")).toBe(false);
+		expect(tree.hasArtifactRules).toBe(true);
+		expect(tree.isArtifact("pkg/dist/index.js")).toBe(true);
+		// The rule lives in pkg/, so it says nothing about paths outside it.
+		expect(tree.isArtifact("other/dist/index.js")).toBe(false);
+		expect(tree.isArtifact("dist/index.js")).toBe(false);
+	});
+
+	it("lets a deeper file override a shallower one", () => {
+		const tree = attributesTreeOf(
+			new Map([
+				[".pushworkattributes", enc("**/*.wasm artifact\n")],
+				["vendored/.pushworkattributes", enc("*.wasm -artifact\n")],
+			]),
+		);
+		expect(tree.isArtifact("pkg/lib.wasm")).toBe(true);
+		expect(tree.isArtifact("vendored/lib.wasm")).toBe(false);
+	});
+
+	it("leaves paths a deeper file doesn't mention to the shallower rules", () => {
+		const tree = attributesTreeOf(
+			new Map([
+				[".pushworkattributes", enc("**/dist/** artifact\n")],
+				["pkg/.pushworkattributes", enc("*.gen.js artifact\n")],
+			]),
+		);
+		// pkg's file says nothing about dist, so the root rule still applies.
+		expect(tree.isArtifact("pkg/dist/a.js")).toBe(true);
+		expect(tree.isArtifact("pkg/b.gen.js")).toBe(true);
+		expect(tree.isArtifact("pkg/b.js")).toBe(false);
 	});
 });

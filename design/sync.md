@@ -11,10 +11,10 @@ sequenceDiagram
     participant S as Sync server
 
     Note over L,S: 1. Open repo, start connection wait (overlapped)
-    W->>L: walk tree, diff against decoded doc tree
-    L->>L: encode local changes (shape.encode)
+    W->>L: walk tree, three-way reconcile against the pinned links
+    L->>L: encode: re-pin every link at current heads (shape.encode)
     S-->>L: remote commits arrive as docs are found
-    L->>W: write remote changes to disk (atomic)
+    L->>W: materialize the pinned tree to disk (atomic)
     Note over L,S: 2. waitForServerSync on the root folder doc
     L->>S: push un-broadcast commits
     S-->>L: advertise heads back
@@ -26,6 +26,43 @@ Key properties:
 - `repo.find` is what triggers delivery — every file leaf is touched so the network layer announces it to peers.
 - The connection wait (`waitForConnection`) starts immediately after `openRepo` so local tree work overlaps the Subduction handshake.
 - Big fresh clones/ingests shard across worker threads (`ingest-pool.ts`) past a size threshold.
+
+## The pinned link is the merge base
+
+Every link in a folder doc is heads-pinned (see [artifacts](./artifacts.md)),
+and sync maintains the invariant that **at rest, disk == the content at the
+pinned URLs**: sync and `save` pin at the heads they just materialized,
+`clone` materializes the published tree, `init` pins what it read off disk.
+So the heads already in each link are a deterministic three-way merge base —
+no snapshot file, and the arrangement self-heals because every sync
+re-anchors the pins to what it wrote to disk.
+
+`pushFiles` reconciles each path as: **base** = the pinned link's content
+(what `readFileBytes` decodes, by construction), **disk** = the working-tree
+bytes, **tip** = the live doc (heads stripped):
+
+| Case | Action |
+| --- | --- |
+| disk == base | Nothing to record; re-pin at the tip, so an edit that arrived in local storage (e.g. from the browser) gets published and materialized. |
+| tip == disk | The edit is already in the doc (our own earlier merge, or a peer wrote the same bytes): skip the write, just re-pin. Recording it again at the base would land the identical splice twice — Automerge does not dedupe concurrent duplicates. |
+| tip == base | A plain local edit: `applyFileEntry` at the tip. |
+| all three differ | `handle.changeAt(baseHeads, ...)`: the callback sees the doc *at base*, so the disk diff lands as a change **concurrent** with the tip's, and the two merge instead of the disk diff undoing the tip's edits. |
+| link has no heads | Pre-fork repo, no base: `applyFileEntry` at the tip (old behaviour). The first sync pins every link, so this runs once per repo. |
+
+Deletes and creates are unchanged: present in base but gone from disk is a
+delete, on disk but absent from base is a create. After the reconcile:
+encode (re-pin), stamp, one `waitForServerSync`, final decode, materialize —
+leaving base == tip == pin == disk.
+
+Two consequences, stated as behaviour rather than bugs:
+
+- **Syncing publishes the tip it can see**, including a peer's unpublished
+  edits that already reached local storage.
+- **Folder-doc link updates are last-writer-wins** (`d.docs` is replaced
+  wholesale), so two peers syncing concurrently race and one set of pins
+  shadows the other on disk until the next sync re-pins the merged file-doc
+  tips. Nothing is lost — the file docs merged — but convergence can take an
+  extra round.
 
 ## The Sync Verdict
 

@@ -18,7 +18,6 @@ interface Shape {
 		tree: VfsNode
 		previousRoot?: DocHandle<unknown> // mutate in place vs. create fresh
 		title?: string
-		isArtifactDir?: (posixPath: string) => boolean // see artifacts.md
 	}): Promise<AutomergeUrl>
 
 	decode(args: {repo: Repo; root: DocHandle<unknown>}): Promise<VfsNode>
@@ -26,7 +25,7 @@ interface Shape {
 ```
 
 - `encode` with `previousRoot` mutates the existing root doc in place — the root URL is the repo's identity and must be preserved.
-- `isArtifactDir` classifies repo-relative posix _directory_ paths; shapes that represent directories as their own docs pin those folder links with heads so the whole subtree reads as frozen (see [`artifacts`](./artifacts.md)).
+- The tree's file leaves arrive with heads-pinned URLs, and shapes that represent directories as their own docs pin those folder links too (see [`artifacts`](./artifacts.md)); only the root URL stays bare.
 
 ## File Documents
 
@@ -67,7 +66,7 @@ One folder doc per directory, interoperable with Patchwork:
 }
 ```
 
-- Subfolders are linked by URL — plain for normal dirs, heads-pinned for artifact dirs.
+- Subfolders are linked by heads-pinned URL, like every other link; the doc write is skipped when the links are unchanged so pins only move when content does.
 - `type` is the file extension (or `"folder"`), used by Patchwork for icons.
 
 ### `vfs`

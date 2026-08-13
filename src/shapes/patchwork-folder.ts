@@ -42,37 +42,20 @@ const linkFileType = (filename: string): string => {
 	return ext || "file";
 };
 
-/**
- * Decides whether a repo-relative posix directory path is an artifact
- * directory whose folder link should be pinned with heads. Threaded down from
- * `encode` so pinning is driven by the same config-/attributes-based classifier
- * that pins file leaves — not inferred from the children, which would
- * spuriously freeze a plain parent dir whose only child is an artifact subdir.
- */
-type IsArtifactDir = (posixPath: string) => boolean;
-
-/** The link URL for a freshly synced subfolder: pinned iff it's an artifact dir. */
-const subfolderUrl = (handle: DocHandle<FolderDoc>, frozen: boolean) =>
-	frozen ? pinUrl(handle) : handle.url;
-
-const childPath = (dirPath: string, name: string) =>
-	dirPath ? `${dirPath}/${name}` : name;
-
 export const patchworkFolderShape: Shape = {
-	async encode({ repo, tree, previousRoot, isArtifactDir }) {
+	async encode({ repo, tree, previousRoot }) {
 		if (tree.kind !== "dir") throw new Error("folder: root must be a dir");
-		const isArtifact: IsArtifactDir = isArtifactDir ?? (() => false);
 
 		if (previousRoot) {
 			dlog("encode reusing root=%s", previousRoot.url);
 			const handle = previousRoot as DocHandle<FolderDoc>;
-			// Root path is "" — never an artifact dir — so the returned flag is
-			// ignored; callers track the repo by this bare URL.
-			await syncFolder(repo, handle, tree, "", isArtifact);
+			// Callers track the repo by the root's bare URL; only the links
+			// *inside* folder docs are pinned.
+			await syncFolder(repo, handle, tree);
 			return handle.url;
 		}
 		dlog("encode creating new root");
-		const { handle } = await createFolder(repo, tree, "pushwork", "", isArtifact);
+		const handle = await createFolder(repo, tree, "pushwork");
 		dlog("encode new root=%s", handle.url);
 		return handle.url;
 	},
@@ -91,27 +74,15 @@ async function createFolder(
 	repo: Repo,
 	tree: VfsNode,
 	title: string,
-	dirPath: string,
-	isArtifact: IsArtifactDir,
-): Promise<{ handle: DocHandle<FolderDoc>; frozen: boolean }> {
+): Promise<DocHandle<FolderDoc>> {
 	if (tree.kind !== "dir") throw new Error("createFolder: not a dir");
 	const links: DocLink[] = [];
 	for (const [name, child] of tree.entries) {
 		if (child.kind === "file") {
 			links.push({ name, type: linkFileType(name), url: child.url });
 		} else {
-			const sub = await createFolder(
-				repo,
-				child,
-				name,
-				childPath(dirPath, name),
-				isArtifact,
-			);
-			links.push({
-				name,
-				type: "folder",
-				url: subfolderUrl(sub.handle, sub.frozen),
-			});
+			const sub = await createFolder(repo, child, name);
+			links.push({ name, type: "folder", url: pinUrl(sub) });
 		}
 	}
 	const handle = repo.create<FolderDoc>({
@@ -120,16 +91,14 @@ async function createFolder(
 		docs: links,
 	});
 	dlog("createFolder title=%s docs=%d url=%s", title, links.length, handle.url);
-	return { handle, frozen: isArtifact(dirPath) };
+	return handle;
 }
 
 async function syncFolder(
 	repo: Repo,
 	handle: DocHandle<FolderDoc>,
 	tree: VfsNode,
-	dirPath: string,
-	isArtifact: IsArtifactDir,
-): Promise<boolean> {
+): Promise<void> {
 	if (tree.kind !== "dir") throw new Error("syncFolder: not a dir");
 
 	const desired = new Map<string, VfsNode>(tree.entries);
@@ -145,49 +114,49 @@ async function syncFolder(
 			continue;
 		}
 		// child is a dir. Reuse the existing subfolder doc so its URL stays
-		// stable across syncs. A subfolder link pinned with heads (our own
-		// artifact dir, or one carried over from an old pushwork) resolves to a
-		// view-only handle that throws on `.change()`, so strip the heads to
-		// get the live, editable doc before syncing into it. We re-derive the
-		// pin below from whether the subtree is an artifact dir.
+		// stable across syncs. Its link is pinned with heads, and a pinned URL
+		// resolves to a view-only handle that throws on `.change()`, so strip
+		// the heads to get the live, editable doc before syncing into it; the
+		// pin is re-derived from the handle's post-sync heads.
 		if (existing && existing.type === "folder") {
 			const subHandle = await repo.find<FolderDoc>(stripHeads(existing.url));
 			if (isFolderDoc(subHandle.doc())) {
-				const frozen = await syncFolder(
-					repo,
-					subHandle,
-					child,
-					childPath(dirPath, name),
-					isArtifact,
-				);
-				nextLinks.push({
-					name,
-					type: "folder",
-					url: subfolderUrl(subHandle, frozen),
-				});
+				await syncFolder(repo, subHandle, child);
+				nextLinks.push({ name, type: "folder", url: pinUrl(subHandle) });
 				continue;
 			}
 		}
-		const sub = await createFolder(
-			repo,
-			child,
-			name,
-			childPath(dirPath, name),
-			isArtifact,
-		);
-		nextLinks.push({
-			name,
-			type: "folder",
-			url: subfolderUrl(sub.handle, sub.frozen),
-		});
+		const sub = await createFolder(repo, child, name);
+		nextLinks.push({ name, type: "folder", url: pinUrl(sub) });
 	}
 
-	handle.change((d: FolderDoc) => {
-		if (!d["@patchwork"]) d["@patchwork"] = { type: "folder" };
-		if (typeof d.title !== "string") d.title = "pushwork";
-		d.docs = nextLinks;
+	// Reassigning `docs` always advances the doc's heads, even when the array
+	// is identical — which would move this folder's pin, its parent's link,
+	// and so on up to the root on every sync. Skip the write when nothing
+	// changed so pins only move when content does.
+	if (!sameLinks(handle.doc(), nextLinks)) {
+		handle.change((d: FolderDoc) => {
+			if (!d["@patchwork"]) d["@patchwork"] = { type: "folder" };
+			if (typeof d.title !== "string") d.title = "pushwork";
+			d.docs = nextLinks;
+		});
+	}
+}
+
+function sameLinks(doc: FolderDoc, nextLinks: DocLink[]): boolean {
+	if (!doc["@patchwork"] || typeof doc.title !== "string") return false;
+	const current = doc.docs;
+	if (!Array.isArray(current) || current.length !== nextLinks.length) {
+		return false;
+	}
+	return nextLinks.every((link, i) => {
+		const existing = current[i];
+		return (
+			existing.name === link.name &&
+			existing.type === link.type &&
+			existing.url === link.url
+		);
 	});
-	return isArtifact(dirPath);
 }
 
 async function readFolder(

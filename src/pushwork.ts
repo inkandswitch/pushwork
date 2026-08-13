@@ -18,8 +18,8 @@ import {
 	type PushworkConfig,
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
-import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
-import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
+import { ATTRIBUTES_FILE, attributesTreeOf } from "./attributes.js";
+import { byteEq, walkDir, writeFileAtomic, type FileTree } from "./fs-tree.js";
 import { log } from "./log.js";
 import {
 	openRepo,
@@ -45,6 +45,7 @@ import {
 	flattenLeaves,
 	isInArtifactDir,
 	makeFileEntry,
+	mutateFileEntry,
 	newDir,
 	normalizeArtifactDir,
 	patchworkFolderShape,
@@ -53,6 +54,7 @@ import {
 	resolveShape,
 	setFileAt,
 	stripHeads,
+	urlHeads,
 	vfsShape,
 	type Shape,
 	type UnixFileEntry,
@@ -72,32 +74,33 @@ const noReport: Reporter = () => {};
 export type Warn = (message: string) => void;
 const noWarn: Warn = () => {};
 
-/** Decides whether a repo-relative posix path is an artifact (stored as an
- *  immutable, heads-pinned blob rather than a live CRDT doc). */
+/** Decides whether a repo-relative posix path is an artifact (its text content
+ *  stored as an atomic ImmutableString rather than a merge-able CRDT text). */
 type IsArtifact = (posixPath: string) => boolean;
 
 /**
- * Build the artifact classifier for an operation. A repo-level
- * `.pushworkattributes` file travels with the repo content, so its `artifact`
- * rules take precedence over the local `.pushwork/config.json`
- * `artifactDirectories`. When the attributes file is present *and* the local
- * config also lists directories, we warn — the local list is being ignored in
- * favor of the one the repo carries.
+ * Build the artifact classifier from a walked working tree. The tree's
+ * `.pushworkattributes` files (in any directory, each scoped to its own
+ * subtree) travel with the repo content, so their `artifact` rules take
+ * precedence over the local `.pushwork/config.json` `artifactDirectories`.
+ * When attributes files are present *and* the local config also lists
+ * directories, we warn — the local list is being ignored in favor of the
+ * ones the repo carries.
  */
-async function resolveIsArtifact(
-	root: string,
+function artifactClassifier(
+	fsFiles: FileTree,
 	configDirs: readonly string[],
 	warn: Warn = noWarn,
-): Promise<IsArtifact> {
-	const attrs = await readAttributes(root);
-	if (attrs?.hasArtifactRules) {
+): IsArtifact {
+	const attrs = attributesTreeOf(fsFiles);
+	if (attrs.hasArtifactRules) {
 		if (configDirs.length > 0) {
 			warn(
 				`${ATTRIBUTES_FILE} defines artifact paths and overrides ` +
 					`artifactDirectories [${configDirs.join(", ")}] from .pushwork/config.json`,
 			);
 		}
-		dlog("artifact source: %s", ATTRIBUTES_FILE);
+		dlog("artifact source: %s files", ATTRIBUTES_FILE);
 		return (p) => attrs.isArtifact(p);
 	}
 	dlog("artifact source: config artifactDirectories %o", configDirs);
@@ -163,35 +166,36 @@ export async function init(
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	// A `.pushworkattributes` file already in the working tree is authoritative;
-	// keep config.json's artifactDirectories empty so it never fights the
-	// repo-carried attributes (and never triggers an override warning later).
-	const attrs = await readAttributes(root);
-	if (attrs?.hasArtifactRules && opts.artifactDirectories?.length) {
+	const ig = await loadIgnore(root);
+	report("Reading working tree");
+	const fsFiles = await walkDir(root, ig);
+	dlog("init walked %d files", fsFiles.size);
+
+	// `.pushworkattributes` files already in the working tree are
+	// authoritative; keep config.json's artifactDirectories empty so it never
+	// fights the repo-carried attributes (and never triggers an override
+	// warning later).
+	const attrs = attributesTreeOf(fsFiles);
+	if (attrs.hasArtifactRules && opts.artifactDirectories?.length) {
 		warn(
 			`${ATTRIBUTES_FILE} defines artifact paths; ignoring --artifact-dir ` +
 				`[${opts.artifactDirectories.join(", ")}]`,
 		);
 	}
-	const artifactDirs = attrs?.hasArtifactRules
+	const artifactDirs = attrs.hasArtifactRules
 		? []
 		: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
-	const isArtifactPath: IsArtifact = attrs?.hasArtifactRules
+	const isArtifactPath: IsArtifact = attrs.hasArtifactRules
 		? (p) => attrs.isArtifact(p)
 		: (p) => isInArtifactDir(p, artifactDirs);
-	dlog("init artifactDirs=%o attributes=%s", artifactDirs, Boolean(attrs?.hasArtifactRules));
+	dlog("init artifactDirs=%o attributes=%s", artifactDirs, attrs.hasArtifactRules);
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
-	// Start measuring the connection now so the local walk/encode overlaps it.
+	// Start measuring the connection now so the local encode overlaps it.
 	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
 		const shape = await resolveShape(opts.shape);
-		const ig = await loadIgnore(root);
-		report("Reading working tree");
-		const fsFiles = await walkDir(root, ig);
-		dlog("init walked %d files", fsFiles.size);
-
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
 		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
@@ -199,7 +203,6 @@ export async function init(
 			repo,
 			tree,
 			title,
-			isArtifactDir: isArtifactPath,
 		});
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
@@ -292,12 +295,12 @@ export async function clone(
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
 		await materializeTree(repo, root, tree);
 
-		// Now that the tree (including any `.pushworkattributes`) is on disk,
-		// decide what to record locally. If the repo carries its own artifact
-		// attributes, leave config.json's list empty so it defers to them and
-		// never triggers an override warning on later operations.
-		const cloned = await readAttributes(root);
-		const artifactDirs = cloned?.hasArtifactRules
+		// Now that the tree (including any `.pushworkattributes` files) is on
+		// disk, decide what to record locally. If the repo carries its own
+		// artifact attributes, leave config.json's list empty so it defers to
+		// them and never triggers an override warning on later operations.
+		const cloned = attributesTreeOf(await walkDir(root, await loadIgnore(root)));
+		const artifactDirs = cloned.hasArtifactRules
 			? []
 			: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
 
@@ -560,7 +563,7 @@ export async function sync(
 ): Promise<SyncSnapshot | undefined> {
 	if (opts.nuclear) {
 		report("Recreating documents");
-		await nuclearizeRepo(cwd, warn);
+		await nuclearizeRepo(cwd);
 		report("Publishing to sync server");
 		return await publishCurrentTree(cwd);
 	}
@@ -612,18 +615,10 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
  * Anyone holding one of those URLs directly continues to work from it;
  * this client just stops referencing them.
  */
-export async function nuclearizeRepo(
-	cwd: string,
-	warn: Warn = noWarn,
-): Promise<void> {
+export async function nuclearizeRepo(cwd: string): Promise<void> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	dlog("nuclear root=%s rootUrl=%s", root, config.rootUrl);
-	const isArtifactPath = await resolveIsArtifact(
-		root,
-		config.artifactDirectories,
-		warn,
-	);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
@@ -646,11 +641,11 @@ export async function nuclearizeRepo(
 				mimeType: oldDoc.mimeType,
 				content: oldDoc.content,
 			});
-			let finalUrl: AutomergeUrl = newFileHandle.url;
-			if (isArtifactPath(posixPath)) {
-				finalUrl = pinUrl(newFileHandle);
-			}
-			setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
+			setFileAt(
+				newTree,
+				posixPath.split("/").filter(Boolean),
+				pinUrl(newFileHandle),
+			);
 		}
 
 		// Mutate the existing folder doc in place — same URL, new file leaves.
@@ -659,7 +654,6 @@ export async function nuclearizeRepo(
 			tree: newTree,
 			previousRoot: folderHandle,
 			title,
-			isArtifactDir: isArtifactPath,
 		});
 	} finally {
 		await safeShutdown(repo);
@@ -683,11 +677,6 @@ async function commitWorkdir(
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	dlog("commit online=%s root=%s", online, root);
-	const isArtifactPath = await resolveIsArtifact(
-		root,
-		config.artifactDirectories,
-		warn,
-	);
 
 	const repo = await openRepo(config.backend, storageDir(root), {
 		offline: !online,
@@ -703,6 +692,11 @@ async function commitWorkdir(
 		const ig = await loadIgnore(root);
 		report("Scanning working tree");
 		const fsFiles = await walkDir(root, ig);
+		const isArtifactPath = artifactClassifier(
+			fsFiles,
+			config.artifactDirectories,
+			warn,
+		);
 
 		report(online ? "Committing local changes" : "Writing documents");
 		const newTree = await pushFiles(
@@ -718,41 +712,24 @@ async function commitWorkdir(
 				repo,
 				tree: newTree,
 				previousRoot: folderHandle,
-				isArtifactDir: isArtifactPath,
 			});
 		}
 
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
-			// Only artifact (pinned) leaves need a pre-refresh catch-up (to pin to
-			// the server's merged heads). No artifacts → the single confirm-wait
-			// below both pulls peer changes and pushes our stamp.
-			const hasArtifacts = [...flattenLeaves(newTree).keys()].some(isArtifactPath);
-
-			let refreshed = false;
-			if (hasArtifacts) {
-				// Catch up so the re-pin captures each file doc's post-merge heads.
-				await waitForServerSync(repo, folderHandle, config.backend, {
-					idleMs: 1500,
-					maxMs: 15000,
-				});
-				// Bare URLs already track current heads implicitly; only pins move.
-				refreshed = await refreshFolderPins(
-					repo,
-					folderHandle,
-					shape,
-					isArtifactPath,
-				);
-			}
-
-			// Always stamp lastSyncAt — a sync is also a checkpoint that
-			// "we reconciled with the server at this time" — then confirm the
-			// server has caught up to the stamped (and any refreshed) state.
+			// Stamp lastSyncAt — a sync is also a checkpoint that "we reconciled
+			// with the server at this time" — then confirm the server has caught
+			// up to the stamped state. The same wait pulls peer changes into the
+			// local docs; they reach disk through the final decode + materialize
+			// below (when their folder links won the merge) or get re-pinned and
+			// published by the next sync. Pins taken by pushFiles above capture
+			// our local heads on purpose: publishing means "publish what I
+			// have", not "wait for everyone else first".
 			stampLastSyncAt(folderHandle);
 			sync = await waitForServerSync(repo, folderHandle, config.backend, {
 				idleMs: 1500,
-				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
+				maxMs: 15000,
 			});
 		}
 
@@ -1079,81 +1056,81 @@ async function pushFiles(
 	let unchanged = 0;
 	for (const [posixPath, bytes] of fsFiles) {
 		const segments = posixPath.split("/").filter(Boolean);
-		const isArtifact = isArtifactPath(posixPath);
-		const fresh = makeFileEntry(posixPath, bytes, isArtifact);
 		const prev = previous?.get(posixPath);
 
-		let baseUrl: AutomergeUrl;
-		if (prev && byteEq(prev.bytes, bytes)) {
-			// Unchanged path: keep the existing file-doc URL. For artifacts
-			// we'll re-pin from the current heads below.
-			baseUrl = stripHeads(prev.url);
-			unchanged++;
-		} else if (prev) {
-			// Changed path: mutate the existing file doc in place (see
-			// applyFileEntry). This keeps the file URL stable across edits and
-			// avoids the propagation race where a brand-new file doc URL is
-			// referenced by the folder before its bytes have reached the server.
-			const refreshUrl = stripHeads(prev.url);
-			const handle = await repo.find<UnixFileEntry>(refreshUrl);
-			applyFileEntry(handle, fresh);
-			baseUrl = refreshUrl;
-			updated++;
-			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
+		let handle: DocHandle<UnixFileEntry>;
+		if (prev) {
+			// Existing path: mutate the file doc in place. This keeps the file
+			// URL stable across edits and avoids the propagation race where a
+			// brand-new file doc URL is referenced by the folder before its
+			// bytes have reached the server. The link's pinned heads are the
+			// merge base; strip them to get the live, editable doc.
+			handle = await repo.find<UnixFileEntry>(stripHeads(prev.url));
+			if (byteEq(prev.bytes, bytes)) {
+				unchanged++;
+			} else {
+				applyDiskEdit(
+					handle,
+					prev,
+					makeFileEntry(posixPath, bytes, isArtifactPath(posixPath)),
+					bytes,
+				);
+				updated++;
+				dlog("pushFiles updated %s url=%s bytes=%d", posixPath, handle.url, bytes.length);
+			}
 		} else {
 			// New path: create a fresh file doc.
-			const handle = repo.create<UnixFileEntry>(fresh);
-			baseUrl = handle.url;
+			handle = repo.create<UnixFileEntry>(
+				makeFileEntry(posixPath, bytes, isArtifactPath(posixPath)),
+			);
 			created++;
-			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
+			dlog("pushFiles created %s url=%s bytes=%d", posixPath, handle.url, bytes.length);
 		}
 
-		const finalUrl = isArtifact
-			? pinUrl(await repo.find<UnixFileEntry>(baseUrl))
-			: baseUrl;
-		setFileAt(root, segments, finalUrl);
+		// Every link is pinned at the doc's current heads: the folder doc
+		// names this file's exact published version, and that pin doubles as
+		// the next sync's merge base. An unchanged path whose doc moved
+		// underneath us (a peer's edit already in local storage) re-pins at
+		// the tip, publishing what we can see.
+		setFileAt(root, segments, pinUrl(handle));
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
 	return root;
 }
 
 /**
- * Re-pin every artifact leaf in the folder doc to its file doc's current
- * heads. Bare (non-artifact) URLs are left as-is since they already track
- * current heads implicitly. Returns true if any leaf URL was rewritten.
+ * Record a disk edit on a file doc. `prev` is the folder link the disk copy
+ * was materialized from: its pinned heads are the merge base, its bytes the
+ * base content. Three cases:
+ *
+ * - The live tip already holds the disk bytes (our own earlier change, or a
+ *   peer wrote the same content): nothing to record. Recording it anyway at
+ *   the base would land the same edit twice — Automerge does not dedupe
+ *   identical concurrent splices, so the text would duplicate.
+ * - The tip still matches the base: a plain local edit, recorded at the tip.
+ * - Both moved: record the edit *at the base heads* so it lands as a change
+ *   concurrent with the tip's, and Automerge merges the two instead of the
+ *   disk diff undoing the tip's edits.
+ *
+ * A link without heads (last written before universal pinning) has no base;
+ * fall back to editing the tip. The first sync of this version pins every
+ * link, so that happens once per repo.
  */
-async function refreshFolderPins(
-	repo: Repo,
-	folderHandle: DocHandle<unknown>,
-	shape: Shape,
-	isArtifactPath: IsArtifact,
-): Promise<boolean> {
-	const tree = await shape.decode({ repo, root: folderHandle });
-	const refreshed = newDir();
-	let changed = false;
-	for (const [posixPath, currentUrl] of flattenLeaves(tree)) {
-		const segments = posixPath.split("/").filter(Boolean);
-		let finalUrl: AutomergeUrl = currentUrl;
-		if (isArtifactPath(posixPath)) {
-			const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
-			const repinned = pinUrl(handle);
-			if (repinned !== currentUrl) {
-				finalUrl = repinned;
-				changed = true;
-			}
-		}
-		setFileAt(refreshed, segments, finalUrl);
+function applyDiskEdit(
+	handle: DocHandle<UnixFileEntry>,
+	prev: { url: AutomergeUrl; bytes: Uint8Array },
+	fresh: UnixFileEntry,
+	bytes: Uint8Array,
+): void {
+	const tipBytes = contentToBytes(handle.doc().content);
+	if (byteEq(tipBytes, bytes)) return;
+	const base = urlHeads(prev.url);
+	if (base === undefined || byteEq(tipBytes, prev.bytes)) {
+		applyFileEntry(handle, fresh);
+		return;
 	}
-	if (changed) {
-		dlog("refreshFolderPins: re-pinned artifacts to current heads");
-		await shape.encode({
-			repo,
-			tree: refreshed,
-			previousRoot: folderHandle,
-			isArtifactDir: isArtifactPath,
-		});
-	}
-	return changed;
+	dlog("pushFiles merging %s at base %s", prev.url, base.join("|"));
+	handle.changeAt(base, (d: UnixFileEntry) => mutateFileEntry(d, fresh));
 }
 
 async function readFileBytes(

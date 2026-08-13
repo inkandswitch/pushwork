@@ -99,7 +99,7 @@ These apply to every command:
 | Flag | Applies to | Description |
 | --- | --- | --- |
 | `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
-| `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
+| `--artifact-dir <dir>` | both | Directory whose text content is stored atomically (never character-merged). Repeatable. Defaults to `dist`. |
 | `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
 | `--legacy` | both | Alias for `--no-sub`. |
 
@@ -137,11 +137,11 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | `.pushwork/storage/` | Automerge CRDT storage (`NodeFSStorageAdapter`). |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is currently at version `4`:
+`config.json` is currently at version `5`:
 
 ```json
 {
-	"version": 4,
+	"version": 5,
 	"rootUrl": "automerge:2sX...e9",
 	"backend": "subduction",
 	"shape": "vfs",
@@ -164,13 +164,17 @@ tmp/
 .env
 ```
 
-### Artifact directories
+### Pinned links
 
-Files marked as _artifacts_ are treated as build output: their content is stored as an immutable string and their doc URL is _pinned_ to a specific set of heads, so consumers reference an exact snapshot rather than a moving target. By default the `dist` directory is an artifact directory; configure the default list with `--artifact-dir <dir>` (repeatable) at `init`/`clone` time, which is recorded in `.pushwork/config.json` (local to your checkout).
+Every file and folder link inside the tracked tree is a heads-_pinned_ `automerge:` URL (`automerge:<docId>#<heads>`): it names the exact version that was last synced, so consumers reference a snapshot rather than a moving target, and syncing is also publishing — each sync re-pins every link at the heads it can see. Only the root folder URL (the repo's shared identity) stays bare. The pinned content is also the base for sync's three-way reconcile; see [`design/artifacts.md`](./design/artifacts.md) and [`design/sync.md`](./design/sync.md).
+
+### Artifact files
+
+Files marked as _artifacts_ are treated as build output: their text content is stored as an atomic immutable string that is replaced whole rather than character-merged. By default the `dist` directory is an artifact directory; configure the default list with `--artifact-dir <dir>` (repeatable) at `init`/`clone` time, which is recorded in `.pushwork/config.json` (local to your checkout).
 
 #### `.pushworkattributes` (travels with the repo)
 
-`--artifact-dir` only configures _your_ checkout. To make artifact rules travel with the repo so every collaborator agrees, add a `.pushworkattributes` file at the repo root. It's an ordinary tracked file (synced like any other content) modeled on `.gitattributes`, and a sibling to `.pushworkignore`:
+`--artifact-dir` only configures _your_ checkout. To make artifact rules travel with the repo so every collaborator agrees, add `.pushworkattributes` files. They're ordinary tracked files (synced like any other content) modeled on `.gitattributes`, and siblings to `.pushworkignore`:
 
 ```gitattributes
 # .pushworkattributes
@@ -180,7 +184,7 @@ build/**    artifact
 vendored/   -artifact     # negate a default; last matching rule wins
 ```
 
-Each line is `<glob> <attr>...` (blank lines and `#` comments ignored). Patterns are gitignore-style globs; the only attribute today is `artifact` (`-artifact` unsets it). When a `.pushworkattributes` file is present, its `artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`, and pushwork warns when the two disagree so a stale local config can't silently diverge from the repo.
+Each line is `<glob> <attr>...` (blank lines and `#` comments ignored). Patterns are gitignore-style globs; the only attribute today is `artifact` (`-artifact` unsets it). An attributes file may sit in **any directory**: its patterns are relative to its own location and apply only to its subtree, with deeper files overriding shallower ones for the paths they match. When any attributes file is present, its `artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`, and pushwork warns when the two disagree so a stale local config can't silently diverge from the repo.
 
 ## Document shapes
 
@@ -225,9 +229,9 @@ A pushwork repo is a tree of Automerge documents. One _root folder doc_ (whose U
 ```mermaid
 graph TD
     A["root folder doc<br/>(automerge: URL — this is what you share)"]
-    A --> B["src/index.ts → file doc"]
-    A --> C["README.md → file doc"]
-    A --> D["dist/bundle.js → file doc (pinned artifact)"]
+    A --> B["src/index.ts → file doc (pinned link)"]
+    A --> C["README.md → file doc (pinned link)"]
+    A --> D["dist/bundle.js → file doc (pinned link)"]
     A --> E["..."]
 ```
 

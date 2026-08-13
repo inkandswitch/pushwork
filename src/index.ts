@@ -13,7 +13,12 @@ export {
 	nuclearizeRepo,
 } from "./pushwork.js";
 export type { HeadsEntry, Reporter, RepoSummary, Warn } from "./pushwork.js";
-export { Attributes, readAttributes, ATTRIBUTES_FILE } from "./attributes.js";
+export {
+	Attributes,
+	AttributesTree,
+	attributesTreeOf,
+	ATTRIBUTES_FILE,
+} from "./attributes.js";
 export type { Snarf, SnarfEntry } from "./snarf.js";
 export type { Backend, PushworkConfig } from "./config.js";
 export { CONFIG_VERSION } from "./config.js";

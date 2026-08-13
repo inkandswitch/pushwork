@@ -9,6 +9,7 @@ import {
 	type AutomergeUrl,
 	type DocHandle,
 	type Repo,
+	type UrlHeads,
 } from "@automerge/automerge-repo";
 import type { UnixFileEntry } from "./types.js";
 
@@ -77,19 +78,24 @@ export function applyFileEntry(
 	handle: DocHandle<UnixFileEntry>,
 	fresh: UnixFileEntry,
 ): void {
-	handle.change((d: UnixFileEntry) => {
-		if (!contentEquals(d.content, fresh.content)) {
-			if (typeof d.content === "string" && typeof fresh.content === "string") {
-				Automerge.updateText(d, ["content"], fresh.content);
-			} else {
-				d.content = fresh.content;
-			}
+	handle.change((d: UnixFileEntry) => mutateFileEntry(d, fresh));
+}
+
+/** The in-place mutation {@link applyFileEntry} records. Exposed separately
+ * so a caller can record it at older heads (`handle.changeAt`) — the diff
+ * then lands as a change concurrent with the tip's instead of on top of it. */
+export function mutateFileEntry(d: UnixFileEntry, fresh: UnixFileEntry): void {
+	if (!contentEquals(d.content, fresh.content)) {
+		if (typeof d.content === "string" && typeof fresh.content === "string") {
+			Automerge.updateText(d, ["content"], fresh.content);
+		} else {
+			d.content = fresh.content;
 		}
-		if (d.extension !== fresh.extension) d.extension = fresh.extension;
-		if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
-		if (d.name !== fresh.name) d.name = fresh.name;
-		if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
-	});
+	}
+	if (d.extension !== fresh.extension) d.extension = fresh.extension;
+	if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
+	if (d.name !== fresh.name) d.name = fresh.name;
+	if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
 }
 
 export function readFileEntry(handle: DocHandle<unknown>): {
@@ -116,6 +122,11 @@ export async function findFileEntry(
 export function stripHeads(url: AutomergeUrl): AutomergeUrl {
 	const { documentId } = parseAutomergeUrl(url);
 	return stringifyAutomergeUrl({ documentId });
+}
+
+/** The heads a pinned automerge URL carries, or undefined for a bare one. */
+export function urlHeads(url: AutomergeUrl): UrlHeads | undefined {
+	return parseAutomergeUrl(url).heads;
 }
 
 export function pinUrl(handle: DocHandle<unknown>): AutomergeUrl {
