@@ -36,9 +36,9 @@ export const vfsShape: Shape = {
 
 		const handle =
 			(previousRoot as DocHandle<DirectoryDoc> | undefined) ??
-			repo.create<DirectoryDoc>({
+			(await repo.create2<DirectoryDoc>({
 				"@patchwork": { type: "directory", ...(title ? { title } : {}) },
-			});
+			}));
 
 		handle.change((d: DirectoryDoc) => {
 			if (!d["@patchwork"]) d["@patchwork"] = { type: "directory" };

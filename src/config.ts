@@ -5,12 +5,16 @@ import { stripHeads } from "./shapes/file.js";
 
 export type Backend = "legacy" | "subduction";
 
+export const BACKENDS: readonly Backend[] = ["legacy", "subduction"];
+
 export const CONFIG_VERSION = 5;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;
 	rootUrl: AutomergeUrl;
 	backend: Backend;
+	/** Documents are keyhive-protected: encrypted, with a member list. */
+	keyhive: boolean;
 	shape: string;
 	artifactDirectories: string[];
 }
@@ -32,6 +36,11 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 	}
 	if (!parsed.rootUrl) throw new Error("pushwork config missing rootUrl");
 	if (!parsed.backend) throw new Error("pushwork config missing backend");
+	if (!BACKENDS.includes(parsed.backend)) {
+		throw new Error(
+			`pushwork config has unknown backend "${parsed.backend}" — upgrade pushwork`,
+		);
+	}
 	if (!parsed.shape) throw new Error("pushwork config missing shape");
 	return {
 		version: CONFIG_VERSION,
@@ -42,6 +51,7 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		// them here — the documentId (the repo's identity) is preserved.
 		rootUrl: stripHeads(parsed.rootUrl),
 		backend: parsed.backend,
+		keyhive: parsed.keyhive === true,
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],
 	};
@@ -52,9 +62,10 @@ export async function writeConfig(
 	config: PushworkConfig,
 ): Promise<void> {
 	await fs.mkdir(path.join(root, DIR), { recursive: true });
+	const { keyhive, ...rest } = config;
 	await fs.writeFile(
 		path.join(root, DIR, CONFIG),
-		JSON.stringify(config, null, 2) + "\n",
+		JSON.stringify(keyhive ? config : rest, null, 2) + "\n",
 	);
 }
 

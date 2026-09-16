@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
 import { Command } from "@commander-js/extra-typings";
+import * as fs from "fs/promises";
 import * as path from "path";
 import type { AutomergeUrl } from "@automerge/automerge-repo";
 import {
@@ -9,6 +10,10 @@ import {
 	diff,
 	heads,
 	init,
+	keyhiveGrant,
+	keyhiveList,
+	keyhiveStatus,
+	keyhiveUse,
 	pasteSnarf,
 	save,
 	showSnarfs,
@@ -17,15 +22,22 @@ import {
 	url,
 	yeet,
 	yoink,
+	type RepoSummary,
 } from "./pushwork.js";
+import {
+	ACCESS_LEVELS,
+	INSTRUCTIONS as KEYHIVE_INSTRUCTIONS,
+	hasIdentity,
+	type Member,
+} from "./keyhive.js";
+import type { Backend } from "./config.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
 import {
+	endpointOf,
 	isClosedStorageError,
 	isTransportError,
-	legacyUrl,
 	setAmrepoErrorSink,
-	subductionUrl,
 	type SyncSnapshot,
 } from "./repo.js";
 import { formatVersions } from "./version.js";
@@ -93,8 +105,64 @@ const backendOf = (opts: { sub?: boolean; legacy?: boolean }) =>
 const backendOverrideOf = (opts: { sub?: boolean; legacy?: boolean }) =>
 	opts.legacy || opts.sub === false ? ("legacy" as const) : undefined;
 
-const endpointOf = (backend: "legacy" | "subduction") =>
-	backend === "legacy" ? legacyUrl() : subductionUrl();
+// `init` protects the new repo with keyhive whenever an identity is in use,
+// unless the legacy backend is picked or --no-keyhive opts out.
+async function initKeyhiveOf(
+	backend: Backend,
+	opts: { keyhive?: boolean },
+): Promise<boolean> {
+	if (backend === "legacy" || opts.keyhive === false) return false;
+	return hasIdentity();
+}
+
+const shortId = (hex: string) => hex.slice(0, 8);
+
+function summaryRows(
+	root: string,
+	info: RepoSummary,
+	filesLabel: string,
+): Record<string, unknown> {
+	return {
+		Path: root,
+		Files: `${info.files} ${filesLabel}`,
+		Backend: info.backend,
+		Sync: endpointOf(info.backend, info.keyhive),
+		Keyhive: info.identity && `identity ${info.identity}`,
+		Access: info.access,
+	};
+}
+
+function reportMembers(members: Member[]): void {
+	if (out.isPorcelain) {
+		for (const m of members) {
+			const tag = m.self ? "self" : m.public ? "public" : m.server ? "server" : "";
+			out.log(`${m.access}\t${m.id}\t${tag}`);
+		}
+		return;
+	}
+	if (members.length === 0) {
+		out.log("(no members)");
+		return;
+	}
+	out.arr(
+		members.map((m) => {
+			const who = m.public
+				? "everyone (public)"
+				: m.server
+					? `sync server ${shortId(m.id)}`
+					: m.self
+						? `you ${shortId(m.id)}`
+						: m.id;
+			return `${m.access.padEnd(5)} ${who}`;
+		}),
+	);
+}
+
+async function readStdin(): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+	return Buffer.concat(chunks).toString("utf8");
+}
 
 const report = (phase: string) => out.step(phase);
 
@@ -221,6 +289,8 @@ program
 	.argument("[dir]", "Directory to initialize", ".")
 	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
 	.option("--legacy", "Alias for --no-sub")
+	.option("--no-keyhive", "Create a plain repo even though a keyhive identity is in use")
+	.option("--no-world-read", "Keyhive: don't grant everyone read access to the new repo")
 	.option(
 		"--shape <shape>",
 		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
@@ -235,21 +305,31 @@ program
 	.action(async (dir, opts) => {
 		dlog("init dir=%s opts=%o", dir, opts);
 		const backend = backendOf(opts);
+		const keyhive = await initKeyhiveOf(backend, opts);
 		const root = path.resolve(dir);
 		out.intro("pushwork init");
+		if (keyhive) {
+			out.info(
+				`keyhive identity in use: this repo will be end-to-end encrypted${
+					opts.worldRead ? " and readable by everyone" : " and private until you grant access"
+				}`,
+			);
+		}
 		out.task("Connecting to sync server");
 		const info = await init(
-			{ dir: root, backend, shape: opts.shape, artifactDirectories: opts.artifactDir },
+			{
+				dir: root,
+				backend,
+				keyhive,
+				shape: opts.shape,
+				artifactDirectories: opts.artifactDir,
+				worldRead: opts.worldRead,
+			},
 			report,
 			warn,
 		);
 		out.done(); // complete the final phase line before the summary
-		out.obj({
-			Path: root,
-			Files: `${info.files} tracked`,
-			Backend: backend,
-			Sync: endpointOf(backend),
-		});
+		out.obj(summaryRows(root, info, "tracked"));
 		out.block("INITIALIZED", info.url);
 		reportSync(info.sync);
 		out.outro("Done");
@@ -291,16 +371,104 @@ program
 				onStrategyDoc: pickStrategyInteractively,
 			},
 			report,
+			warn,
 		);
 		out.done(); // complete the final phase line before the summary
-		out.obj({
-			Path: root,
-			Files: `${info.files} downloaded`,
-			Backend: backend,
-			Sync: endpointOf(backend),
-		});
+		out.obj(summaryRows(root, info, "downloaded"));
 		out.block("CLONED", info.url);
 		reportSync(info.sync);
+		out.outro("Done");
+		flushWarnings();
+	});
+
+const keyhive = program
+	.command("keyhive")
+	.description("Use a Patchwork keyhive identity: encrypted repos with access control")
+	.addHelpText("after", `\n${KEYHIVE_INSTRUCTIONS}`)
+	.action(() => {
+		out.log(KEYHIVE_INSTRUCTIONS);
+	});
+
+keyhive
+	.command("use")
+	.description("Adopt an identity exported from a Patchwork site (prompts if omitted)")
+	.argument("[identity]", "The exported JSON, or a path to a file holding it")
+	.action(async (identity) => {
+		let text = identity;
+		if (text && !text.trim().startsWith("{")) {
+			text = await fs.readFile(path.resolve(text), "utf8");
+		}
+		if (!text) {
+			text = process.stdin.isTTY
+				? await out.text("Paste the identity copied from your browser console")
+				: await readStdin();
+		}
+		out.task("Importing identity");
+		const id = await keyhiveUse(text);
+		out.done("identity imported");
+		out.obj({ Identity: id.id, "Peer id": id.peerId, Stored: id.path });
+		out.block("KEYHIVE", `identity ${shortId(id.id)} in use`);
+	});
+
+keyhive
+	.command("status")
+	.description("Show the identity in use and, inside a repo, your access to it")
+	.action(async () => {
+		const s = await keyhiveStatus(process.cwd());
+		if (out.isPorcelain) {
+			out.log(`identity\t${s.identity.id}`);
+			out.log(`peer\t${s.identity.peerId}`);
+			out.log(`contact-card\t${s.identity.contactCard}`);
+			if (s.repo) {
+				out.log(`repo\t${s.repo.url}`);
+				out.log(`access\t${s.repo.access ?? "none"}`);
+				out.log(`members\t${s.repo.members.length}`);
+			}
+			return;
+		}
+		out.obj({
+			Identity: s.identity.id,
+			"Peer id": s.identity.peerId,
+			Stored: s.identity.path,
+		});
+		out.log(
+			`\nContact card (give this to someone who should grant you access):\n${s.identity.contactCard}\n`,
+		);
+		if (s.repo) {
+			out.obj({
+				Repo: s.repo.url,
+				Access: s.repo.access ?? "none",
+				Members: s.repo.members.length,
+			});
+		} else {
+			out.info("not inside a keyhive-protected repo");
+		}
+	});
+
+keyhive
+	.command("list")
+	.description("List who has access to this repo")
+	.action(async () => {
+		reportMembers(await keyhiveList(process.cwd()));
+	});
+
+keyhive
+	.command("grant")
+	.description('Grant access to this repo: to a contact card, or to everyone with "public" (or "world")')
+	.argument("<access>", `One of ${ACCESS_LEVELS.join(", ")}`)
+	.argument("[grantee]", 'A contact card (JSON), or "public" / "world" for everyone; prompts if omitted')
+	.action(async (access, grantee) => {
+		const who =
+			grantee ?? (await out.text('Contact card to grant to (or "public" for everyone)'));
+		out.intro("pushwork keyhive grant");
+		out.task("Connecting to sync server");
+		const result = await keyhiveGrant(process.cwd(), access, who, report);
+		out.done();
+		out.block(
+			"GRANTED",
+			`${result.access} to ${result.grantee === "public" ? "everyone" : result.grantee} on ${plural(result.docs, "document")}`,
+		);
+		reportSync(result.sync);
 		out.outro("Done");
 	});
 

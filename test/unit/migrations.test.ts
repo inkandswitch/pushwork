@@ -141,6 +141,7 @@ describe("migrate '-' (original pushwork) → current", () => {
 			version: CONFIG_VERSION,
 			rootUrl: SOME_URL,
 			backend: "legacy",
+			keyhive: false,
 			shape: "patchwork-folder",
 			artifactDirectories: [],
 		});
@@ -188,6 +189,7 @@ describe("migrate from intermediate versions", () => {
 			version: CONFIG_VERSION,
 			rootUrl: SOME_URL,
 			backend: "subduction",
+			keyhive: false,
 			shape: "vfs",
 			artifactDirectories: [],
 		});

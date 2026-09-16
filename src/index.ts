@@ -11,8 +11,27 @@ export {
 	pasteSnarf,
 	showSnarfs,
 	nuclearizeRepo,
+	keyhiveUse,
+	keyhiveStatus,
+	keyhiveList,
+	keyhiveGrant,
 } from "./pushwork.js";
-export type { HeadsEntry, Reporter, RepoSummary, Warn } from "./pushwork.js";
+export type {
+	GrantResult,
+	HeadsEntry,
+	KeyhiveStatus,
+	Reporter,
+	RepoSummary,
+	Warn,
+} from "./pushwork.js";
+export {
+	INSTRUCTIONS as KEYHIVE_INSTRUCTIONS,
+	hasIdentity,
+	identityPath,
+	keyhiveUrl,
+	parseIdentity,
+} from "./keyhive.js";
+export type { AccessLevel, Identity, IdentityBlob, Member } from "./keyhive.js";
 export { Attributes, readAttributes, ATTRIBUTES_FILE } from "./attributes.js";
 export type { Snarf, SnarfEntry } from "./snarf.js";
 export type { Backend, PushworkConfig } from "./config.js";
