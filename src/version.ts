@@ -53,6 +53,7 @@ export const versions = {
 	"automerge-repo-storage-nodefs": readVersion(
 		"@automerge/automerge-repo-storage-nodefs",
 	),
+	"automerge-repo-keyhive": readVersion("@automerge/automerge-repo-keyhive"),
 	node: process.version.replace(/^v/, ""),
 } as const;
 

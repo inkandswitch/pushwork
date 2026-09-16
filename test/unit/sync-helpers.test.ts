@@ -163,7 +163,7 @@ describe("safeShutdown", () => {
 	it("returns promptly even when repo.shutdown() hangs forever", async () => {
 		const { repo } = fakeRepo({ shutdown: () => new Promise<void>(() => {}) });
 		const start = Date.now();
-		await safeShutdown(repo, { maxMs: 100 });
+		await safeShutdown({ repo }, { maxMs: 100 });
 		const elapsed = Date.now() - start;
 		expect(elapsed).toBeGreaterThanOrEqual(80);
 		expect(elapsed).toBeLessThan(2000); // nowhere near the ~1-minute hang
@@ -175,7 +175,7 @@ describe("safeShutdown", () => {
 				throw new Error("WebSocket was closed before the connection was established");
 			},
 		});
-		await expect(safeShutdown(repo, { maxMs: 1000 })).resolves.toBeUndefined();
+		await expect(safeShutdown({ repo }, { maxMs: 1000 })).resolves.toBeUndefined();
 	});
 
 	it("resolves immediately on a clean shutdown", async () => {
@@ -186,7 +186,7 @@ describe("safeShutdown", () => {
 			},
 		});
 		const start = Date.now();
-		await safeShutdown(repo, { maxMs: 5000 });
+		await safeShutdown({ repo }, { maxMs: 5000 });
 		expect(called).toBe(true);
 		expect(Date.now() - start).toBeLessThan(1000);
 	});

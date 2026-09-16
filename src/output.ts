@@ -281,6 +281,22 @@ export class Output {
 		return answer;
 	}
 
+	/** Free-text line. Throws in non-interactive mode. Ctrl-C → 130. */
+	async text(question: string): Promise<string> {
+		if (!this.isInteractive) {
+			throw new Error(
+				`cannot prompt for "${question}" without an interactive terminal`,
+			);
+		}
+		this.halt();
+		const answer = await clack.text({ message: question });
+		if (clack.isCancel(answer)) {
+			clack.cancel("Cancelled.");
+			process.exit(130);
+		}
+		return answer;
+	}
+
 	/**
 	 * Single-choice menu. Throws in non-interactive mode (the caller has no
 	 * sensible default for a required choice). Ctrl-C → 130.

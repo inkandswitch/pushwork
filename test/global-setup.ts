@@ -8,12 +8,17 @@
  * through Node directly needs neither.
  */
 import { execFileSync } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
 import { createRequire } from "module";
 import * as path from "path";
 
 const requireHere = createRequire(__filename);
 
 export default function setup(): void {
+	// Keep the suite hermetic: a keyhive identity in the developer's real
+	// ~/.pushwork would otherwise make every `init` keyhive-protected.
+	process.env.PUSHWORK_HOME ??= fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-test-home-"));
 	const root = path.join(__dirname, "..");
 	const tsc = requireHere.resolve("typescript/lib/tsc.js");
 	execFileSync(process.execPath, [tsc, "-p", path.join(root, "tsconfig.json")], {

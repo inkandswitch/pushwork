@@ -1,0 +1,39 @@
+diff --git a/dist/subduction/helpers.js b/dist/subduction/helpers.js
+index 5ce1b41d7dde055baf2e363b0010ef897a3f7730..a1c09bf6391f43e64b5d6067f12f64447482ab0e 100644
+--- a/dist/subduction/helpers.js
++++ b/dist/subduction/helpers.js
+@@ -8,9 +8,12 @@ export function toSedimentreeId(id) {
+ }
+ // NOTE temporary: zero-pads 16-byte DocumentId to 32-byte SedimentreeId
+ export function toDocumentId(sedimentreeId) {
+-    // Get the raw bytes and take the first 16 (DocumentId is 16 bytes)
++    // A classic DocumentId is 16 bytes zero-padded to 32; a keyhive-derived
++    // id uses all 32. Keep the full id whenever the padding isn't zero, so
++    // remote heads for keyhive docs resolve to the handle that owns them.
+     const bytes = sedimentreeId.toBytes();
+-    const docIdBytes = bytes.slice(0, 16);
++    const padded = bytes.length >= 32 && bytes.subarray(16, 32).every((b) => b === 0);
++    const docIdBytes = padded ? bytes.slice(0, 16) : bytes;
+     // Encode as base58check to match automerge-repo's DocumentId format
+     return bs58check.encode(docIdBytes);
+ }
+diff --git a/src/subduction/helpers.ts b/src/subduction/helpers.ts
+index 307d60b3c20840d42d3d43f3022d1c20fd562d40..7bcc4623743b1892a5c830371ed8ac6bba2a5f6d 100644
+--- a/src/subduction/helpers.ts
++++ b/src/subduction/helpers.ts
+@@ -12,9 +12,13 @@ export function toSedimentreeId(id: AnyDocumentId): SedimentreeId {
+ 
+ // NOTE temporary: zero-pads 16-byte DocumentId to 32-byte SedimentreeId
+ export function toDocumentId(sedimentreeId: SedimentreeId): DocumentId {
+-  // Get the raw bytes and take the first 16 (DocumentId is 16 bytes)
++  // A classic DocumentId is 16 bytes zero-padded to 32; a keyhive-derived
++  // id uses all 32. Keep the full id whenever the padding isn't zero, so
++  // remote heads for keyhive docs resolve to the handle that owns them.
+   const bytes = sedimentreeId.toBytes()
+-  const docIdBytes = bytes.slice(0, 16)
++  const padded =
++    bytes.length >= 32 && bytes.subarray(16, 32).every(b => b === 0)
++  const docIdBytes = padded ? bytes.slice(0, 16) : bytes
+   // Encode as base58check to match automerge-repo's DocumentId format
+   return bs58check.encode(docIdBytes) as DocumentId
+ }

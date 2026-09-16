@@ -114,7 +114,7 @@ async function createFolder(
 			});
 		}
 	}
-	const handle = repo.create<FolderDoc>({
+	const handle = await repo.create2<FolderDoc>({
 		"@patchwork": { type: "folder" },
 		title,
 		docs: links,

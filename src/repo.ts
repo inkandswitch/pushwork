@@ -13,6 +13,7 @@ import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 import debug from "debug";
 import type { Backend } from "./config.js";
 import { log } from "./log.js";
+import { keyhiveUrl, openHive, type Hive } from "./keyhive.js";
 
 const dlog = log("repo");
 
@@ -62,6 +63,9 @@ export const legacyUrl = () =>
 export const subductionUrl = () =>
 	process.env.PUSHWORK_SUBDUCTION_SERVER || DEFAULT_SUBDUCTION;
 
+export const endpointOf = (backend: Backend, keyhive = false) =>
+	backend === "legacy" ? legacyUrl() : keyhive ? keyhiveUrl() : subductionUrl();
+
 // The Rust (Wasm) side logs through its own tracing writer straight to the
 // console — setLoggerFactory doesn't route it. SubductionSource's constructor
 // pins the filter to "warn", which lets benign close-path warnings (e.g.
@@ -85,23 +89,39 @@ function quietSubductionRustLogs(): void {
 	}
 }
 
+export type Opened = { repo: Repo; hive?: Hive };
+
 export async function openRepo(
 	backend: Backend,
 	storageDir: string,
-	opts: { offline?: boolean } = {},
-): Promise<Repo> {
-	dlog("openRepo backend=%s storage=%s offline=%s", backend, storageDir, !!opts.offline);
+	opts: { offline?: boolean; keyhive?: boolean } = {},
+): Promise<Opened> {
+	dlog(
+		"openRepo backend=%s keyhive=%s storage=%s offline=%s",
+		backend,
+		!!opts.keyhive,
+		storageDir,
+		!!opts.offline,
+	);
 	installAmrepoLogging();
 	await initSubduction();
+	if (opts.keyhive) {
+		if (backend === "legacy") {
+			throw new Error("keyhive repos need the subduction backend, not legacy");
+		}
+		const opened = await openHive(`${storageDir}.lmdb`, { offline: !!opts.offline });
+		quietSubductionRustLogs();
+		return opened;
+	}
 	// LMDB single-file database next to (not inside) the legacy nodefs chunk
 	// tree: `<storage>.lmdb`. One env, a handful of fds, transactional
 	// saveBatch. Repos created before the LMDB switch are carried over by the
 	// 4 → 5 config migration (`pushwork migrate`, which readConfig's version
 	// check directs users to).
 	const storage = new LMDBStorageAdapter(`${storageDir}.lmdb`);
-	const finish = (repo: Repo): Repo => {
+	const finish = (repo: Repo): Opened => {
 		quietSubductionRustLogs();
-		return repo;
+		return { repo };
 	};
 	if (opts.offline) {
 		return finish(new Repo({ storage, network: [] }));
@@ -150,9 +170,10 @@ const DEFAULT_SHUTDOWN_MS = 15000;
  * already done. Override with `PUSHWORK_SHUTDOWN_MS` (`0` = unbounded).
  */
 export async function safeShutdown(
-	repo: Repo,
+	{ repo, hive }: Opened,
 	{ maxMs }: { maxMs?: number } = {},
 ): Promise<void> {
+	hive?.close();
 	const envRaw = process.env.PUSHWORK_SHUTDOWN_MS;
 	const env = envRaw == null ? Number.NaN : Number(envRaw);
 	const deadline = maxMs ?? (Number.isFinite(env) ? env : DEFAULT_SHUTDOWN_MS);
@@ -310,7 +331,7 @@ export async function waitForConnection(
 	{ maxMs = 15000 }: { maxMs?: number } = {},
 ): Promise<Connection> {
 	const start = Date.now();
-	if (backend !== "subduction") return { connected: false, connectMs: 0 };
+	if (backend === "legacy") return { connected: false, connectMs: 0 };
 	if (repo.isSubductionConnected()) {
 		return { connected: true, connectMs: 0, serverPeerId: await connectedServerPeer(repo) };
 	}
@@ -451,7 +472,7 @@ export async function waitForServerSync<T>(
 
 	// Legacy backend never speaks Subduction: there are no server heads to
 	// compare against, so settle locally and report what little we can.
-	if (backend !== "subduction") {
+	if (backend === "legacy") {
 		await waitForSync(handle, { idleMs, maxMs });
 		return {
 			url: handle.url,

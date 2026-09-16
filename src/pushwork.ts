@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import {
 	isValidAutomergeUrl,
+	parseAutomergeUrl,
 	type AutomergeUrl,
 	type DocHandle,
 	type Repo,
@@ -30,6 +31,31 @@ import {
 	type Connection,
 	type SyncSnapshot,
 } from "./repo.js";
+import {
+	accessName,
+	describeIdentity,
+	grant,
+	hasIdentity,
+	isProtectedUrl,
+	keyhiveUrl,
+	listMembers,
+	myAccess,
+	nudge,
+	openHive,
+	parseAccess,
+	parseGrantee,
+	parseIdentity,
+	protectNewDocs,
+	resendDocs,
+	useIdentity,
+	waitForDocMembership,
+	waitForKeyhiveSync,
+	type AccessLevel,
+	type Hive,
+	type Identity,
+	type Member,
+} from "./keyhive.js";
+import { Access } from "@automerge/automerge-repo-keyhive";
 import {
 	appendSnarf,
 	decodeBytes,
@@ -110,14 +136,25 @@ export type RepoSummary = {
 	url: AutomergeUrl;
 	files: number;
 	sync?: SyncSnapshot;
+	backend: Backend;
+	/** Whether the repo's documents are keyhive-protected. */
+	keyhive: boolean;
+	/** Hex keyhive id of the identity used (keyhive repos only). */
+	identity?: string;
+	/** Our access to the root doc (keyhive repos only). */
+	access?: AccessLevel;
 };
 
 export type InitOpts = {
 	dir: string;
 	backend: Backend;
+	/** Protect every document with keyhive (needs an identity in use). */
+	keyhive?: boolean;
 	shape: string;
 	artifactDirectories?: readonly string[];
 	online?: boolean; // default: true
+	/** keyhive: grant everyone read access (default true). */
+	worldRead?: boolean;
 };
 
 export type CloneOpts = {
@@ -182,7 +219,11 @@ export async function init(
 	dlog("init artifactDirs=%o attributes=%s", artifactDirs, Boolean(attrs?.hasArtifactRules));
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
-	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
+	const opened = await openRepo(opts.backend, storageDir(root), {
+		offline: !online,
+		keyhive: opts.keyhive,
+	});
+	const { repo, hive } = opened;
 	// Start measuring the connection now so the local walk/encode overlaps it.
 	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
 	try {
@@ -194,7 +235,7 @@ export async function init(
 
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		const { tree } = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
@@ -203,6 +244,19 @@ export async function init(
 		});
 		dlog("init encoded folder=%s title=%s", folderUrl, title);
 		const folderHandle = await repo.find<unknown>(folderUrl);
+
+		if (hive) {
+			report("Registering documents with keyhive");
+			if (online) await connWait;
+			await hive.addSyncServerRelayToDoc(folderUrl);
+			if (opts.worldRead ?? true) await hive.setPublicAccess(folderUrl, Access.read());
+			await nudge(hive, [folderHandle]);
+			const touched = await protectNewDocs(hive, repo, folderUrl);
+			if (online) {
+				await waitForKeyhiveSync(hive);
+				await resendDocs(repo, [folderHandle, ...touched]);
+			}
+		}
 
 		let sync: SyncSnapshot | undefined;
 		if (online) {
@@ -220,26 +274,45 @@ export async function init(
 			version: CONFIG_VERSION,
 			rootUrl: folderUrl,
 			backend: opts.backend,
+			keyhive: !!hive,
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 		});
 		await attachConnectMs(sync, connWait);
 		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
-		return { url: folderUrl, files: fsFiles.size, sync };
+		return {
+			url: folderUrl,
+			files: fsFiles.size,
+			sync,
+			backend: opts.backend,
+			keyhive: !!hive,
+			identity: hive && describeIdentity(hive).id,
+			access: hive ? "admin" : undefined,
+		};
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
 export async function clone(
 	opts: CloneOpts,
 	report: Reporter = noReport,
+	warn: Warn = noWarn,
 ): Promise<RepoSummary> {
 	if (!isValidAutomergeUrl(opts.url)) {
 		throw new Error(`invalid automerge URL: ${opts.url}`);
 	}
 	const root = path.resolve(opts.dir);
-	dlog("clone url=%s root=%s backend=%s shape=%s", opts.url, root, opts.backend, opts.shape);
+	// A keyhive document id is 32 real bytes; a plain one is 16 zero-padded.
+	// The URL alone says whether the repo is protected, so no flag decides it.
+	const keyhive = isProtectedUrl(opts.url);
+	const backend = opts.backend;
+	if (keyhive && !(await hasIdentity())) {
+		throw new Error(
+			`${opts.url} is a keyhive-protected repo, but there is no keyhive identity in use here — run \`pushwork keyhive\` for setup instructions`,
+		);
+	}
+	dlog("clone url=%s root=%s backend=%s keyhive=%s shape=%s", opts.url, root, backend, keyhive, opts.shape);
 	await fs.mkdir(root, { recursive: true });
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
@@ -247,9 +320,15 @@ export async function clone(
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const online = opts.online ?? true;
-	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
-	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
+	const opened = await openRepo(backend, storageDir(root), { offline: !online, keyhive });
+	const { repo, hive } = opened;
+	const connWait = online ? waitForConnection(repo, backend) : undefined;
 	try {
+		let access: AccessLevel | undefined;
+		if (hive) {
+			report("Checking access");
+			access = await checkCloneAccess(hive, opts.url as AutomergeUrl, online, warn);
+		}
 		report("Fetching repository");
 		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
 		if (online) {
@@ -313,16 +392,61 @@ export async function clone(
 		await writeConfig(root, {
 			version: CONFIG_VERSION,
 			rootUrl: storedUrl,
-			backend: opts.backend,
+			backend,
+			keyhive,
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 		});
 		await attachConnectMs(sync, connWait);
 		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
-		return { url: storedUrl, files: fileCount, sync };
+		return {
+			url: storedUrl,
+			files: fileCount,
+			sync,
+			backend,
+			keyhive,
+			identity: hive && describeIdentity(hive).id,
+			access,
+		};
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
+}
+
+/**
+ * Learn the root doc's membership from the sync server and decide whether
+ * this identity can clone it at all. Throws below read access (the fetch
+ * would only hang); warns at read, where the clone works but `sync` can't
+ * publish anything.
+ */
+async function checkCloneAccess(
+	hive: Hive,
+	url: AutomergeUrl,
+	online: boolean,
+	warn: Warn,
+): Promise<AccessLevel | undefined> {
+	if (online) {
+		await waitForKeyhiveSync(hive);
+		await waitForDocMembership(hive, url, { maxMs: 5000 });
+	}
+	const access = await myAccess(hive, url);
+	if (!access || access === "pull") {
+		const me = describeIdentity(hive);
+		// The server only relays the membership of docs we're party to, so
+		// "unknown" and "not a member" look the same from here.
+		throw new Error(
+			`${access ? `your access to ${url} is PULL, which is not enough to read it` : `you have no access to ${url} (or it doesn't exist on the sync server)`}.\n` +
+				`Your keyhive id is ${me.id}. Ask the owner to run:\n` +
+				`  pushwork keyhive grant read '<your contact card>'\n` +
+				`Your contact card is printed by \`pushwork keyhive status\`.`,
+		);
+	}
+	if (access === "read") {
+		warn(
+			`your access to this repo is READ: clone and sync will pull changes, but the server will not accept edits from you. Ask the owner for edit access.`,
+		);
+	}
+	return access;
 }
 
 // Reads `doc["@patchwork"].type` if present (e.g. "directory", "folder").
@@ -433,25 +557,28 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
  */
 async function openDetachedRepo(
 	root: string,
+	docUrl: string,
 	backend?: Backend,
 ): Promise<{ repo: Repo; backend: Backend; cleanup: () => Promise<void> }> {
+	const keyhive = isProtectedUrl(docUrl);
 	if (await configExists(root)) {
 		const config = await readConfig(root);
 		const resolved = backend ?? config.backend;
-		const repo = await openRepo(resolved, storageDir(root), {
+		const opened = await openRepo(resolved, storageDir(root), {
 			offline: false,
+			keyhive,
 		});
-		return { repo, backend: resolved, cleanup: () => safeShutdown(repo) };
+		return { repo: opened.repo, backend: resolved, cleanup: () => safeShutdown(opened) };
 	}
 	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-"));
 	dlog("openDetachedRepo no config; ephemeral storage=%s", tmp);
 	const resolved = backend ?? "subduction";
-	const repo = await openRepo(resolved, tmp, { offline: false });
+	const opened = await openRepo(resolved, tmp, { offline: false, keyhive });
 	return {
-		repo,
+		repo: opened.repo,
 		backend: resolved,
 		cleanup: async () => {
-			await safeShutdown(repo);
+			await safeShutdown(opened);
 			await fs.rm(tmp, { recursive: true, force: true });
 		},
 	};
@@ -479,7 +606,7 @@ export async function yoink(
 	const root = path.resolve(cwd);
 	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
 
-	const { repo, cleanup } = await openDetachedRepo(root, backend);
+	const { repo, cleanup } = await openDetachedRepo(root, docUrl, backend);
 	try {
 		const handle = await repo.find<UnixFileEntry>(docUrl);
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
@@ -530,6 +657,7 @@ export async function yeet(
 
 	const { repo, backend: resolvedBackend, cleanup } = await openDetachedRepo(
 		root,
+		docUrl,
 		backend,
 	);
 	try {
@@ -578,7 +706,8 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 	const config = await readConfig(root);
 	dlog("publish root=%s", root);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: false, keyhive: config.keyhive });
+	const { repo, hive } = opened;
 	const connWait = waitForConnection(repo, config.backend);
 	try {
 		const shape = await resolveShape(config.shape);
@@ -588,6 +717,7 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 		for (const [, fileUrl] of flattenLeaves(tree)) {
 			await repo.find<UnixFileEntry>(fileUrl);
 		}
+		if (hive) await publishMembership(hive, repo, config.rootUrl, connWait);
 		stampLastSyncAt(folderHandle);
 		const sync = await waitForServerSync(repo, folderHandle, config.backend, {
 			idleMs: 1500,
@@ -597,7 +727,36 @@ async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined
 		dlog("publish complete synced=%s", sync.synced);
 		return sync;
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
+	}
+}
+
+/**
+ * Online keyhive step after the tree is encoded: give every newly created
+ * doc the root's membership, sync the keyhive both ways (our new membership
+ * out, any grants for us in), then re-send the docs the server would have
+ * refused before it saw their membership.
+ */
+async function publishMembership(
+	hive: Hive,
+	repo: Repo,
+	rootUrl: AutomergeUrl,
+	connWait: Promise<Connection>,
+	warn: Warn = noWarn,
+): Promise<void> {
+	await connWait;
+	const touched = await protectNewDocs(hive, repo, rootUrl);
+	if (!(await waitForKeyhiveSync(hive))) {
+		warn(
+			`keyhive sync with ${keyhiveUrl()} stalled before it caught up (no answer to keyhive sync, or a big backlog); access and membership may be stale. Run the command again.`,
+		);
+	}
+	if (touched.length === 0) return;
+	const unconfirmed = await resendDocs(repo, touched);
+	if (unconfirmed.length > 0) {
+		warn(
+			`${unconfirmed.length} new ${unconfirmed.length === 1 ? "document" : "documents"} not confirmed by the sync server; run \`pushwork sync\` again`,
+		);
 	}
 }
 
@@ -625,7 +784,8 @@ export async function nuclearizeRepo(
 		warn,
 	);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -639,7 +799,7 @@ export async function nuclearizeRepo(
 			const bare = stripHeads(fileUrl);
 			const oldFileHandle = await repo.find<UnixFileEntry>(bare);
 			const oldDoc = oldFileHandle.doc();
-			const newFileHandle = repo.create<UnixFileEntry>({
+			const newFileHandle = await repo.create2<UnixFileEntry>({
 				"@patchwork": { type: "file" },
 				name: oldDoc.name,
 				extension: oldDoc.extension,
@@ -662,7 +822,7 @@ export async function nuclearizeRepo(
 			isArtifactDir: isArtifactPath,
 		});
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -689,9 +849,11 @@ async function commitWorkdir(
 		warn,
 	);
 
-	const repo = await openRepo(config.backend, storageDir(root), {
+	const opened = await openRepo(config.backend, storageDir(root), {
 		offline: !online,
+		keyhive: config.keyhive,
 	});
+	const { repo, hive } = opened;
 	const connWait = online ? waitForConnection(repo, config.backend) : undefined;
 	try {
 		const shape = await resolveShape(config.shape);
@@ -705,7 +867,7 @@ async function commitWorkdir(
 		const fsFiles = await walkDir(root, ig);
 
 		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
+		const { tree: newTree, changed: changedDocs } = await pushFiles(
 			repo,
 			fsFiles,
 			previousFiles,
@@ -725,6 +887,17 @@ async function commitWorkdir(
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
+			let editor = true;
+			if (hive && connWait) {
+				await publishMembership(hive, repo, config.rootUrl, connWait, warn);
+				const access = await myAccess(hive, config.rootUrl);
+				editor = access === "edit" || access === "admin";
+				if (changed && !editor) {
+					warn(
+						`your access to this repo is ${(access ?? "none").toUpperCase()}: the sync server will not accept your edits, so they stay local. Ask the owner for edit access.`,
+					);
+				}
+			}
 			// Only artifact (pinned) leaves need a pre-refresh catch-up (to pin to
 			// the server's merged heads). No artifacts → the single confirm-wait
 			// below both pulls peer changes and pushes our stamp.
@@ -754,6 +927,17 @@ async function commitWorkdir(
 				idleMs: 1500,
 				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
 			});
+			// The keyhive server refuses a put it can't yet authorize (say, an edit
+			// pushed at connect before it saw the grant that allows it), and
+			// subduction doesn't retry those on its own.
+			if (hive && editor && changedDocs.length > 0) {
+				const unconfirmed = await resendDocs(repo, changedDocs, { attempts: 2 });
+				if (unconfirmed.length > 0) {
+					warn(
+						`${plural(unconfirmed.length, "changed file")} not confirmed by the sync server; run \`pushwork sync\` again`,
+					);
+				}
+			}
 		}
 
 		if (online) report("Writing changes");
@@ -763,7 +947,7 @@ async function commitWorkdir(
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -788,7 +972,8 @@ export async function heads(
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -818,7 +1003,7 @@ export async function heads(
 		out.sort((a, b) => a.path.localeCompare(b.path));
 		return out;
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -834,7 +1019,8 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -847,7 +1033,7 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 		const diff = computeDiff(previousFiles, fsFiles);
 		return { diff };
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -858,7 +1044,8 @@ export async function diff(
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -884,7 +1071,7 @@ export async function diff(
 		}
 		return out;
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -901,7 +1088,8 @@ export async function cutWorkdir(
 	const config = await readConfig(root);
 	dlog("cut root=%s name=%s", root, opts.name ?? "(unnamed)");
 
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -943,7 +1131,7 @@ export async function cutWorkdir(
 		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
 		return { id: snarf.id, entries: entries.length };
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 }
 
@@ -960,7 +1148,8 @@ export async function pasteSnarf(
 	const config = await readConfig(root);
 
 	// Check the working tree is clean against the saved state.
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const opened = await openRepo(config.backend, storageDir(root), { offline: true, keyhive: config.keyhive });
+	const { repo } = opened;
 	try {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
@@ -975,7 +1164,7 @@ export async function pasteSnarf(
 			);
 		}
 	} finally {
-		await safeShutdown(repo);
+		await safeShutdown(opened);
 	}
 
 	const snarf = await takeSnarf(root, selector);
@@ -1072,8 +1261,9 @@ async function pushFiles(
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
 	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
+): Promise<{ tree: VfsNode; changed: DocHandle<unknown>[] }> {
 	const root = newDir();
+	const changed: DocHandle<unknown>[] = [];
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
@@ -1097,12 +1287,14 @@ async function pushFiles(
 			const refreshUrl = stripHeads(prev.url);
 			const handle = await repo.find<UnixFileEntry>(refreshUrl);
 			applyFileEntry(handle, fresh);
+			changed.push(handle);
 			baseUrl = refreshUrl;
 			updated++;
 			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
 		} else {
 			// New path: create a fresh file doc.
-			const handle = repo.create<UnixFileEntry>(fresh);
+			const handle = await repo.create2<UnixFileEntry>(fresh);
+			changed.push(handle);
 			baseUrl = handle.url;
 			created++;
 			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
@@ -1114,7 +1306,7 @@ async function pushFiles(
 		setFileAt(root, segments, finalUrl);
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
-	return root;
+	return { tree: root, changed };
 }
 
 /**
@@ -1249,5 +1441,147 @@ function sameTree(a: VfsNode, b: VfsNode): boolean {
 	}
 	return true;
 }
+
+export async function keyhiveUse(text: string): Promise<Identity> {
+	return useIdentity(parseIdentity(text));
+}
+
+export type KeyhiveStatus = {
+	identity: Identity;
+	repo?: {
+		url: AutomergeUrl;
+		access?: AccessLevel;
+		members: Member[];
+	};
+};
+
+/**
+ * The identity in use and, inside a keyhive repo, our standing in it. Offline:
+ * everything here is answered from the local keyhive state.
+ */
+export async function keyhiveStatus(cwd: string): Promise<KeyhiveStatus> {
+	const root = path.resolve(cwd);
+	const config = (await configExists(root)) ? await readConfig(root) : undefined;
+	if (!config?.keyhive) {
+		const { repo, hive } = await openHive(undefined, { offline: true });
+		try {
+			return { identity: describeIdentity(hive) };
+		} finally {
+			await repo.shutdown();
+			hive.close();
+		}
+	}
+	const opened = await openRepo(config.backend, storageDir(root), {
+		offline: true,
+		keyhive: true,
+	});
+	const hive = opened.hive!;
+	try {
+		return {
+			identity: describeIdentity(hive),
+			repo: {
+				url: config.rootUrl,
+				access: await myAccess(hive, config.rootUrl),
+				members: await listMembers(hive, config.rootUrl),
+			},
+		};
+	} finally {
+		await safeShutdown(opened);
+	}
+}
+
+async function readKeyhiveConfig(root: string): Promise<PushworkConfig> {
+	const config = await readConfig(root);
+	if (!config.keyhive) {
+		throw new Error(
+			"this repo is not keyhive-protected; `pushwork init` with a keyhive identity in use creates one",
+		);
+	}
+	return config;
+}
+
+/** Members of this repo's root doc and their access. Offline. */
+export async function keyhiveList(cwd: string): Promise<Member[]> {
+	const root = path.resolve(cwd);
+	const config = await readKeyhiveConfig(root);
+	const opened = await openRepo(config.backend, storageDir(root), {
+		offline: true,
+		keyhive: true,
+	});
+	try {
+		return listMembers(opened.hive!, config.rootUrl);
+	} finally {
+		await safeShutdown(opened);
+	}
+}
+
+export type GrantResult = {
+	access: AccessLevel;
+	grantee: "public" | string;
+	docs: number;
+	sync: SyncSnapshot;
+};
+
+/**
+ * Grant `level` on every doc in this repo (root, folders, files) to `grantee`:
+ * "public" or a contact card. Online: the membership has to reach the sync
+ * server, and keyhive rotates each doc's key and writes a nudge edit so the
+ * new member can decrypt it, which also has to land before we exit.
+ */
+export async function keyhiveGrant(
+	cwd: string,
+	level: string,
+	granteeText: string,
+	report: Reporter = noReport,
+): Promise<GrantResult> {
+	const root = path.resolve(cwd);
+	const config = await readKeyhiveConfig(root);
+	const access = parseAccess(level);
+	const grantee = parseGrantee(granteeText);
+	dlog("grant root=%s level=%s grantee=%s", root, level, grantee.kind);
+
+	const opened = await openRepo(config.backend, storageDir(root), {
+		offline: false,
+		keyhive: true,
+	});
+	const { repo } = opened;
+	const hive = opened.hive!;
+	const connWait = waitForConnection(repo, config.backend);
+	try {
+		const shape = await resolveShape(config.shape);
+		const folderHandle = await repo.find<unknown>(config.rootUrl);
+		const tree = await shape.decode({ repo, root: folderHandle });
+		for (const [, fileUrl] of flattenLeaves(tree)) {
+			await repo.find<UnixFileEntry>(stripHeads(fileUrl));
+		}
+		const urls = Object.values(repo.handles)
+			.map((h) => h.url)
+			.filter(isProtectedUrl);
+		report(`Granting ${accessName(access)} on ${plural(urls.length, "document")}`);
+		await connWait;
+		for (const url of urls) await grant(hive, url, grantee, access);
+		await nudge(hive, urls.map((u) => repo.handles[parseAutomergeUrl(u).documentId]));
+
+		report("Publishing membership");
+		await waitForKeyhiveSync(hive);
+		const sync = await waitForServerSync(repo, folderHandle, config.backend, {
+			idleMs: 1500,
+			maxMs: 15000,
+		});
+		await attachConnectMs(sync, connWait);
+		return {
+			access: accessName(access),
+			grantee: grantee.kind === "public" ? "public" : uint8ArrayToHexId(grantee.card.id.toBytes()),
+			docs: urls.length,
+			sync,
+		};
+	} finally {
+		await safeShutdown(opened);
+	}
+}
+
+const uint8ArrayToHexId = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
+
+const plural = (n: number, one: string) => `${n} ${n === 1 ? one : one + "s"}`;
 
 export type { Shape, UnixFileEntry, VfsNode, PushworkConfig };

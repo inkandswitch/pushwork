@@ -81,6 +81,11 @@ pushwork diff
 | `pushwork cut [name]` | Stash working-tree changes and reset the tree to the saved state (offline). |
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
+| `pushwork keyhive` | Print instructions for adopting a Patchwork keyhive identity. |
+| `pushwork keyhive use [identity]` | Adopt an identity exported from a Patchwork site (prompts for a paste if omitted). |
+| `pushwork keyhive status` | Show the identity in use, its contact card, and your access to the current repo. |
+| `pushwork keyhive list` | List who has access to the current repo. |
+| `pushwork keyhive grant <access> [grantee]` | Grant `pull`, `read`, `edit` or `admin` to a contact card, or to everyone with `public`. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
 
 ### Global options
@@ -102,6 +107,8 @@ These apply to every command:
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
 | `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
 | `--legacy` | both | Alias for `--no-sub`. |
+| `--no-keyhive` | init | Create a plain repo even though a keyhive identity is in use. |
+| `--no-world-read` | init | Keyhive: don't grant everyone read access to the new repo. |
 
 On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.type` of `directory` → `vfs`, `folder` → `patchwork-folder`); `--shape` is only the fallback when the type isn't recognized.
 
@@ -120,12 +127,36 @@ pushwork supports two WebSocket sync backends. **Subduction is the default.**
 | `subduction` | `wss://subduction.sync.inkandswitch.com` | default |
 | `legacy` | `wss://sync3.automerge.org` | `--legacy` / `--no-sub` |
 
+A subduction repo can additionally be keyhive-protected (`keyhive: true` in its config, see below). Keyhive membership syncs over the same connection, so the relay has to speak the keyhive protocol.
+
 Override either endpoint with an environment variable:
 
 ```sh
 PUSHWORK_SUBDUCTION_SERVER=wss://my-relay.example.com pushwork sync
 PUSHWORK_LEGACY_SERVER=wss://my-relay.example.com pushwork sync --legacy
 ```
+
+### Keyhive: encrypted repos with access control
+
+With a [keyhive](https://github.com/inkandswitch/keyhive) identity in use, `init` creates repos whose every document is end-to-end encrypted; the sync server relays ciphertext it cannot read, and only members can decrypt. Membership is per repo: the root doc and every file doc carry the same member list, and new files inherit it on `sync`.
+
+```sh
+pushwork keyhive                 # how to export your identity from a Patchwork site
+pushwork keyhive use             # paste it
+pushwork init                    # encrypted, readable by everyone
+pushwork init --no-world-read    # encrypted, private until you grant access
+
+pushwork keyhive status          # your id and contact card
+pushwork keyhive list            # members of this repo
+pushwork keyhive grant edit '<contact card>'
+pushwork keyhive grant read public
+```
+
+Access levels, lowest to highest: `pull` (relay ciphertext), `read`, `edit`, `admin`. `clone` of a keyhive URL checks your access first: below read it stops and prints your id so the owner can grant you access; at read it warns that the server will not accept your edits.
+
+Whether a repo is protected is recorded as `keyhive: true` next to `backend` in `.pushwork/config.json`; `init` sets it whenever an identity is in use, and `clone` sets it from the URL (keyhive document ids are 32 bytes, plain ones 16).
+
+The identity lives in `~/.pushwork/keyhive.lmdb` (`PUSHWORK_HOME` moves it) and is shared by every repo on the machine. `pushwork keyhive use` replaces it, discarding the previous identity's local keyhive state. The exported blob is the private signing key plus the identity's prekey secrets: enough to act as that identity and to decrypt what it was granted. Key rotations the browser performs later are not shared with this machine, so a document the browser re-keys after the export may need to be re-granted.
 
 ## Configuration
 
@@ -137,17 +168,20 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | `.pushwork/storage/` | Automerge CRDT storage (`NodeFSStorageAdapter`). |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is currently at version `4`:
+`config.json` is currently at version `5`:
 
 ```json
 {
-	"version": 4,
+	"version": 5,
 	"rootUrl": "automerge:2sX...e9",
 	"backend": "subduction",
+	"keyhive": true,
 	"shape": "vfs",
 	"artifactDirectories": ["dist"]
 }
 ```
+
+`keyhive` is present only for keyhive-protected repos.
 
 If the config version doesn't match the installed pushwork, commands fail with a prompt to run `pushwork migrate`.
 
@@ -328,8 +362,10 @@ type CloneOpts = InitOpts & {
 | --- | --- | --- |
 | `PUSHWORK_SUBDUCTION_SERVER` | `wss://subduction.sync.inkandswitch.com` | Subduction sync endpoint. |
 | `PUSHWORK_LEGACY_SERVER` | `wss://sync3.automerge.org` | Legacy WebSocket sync endpoint. |
+| `PUSHWORK_KEYHIVE_SERVER` | `subduction` | Which known keyhive-speaking relay protected repos use: `subduction` (`wss://subduction.sync.inkandswitch.com`) or `keyhive` (`wss://keyhive.sync.automerge.org`). |
+| `PUSHWORK_HOME` | `~/.pushwork` | Where the keyhive identity is stored. |
 | `PUSHWORK_WS_INLINE` | _off_ | Set to `1` to open the sync WebSocket on the main thread instead of a worker thread. |
-| `DEBUG` | _off_ | Set `DEBUG=true` (rewritten to `DEBUG=*`) to enable `pushwork:*` debug logs. |
+| `DEBUG` | _off_ | Set `DEBUG=true` (rewritten to `DEBUG=*`) to enable `pushwork:*` debug logs. Any value containing `keyhive` also turns on automerge-repo-keyhive's own debug log. |
 
 ### Concurrency
 
