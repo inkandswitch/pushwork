@@ -23,7 +23,7 @@ describe("pushwork local-only commands", () => {
 
 	async function initRepo(serverUrl = server) {
 		await fs.writeFile(path.join(work, "a.txt"), "hello\n");
-		await pushwork(["init", "--server", serverUrl], work);
+		await pushwork(["init", "--sync-server", serverUrl], work);
 	}
 
 	describe("status", () => {
@@ -87,7 +87,7 @@ describe("pushwork local-only commands", () => {
 		await initRepo();
 		const configFile = path.join(work, ".pushwork", "config.json");
 		const config = JSON.parse(await readText(configFile));
-		await fs.writeFile(configFile, JSON.stringify({ ...config, server: silent.url }));
+		await fs.writeFile(configFile, JSON.stringify({ ...config, syncServer: silent.url }));
 		await fs.writeFile(path.join(work, "a.txt"), "edited\n");
 		for (const command of ["status", "diff", "heads", "cut", "paste", "save"]) {
 			await pushwork([command], work);
@@ -102,13 +102,13 @@ describe("pushwork local-only commands", () => {
 			await initRepo();
 			const config = JSON.parse(await readText(path.join(work, ".pushwork", "config.json")));
 			expect(config.version).toBe(CONFIG_VERSION);
-			expect(config.server).toBe(server);
+			expect(config.syncServer).toBe(server);
 		});
 
 		it("init --offline records no server", async () => {
 			await pushwork(["init", "--offline"], work);
 			const config = JSON.parse(await readText(path.join(work, ".pushwork", "config.json")));
-			expect(config.server).toBeUndefined();
+			expect(config.syncServer).toBeUndefined();
 		});
 	});
 });

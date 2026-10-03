@@ -88,10 +88,13 @@ export type InitOpts = {
 	shape: string;
 	artifactDirectories?: readonly string[];
 	online?: boolean; // default: true
-	server?: string;
+	syncServer?: string;
 	/** Protect the repo with keyhive. Without public access, only you can read it. */
 	keyhive?: { publicAccess?: AccessLevel; serverAccess?: AccessLevel };
-};
+} & KeyhiveServerOpts;
+
+/** A keyhive server (built-in name or url) and its contact card; unset means this machine's default. */
+export type KeyhiveServerOpts = { keyhiveServer?: string; keyhiveCard?: string };
 
 export const ACCESS_LEVELS: readonly AccessLevel[] = ["relay", "read", "edit", "admin"];
 
@@ -100,14 +103,14 @@ export type CloneOpts = {
 	dir: string;
 	shape: string;
 	artifactDirectories?: readonly string[];
-	server?: string;
+	syncServer?: string;
 	// Asked whether to download and run the root doc's `.pushworkStrategy` as a
 	// custom shape. Returning false (or omitting it) falls back to `shape`.
 	onStrategyDoc?: (info: {
 		url: AutomergeUrl;
 		viewCode: () => string;
 	}) => Promise<boolean> | boolean;
-};
+} & KeyhiveServerOpts;
 
 export type Diff = {
 	added: string[];
@@ -129,13 +132,16 @@ async function openDocs(
 	hive?: Hive,
 	group?: string,
 ): Promise<Docs> {
-	return Docs.open({
+	const docs = await Docs.open({
 		storage: await FsStorage.open(storageDir(root)),
 		signer: signerFrom(seed),
 		server,
 		codec: hive?.codec,
 		newId: group ? hive!.newId(group) : undefined,
 	});
+	// keyhive talks to its own server when documents sync elsewhere
+	if (hive && docs.online && hive.server !== server) await docs.connect(hive.server);
+	return docs;
 }
 
 const isKeyhive = (url: AutomergeUrl) => isProtected(parseAutomergeUrl(url).documentId);
@@ -155,18 +161,31 @@ async function readKeyhiveSettings(): Promise<KeyhiveSettings> {
 	}
 }
 
-async function openHive(seed: Uint8Array, server?: string, reader = false): Promise<Hive> {
+async function openHive(seed: Uint8Array, settings: KeyhiveSettings, reader = false): Promise<Hive> {
 	const { openHive } = await import("./keyhive.js");
-	const settings = await readKeyhiveSettings();
-	const hive = await openHive(path.join(pushworkHome(), "keyhive"), seed, settings, reader);
-	if (server && server !== hive.server) {
-		await hive.close();
-		throw new Error(
-			`keyhive repos sync through the keyhive server (${hive.server}); change it with \`pushwork keyhive server\``,
-		);
-	}
-	return hive;
+	return openHive(path.join(pushworkHome(), "keyhive"), seed, settings, reader);
 }
+
+// A new repo's keyhive server: the flags, else this machine's default.
+async function keyhiveSettingsFor(opts: KeyhiveServerOpts): Promise<KeyhiveSettings> {
+	if (opts.keyhiveServer) return parseKeyhiveServer(opts.keyhiveServer, opts.keyhiveCard);
+	if (opts.keyhiveCard) throw new Error("--keyhive-card needs --keyhive-server");
+	return readKeyhiveSettings();
+}
+
+// An existing repo's keyhive server, as recorded at init or clone.
+const recordedKeyhive = async (config: PushworkConfig): Promise<KeyhiveSettings> =>
+	config.keyhiveServer
+		? { server: config.keyhiveServer, card: config.keyhiveCard }
+		: readKeyhiveSettings();
+
+const keyhiveConfig = async (settings: KeyhiveSettings) => {
+	const { DEFAULT_SERVER_NAME } = await import("./keyhive.js");
+	return {
+		keyhiveServer: settings.server ?? DEFAULT_SERVER_NAME,
+		...(settings.card ? { keyhiveCard: settings.card } : {}),
+	};
+};
 
 export type KeyhiveInfo = {
 	server: string;
@@ -187,7 +206,7 @@ export async function keyhiveInfo(): Promise<KeyhiveInfo> {
 	const { url, card } = resolveSettings(settings);
 	const serverName = settings.server ?? DEFAULT_SERVER_NAME;
 	// each contact card carries a fresh share key, so the hive must be saved after making one
-	const hive = await openHive(await loadSeed());
+	const hive = await openHive(await loadSeed(), settings);
 	try {
 		return {
 			server: url,
@@ -210,24 +229,28 @@ export async function keyhiveInfo(): Promise<KeyhiveInfo> {
  * or a file.
  */
 export async function setKeyhiveServer(server: string, card?: string): Promise<void> {
+	await writeKeyhiveSettings(await parseKeyhiveServer(server, card));
+}
+
+async function parseKeyhiveServer(server: string, card?: string): Promise<KeyhiveSettings> {
 	const { SERVERS, cardPeerId } = await import("./keyhive.js");
 	const named = Object.entries(SERVERS).find(([name, { url }]) => server === name || server === url)?.[0];
 	if (!named && !/^wss?:\/\//.test(server)) {
 		throw new Error(`expected ${Object.keys(SERVERS).join(", ")} or a ws(s):// url, got ${server}`);
 	}
 	if (!card) {
-		if (!named) throw new Error(`a server url needs its contact card: pushwork keyhive server ${server} <card>`);
-		return writeKeyhiveSettings({ server: named });
+		if (!named) throw new Error(`the keyhive server ${server} needs its contact card`);
+		return { server: named };
 	}
 	const url = named ? SERVERS[named].url : server;
-	if (SERVERS[card]) return writeKeyhiveSettings({ server: url, card });
+	if (SERVERS[card]) return { server: url, card };
 	const json = await readCard(card);
 	try {
 		cardPeerId(json);
 	} catch {
 		throw new Error(`${card} is not a keyhive contact card`);
 	}
-	await writeKeyhiveSettings({ server: url, card: json });
+	return { server: url, card: json };
 }
 
 async function readCard(card: string): Promise<string> {
@@ -250,8 +273,8 @@ async function openRepo(cwd: string, { online = false, reader = false } = {}) {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	const seed = await loadSeed();
-	const hive = isKeyhive(config.rootUrl) ? await openHive(seed, config.server, reader) : undefined;
-	const server = online ? (hive?.server ?? config.server ?? DEFAULT_SERVER) : undefined;
+	const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), reader) : undefined;
+	const server = online ? (config.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
 	const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
 	const docs = await openDocs(root, seed, server, hive, group);
 	return { root, config, docs, hive, group };
@@ -322,7 +345,9 @@ export async function init(
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	if (opts.keyhive && opts.server) throw new Error("--keyhive can't be used with --server");
+	if (!opts.keyhive && (opts.keyhiveServer || opts.keyhiveCard)) {
+		throw new Error("--keyhive-server and --keyhive-card only apply with --keyhive");
+	}
 	// An existing `.pushworkattributes` is authoritative; keep config.json's list empty.
 	const attrs = await readAttributes(root);
 	if (attrs?.hasArtifactRules && opts.artifactDirectories?.length) {
@@ -339,12 +364,13 @@ export async function init(
 		: (p) => isInArtifactDir(p, artifactDirs);
 
 	const seed = await loadSeed();
-	const hive = opts.keyhive ? await openHive(seed) : undefined;
+	const keyhive = opts.keyhive ? await keyhiveSettingsFor(opts) : undefined;
+	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
 	const group = await hive?.createGroup({
 		public: opts.keyhive?.publicAccess,
 		server: opts.keyhive?.serverAccess ?? "relay",
 	});
-	const server = online ? (hive?.server ?? opts.server ?? DEFAULT_SERVER) : undefined;
+	const server = online ? (opts.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
 	const docs = await openDocs(root, seed, server, hive, group);
 	try {
 		const shape = await resolveShape(opts.shape);
@@ -366,7 +392,8 @@ export async function init(
 			rootUrl: url,
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
-			...(opts.server ? { server: opts.server } : {}),
+			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
+			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
 		return { url, files: fsFiles.size, sync: await summarize(docs, url) };
 	} finally {
@@ -392,8 +419,12 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const seed = await loadSeed();
-	const hive = isKeyhive(url) ? await openHive(seed, opts.server) : undefined;
-	const server = hive?.server ?? opts.server ?? DEFAULT_SERVER;
+	if (!isKeyhive(url) && (opts.keyhiveServer || opts.keyhiveCard)) {
+		throw new Error("--keyhive-server and --keyhive-card only apply to keyhive repos");
+	}
+	const keyhive = isKeyhive(url) ? await keyhiveSettingsFor(opts) : undefined;
+	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
+	const server = opts.syncServer ?? hive?.server ?? DEFAULT_SERVER;
 	const docs = await openDocs(root, seed, server, hive);
 	try {
 		if (!docs.online) {
@@ -431,7 +462,8 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 			rootUrl: url,
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
-			...(opts.server ? { server: opts.server } : {}),
+			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
+			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
 		return { url, files, sync: await summarize(docs, url) };
 	} finally {
@@ -452,7 +484,7 @@ export const MIGRATION_BACKUP = "pushwork_migration_backup_safe_to_delete";
  */
 export async function migrate(
 	cwd: string,
-	opts: { server?: string } = {},
+	opts: { syncServer?: string } = {},
 	report: Reporter = noReport,
 ): Promise<RepoSummary> {
 	const root = path.resolve(cwd);
@@ -470,7 +502,7 @@ export async function migrate(
 				dir: root,
 				shape: old.shape,
 				artifactDirectories: old.artifactDirectories,
-				server: opts.server,
+				syncServer: opts.syncServer,
 			},
 			"track",
 			report,
@@ -551,7 +583,7 @@ async function openDetached(root: string, url: AutomergeUrl, server?: string): P
 	return Docs.open({
 		storage: new MemoryStorage(),
 		signer: signerFrom(await loadSeed()),
-		server: server ?? config?.server ?? DEFAULT_SERVER,
+		server: server ?? config?.syncServer ?? DEFAULT_SERVER,
 	});
 }
 

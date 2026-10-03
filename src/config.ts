@@ -9,7 +9,11 @@ export interface PushworkConfig {
 	rootUrl: AutomergeUrl;
 	shape: string;
 	artifactDirectories: string[];
-	server?: string;
+	/** Where document data syncs; unset means the default (or, for keyhive repos, the keyhive server). */
+	syncServer?: string;
+	/** A keyhive repo's keyhive server (a built-in name or url) and its contact card (a name or JSON). */
+	keyhiveServer?: string;
+	keyhiveCard?: string;
 }
 
 const DIR = ".pushwork";
@@ -78,7 +82,9 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		rootUrl: stripHeads(parsed.rootUrl),
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],
-		server: parsed.server,
+		syncServer: parsed.syncServer,
+		keyhiveServer: parsed.keyhiveServer,
+		keyhiveCard: parsed.keyhiveCard,
 	};
 }
 

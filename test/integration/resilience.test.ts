@@ -16,7 +16,7 @@ describe("unreachable sync server", () => {
 		for (let i = 0; i < 40; i++) await fs.writeFile(path.join(dir, `file_${i}.txt`), `content ${i}\n`);
 
 		const start = Date.now();
-		const init = await pushwork(["--porcelain", "init", "--server", DEAD], dir);
+		const init = await pushwork(["--porcelain", "init", "--sync-server", DEAD], dir);
 		expect(Date.now() - start).toBeLessThan(8_000);
 		expect(init.stdout).toContain("INITIALIZED");
 		expect(init.stdout).toContain("sync\toffline");
@@ -37,7 +37,7 @@ describe("unreachable sync server", () => {
 		const dir = tmp.dirSync({ unsafeCleanup: true }).name;
 		await fs.writeFile(path.join(dir, "a.txt"), "a\n");
 		const start = Date.now();
-		const init = await pushwork(["--porcelain", "init", "--server", silent.url], dir);
+		const init = await pushwork(["--porcelain", "init", "--sync-server", silent.url], dir);
 		// the connect timeout is 10s; exit follows straight after
 		expect(Date.now() - start).toBeLessThan(14_000);
 		expect(init.stdout).toContain("sync\toffline");

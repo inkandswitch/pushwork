@@ -38,7 +38,7 @@ export const DEFAULT_SERVER_NAME = "keyhive";
 /** The server url and contact card JSON that keyhive repos sync through. */
 export function resolveSettings(settings: Settings): { url: string; card: string } {
 	const server = settings.server ?? DEFAULT_SERVER_NAME;
-	const named = SERVERS[server];
+	const named = SERVERS[server] ?? Object.values(SERVERS).find(s => s.url === server);
 	const url = named?.url ?? server;
 	const card = settings.card ? (SERVERS[settings.card]?.card ?? settings.card) : named?.card;
 	if (!card) throw new Error(`no contact card for ${url}; set one with \`pushwork keyhive server ${url} <card>\``);

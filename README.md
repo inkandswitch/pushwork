@@ -102,7 +102,9 @@ These apply to every command:
 | --- | --- | --- |
 | `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
-| `--server <url>` | both | Sync server for this repo, saved in its config. Defaults to `wss://subduction.sync.inkandswitch.com`. |
+| `--sync-server <url>` | both | Server for document data, saved in the repo's config. Defaults to `wss://subduction.sync.inkandswitch.com`, or for a keyhive repo, its keyhive server. |
+| `--keyhive-server <server>` | both | For a keyhive repo: its keyhive server, `keyhive`, `subduction` or a `ws(s)://` url. Saved in the repo's config. Defaults to this machine's setting (see [Keyhive](#keyhive)). |
+| `--keyhive-card <card>` | both | The keyhive server's contact card, needed with a url: a built-in name, JSON, an `http(s)://` url or a file. |
 | `--offline` | init | Create the repo without contacting the server. The next `sync` publishes it. |
 | `--keyhive` | init | Protect the repo with keyhive (see [Keyhive](#keyhive)). Only you can read it, unless `--public-access` says otherwise. |
 | `--public-access <level>` | init | With `--keyhive`: what anyone may do, `relay`, `read`, `edit` or `admin`. Unset means no access. |
@@ -137,15 +139,23 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 
 On a clone without edit access, `sync` only pulls, and refuses to run while you have local edits (`pushwork cut` them first). Cloning a repo you can't read fails with an error saying so.
 
-Your signing key is `~/.pushwork/key` and your keyhive state is `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it. Keyhive repos sync through the keyhive server rather than `--server`, so the two can't be combined.
+Your signing key is `~/.pushwork/key` and your keyhive state is `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it.
 
-The keyhive server is a per-machine setting in `~/.pushwork/keyhive.json`. It defaults to `wss://keyhive.sync.automerge.org` (`keyhive`). `subduction.sync.inkandswitch.com` (`subduction`) is built in too, but it doesn't answer keyhive sync at the moment.
+Each keyhive repo records its keyhive server in its config when it's created or cloned, because that's the server holding relay access on its group. `--keyhive-server` picks it; otherwise it's this machine's default, kept in `~/.pushwork/keyhive.json`, which starts as `wss://keyhive.sync.automerge.org` (`keyhive`). `subduction.sync.inkandswitch.com` (`subduction`) is built in too, but it doesn't answer keyhive sync at the moment.
+
+Document data goes to the keyhive server too, unless `--sync-server` sends it elsewhere:
+
+```sh
+pushwork init --keyhive --public-access read --sync-server wss://subduction.sync.inkandswitch.com
+```
+
+Keyhive membership then syncs through the keyhive server and documents through the sync server. A sync server that doesn't speak keyhive can't refuse writes from people without edit access; pushwork itself won't push them, but that check is client-side.
 
 | Command | Description |
 | --- | --- |
 | `pushwork keyhive` | Show the keyhive server, its peer id, your keyhive id and a contact card for you. |
-| `pushwork keyhive server <name>` | Use a built-in server, `keyhive` or `subduction`, with its contact card. |
-| `pushwork keyhive server <url> <card>` | Use any `ws(s)://` server. The card is the server's contact card: a built-in name, its JSON, an `http(s)://` url serving it, or a file. pushwork checks that the server it connects to is the one in the card. |
+| `pushwork keyhive server <name>` | Make a built-in server, `keyhive` or `subduction`, with its contact card, the default for new keyhive repos. |
+| `pushwork keyhive server <url> <card>` | Make any `ws(s)://` server the default. The card is the server's contact card: a built-in name, its JSON, an `http(s)://` url serving it, or a file. pushwork checks that the server it connects to is the one in the card. |
 
 ## Configuration
 
@@ -165,11 +175,11 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 	"rootUrl": "automerge:2sX...e9",
 	"shape": "vfs",
 	"artifactDirectories": ["dist"],
-	"server": "ws://localhost:8080"
+	"syncServer": "ws://localhost:8080"
 }
 ```
 
-`server` is present only when the repo was created with `--server`.
+`syncServer` is present only when the repo was created with `--sync-server`. A keyhive repo also has `keyhiveServer`, and `keyhiveCard` when its server isn't built in.
 
 ### Ignore files
 
@@ -306,7 +316,7 @@ const {diff} = await status("./my-project")
 | `clone` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
 | `track` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
 | `merge` | `(opts: CloneOpts, report?: Reporter, warn?: Warn) => Promise<RepoSummary>` |
-| `migrate` | `(cwd: string, opts?: { server?: string }, report?: Reporter) => Promise<RepoSummary>` |
+| `migrate` | `(cwd: string, opts?: { syncServer?: string }, report?: Reporter) => Promise<RepoSummary>` |
 | `sync` | `(cwd: string, opts?: { nuclear?: boolean }, report?: Reporter, warn?: Warn) => Promise<SyncSummary>` |
 | `save` | `(cwd: string, report?: Reporter, warn?: Warn) => Promise<void>` |
 | `status` | `(cwd: string) => Promise<{ diff: Diff }>` |
@@ -326,8 +336,10 @@ type InitOpts = {
 	shape: string // "vfs" | "patchwork-folder" | module path
 	artifactDirectories?: readonly string[] // default: ["dist"]
 	online?: boolean // default: true
-	server?: string // default: DEFAULT_SERVER
-	keyhive?: {publicAccess?: AccessLevel; serverAccess?: AccessLevel} // see Keyhive; can't be combined with server
+	syncServer?: string // default: DEFAULT_SERVER, or the keyhive server
+	keyhiveServer?: string // keyhive repos: built-in name or url
+	keyhiveCard?: string // with a keyhiveServer url
+	keyhive?: {publicAccess?: AccessLevel; serverAccess?: AccessLevel} // see Keyhive
 }
 
 type CloneOpts = {
@@ -335,7 +347,9 @@ type CloneOpts = {
 	dir: string
 	shape: string // used when the root doc's type isn't recognized
 	artifactDirectories?: readonly string[]
-	server?: string
+	syncServer?: string
+	keyhiveServer?: string // keyhive repos: built-in name or url
+	keyhiveCard?: string // with a keyhiveServer url
 	onStrategyDoc?: (info) => boolean | Promise<boolean> // run the root's .pushworkStrategy?
 }
 

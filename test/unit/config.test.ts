@@ -21,7 +21,7 @@ describe("config", () => {
 			rootUrl: url,
 			shape: "vfs",
 			artifactDirectories: ["dist"],
-			server: "ws://127.0.0.1:1",
+			syncServer: "ws://127.0.0.1:1",
 		};
 		await writeConfig(root, config);
 		expect(await readConfig(root)).toEqual(config);

@@ -10,7 +10,7 @@ Per-repo configuration lives at `.pushwork/config.json`; document storage lives 
 	"rootUrl": "automerge:...",
 	"shape": "vfs",
 	"artifactDirectories": ["dist"],
-	"server": "ws://localhost:8080"
+	"syncServer": "ws://localhost:8080"
 }
 ```
 
@@ -20,7 +20,9 @@ Per-repo configuration lives at `.pushwork/config.json`; document storage lives 
 | `rootUrl` | The repo's identity: the root doc URL |
 | `shape` | Document layout: `"vfs"`, `"patchwork-folder"`, or a custom module path (see [`shapes`](./shapes.md)) |
 | `artifactDirectories` | Frozen subtrees (see [`artifacts`](./artifacts.md)) |
-| `server` | Optional. The sync server, when it isn't the default |
+| `syncServer` | Optional. Where document data syncs, when it isn't the default (for keyhive repos, the keyhive server) |
+| `keyhiveServer` | Keyhive repos. The keyhive server, a built-in name or url, recorded at init or clone |
+| `keyhiveCard` | Keyhive repos with a custom server. Its contact card |
 
 Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16. Its keyhive group isn't stored either; it's read from the root document's members in the local keyhive state.
 

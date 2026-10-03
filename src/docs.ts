@@ -120,6 +120,12 @@ export class Docs {
 		return new Docs(node, options, options.server ? await connect(node, options.signer, options.server) : {});
 	}
 
+	/** Connect to another server, such as a keyhive server, that docs don't sync with. */
+	async connect(server: string): Promise<void> {
+		const { peer, error } = await connect(this.node, this.options.signer, server);
+		if (!peer) throw new Error(`could not connect to ${server}: ${error}`);
+	}
+
 	get peer(): PeerId | undefined {
 		return this.connection.peer;
 	}

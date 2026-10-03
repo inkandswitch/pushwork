@@ -136,8 +136,10 @@ program
 	.description("Initialize pushwork in a directory")
 	.argument("[dir]", "Directory to initialize", ".")
 	.option("--offline", "Don't contact the sync server")
-	.option("--server <url>", "Sync server to use for this repo")
+	.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 	.option("--keyhive", "Protect the repo with keyhive (only you can read it, unless --public-access says otherwise)")
+	.option("--keyhive-server <server>", "Keyhive server for this repo: a built-in name (keyhive, subduction) or a ws(s):// url")
+	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
 	.addOption(
 		new Option("--public-access <level>", "With --keyhive: what anyone may do with the repo").choices(ACCESS_LEVELS),
 	)
@@ -171,7 +173,7 @@ program
 				shape: opts.shape,
 				artifactDirectories: opts.artifactDir,
 				online: !opts.offline,
-				server: opts.server,
+				syncServer: opts.syncServer,
 				keyhive: opts.keyhive
 					? { publicAccess: opts.publicAccess, serverAccess: opts.serverAccess }
 					: undefined,
@@ -193,7 +195,7 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 		.description(description)
 		.argument("<url>", "automerge: URL")
 		.argument(dirArg, "Target directory", dirArg === "[dir]" ? "." : undefined)
-		.option("--server <url>", "Sync server to use for this repo")
+		.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 		.option(
 			"--shape <shape>",
 			"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
@@ -204,18 +206,28 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 			"Directory whose contents are stored as ImmutableString and pinned with heads in the root doc. Repeatable.",
 			collect,
 			undefined as string[] | undefined,
-		);
+		)
+		.option("--keyhive-server <server>", "For a keyhive repo: its keyhive server, a built-in name (keyhive, subduction) or a ws(s):// url")
+		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file");
 
 const attachOpts = (
 	u: string,
 	root: string,
-	opts: { shape: string; artifactDir?: string[]; server?: string },
+	opts: {
+		shape: string;
+		artifactDir?: string[];
+		syncServer?: string;
+		keyhiveServer?: string;
+		keyhiveCard?: string;
+	},
 ) => ({
 	url: u,
 	dir: root,
 	shape: opts.shape,
 	artifactDirectories: opts.artifactDir,
-	server: opts.server,
+	syncServer: opts.syncServer,
+	keyhiveServer: opts.keyhiveServer,
+	keyhiveCard: opts.keyhiveCard,
 	onStrategyDoc: pickStrategyInteractively,
 });
 
@@ -272,12 +284,12 @@ attachCommand(
 program
 	.command("migrate")
 	.description("Upgrade a pushwork 2 repo in place (the old .pushwork is kept in .pushwork/pushwork_migration_backup_safe_to_delete)")
-	.option("--server <url>", "Sync server to use for this repo")
+	.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 	.action(async (opts) => {
 		const root = process.cwd();
 		out.intro("pushwork migrate");
 		out.task("Connecting to sync server");
-		const info = await migrate(root, { server: opts.server }, report);
+		const info = await migrate(root, { syncServer: opts.syncServer }, report);
 		out.done();
 		out.obj(summaryRows(root, info, "tracked"));
 		const { diff: d } = await status(root);
@@ -330,11 +342,11 @@ program
 	.description("Pull a single file doc by URL and write it to disk")
 	.argument("<url>", "automerge: URL of a UnixFileEntry doc")
 	.argument("[path]", "Where to write it (defaults to the doc's own name)")
-	.option("--server <url>", "Sync server to fetch from")
+	.option("--sync-server <url>", "Sync server to use (default: the repo's, else the default server)")
 	.action(async (u, dest, opts) => {
 		dlog("yoink url=%s dest=%s", u, dest);
 		out.task("Yoinking");
-		const result = await yoink(process.cwd(), u, dest, opts.server);
+		const result = await yoink(process.cwd(), u, dest, opts.syncServer);
 		out.done(`yoinked ${result.path} (${plural(result.bytes, "byte")})`);
 	});
 
@@ -343,11 +355,11 @@ program
 	.description("Push a single file from disk into a file doc by URL")
 	.argument("<path>", "File to read")
 	.argument("<url>", "automerge: URL of the UnixFileEntry doc to overwrite")
-	.option("--server <url>", "Sync server to push to")
+	.option("--sync-server <url>", "Sync server to use (default: the repo's, else the default server)")
 	.action(async (src, u, opts) => {
 		dlog("yeet src=%s url=%s", src, u);
 		out.task("Yeeting");
-		const result = await yeet(process.cwd(), src, u, opts.server);
+		const result = await yeet(process.cwd(), src, u, opts.syncServer);
 		out.done(`yeeted ${result.path} → ${result.url} (${plural(result.bytes, "byte")})`);
 		const { state, detail } = verdict(result.sync);
 		if (state !== "SYNCED") out.warn(`${state}${detail ? `: ${detail}` : ""}`);

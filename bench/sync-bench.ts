@@ -152,7 +152,7 @@ async function main(): Promise<void> {
 		if (cloneMode) {
 			await clone({ url: args.clone, dir: root, shape: args.shape });
 		} else if (args.cloneLocal) {
-			await clone({ url: localCloneUrl!, dir: root, shape: args.shape, server: server!.url });
+			await clone({ url: localCloneUrl!, dir: root, shape: args.shape, syncServer: server!.url });
 		} else {
 			await init({ dir: root, shape: args.shape, online: args.online });
 		}

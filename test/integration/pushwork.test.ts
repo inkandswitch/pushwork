@@ -7,8 +7,8 @@ import { exists, pushwork, readText, userFiles } from "../cli";
 
 const server = inject("server");
 
-const init = (dir: string) => pushwork(["init", "--server", server], dir);
-const clone = (url: string, dir: string) => pushwork(["clone", "--server", server, url, dir]);
+const init = (dir: string) => pushwork(["init", "--sync-server", server], dir);
+const clone = (url: string, dir: string) => pushwork(["clone", "--sync-server", server, url, dir]);
 const urlOf = async (dir: string) => (await pushwork(["url"], dir)).stdout.trim();
 
 // Sync each repo once, in order.
@@ -113,7 +113,7 @@ describe("pushwork", () => {
 			const a = await dir("a");
 			await init(a);
 			await expect(
-				pushwork(["clone", "--server", "ws://127.0.0.1:1", await urlOf(a), path.join(work, "b")]),
+				pushwork(["clone", "--sync-server", "ws://127.0.0.1:1", await urlOf(a), path.join(work, "b")]),
 			).rejects.toThrow(/could not connect/);
 		});
 	});
@@ -127,7 +127,7 @@ describe("pushwork", () => {
 			const b = await dir("b");
 			await fs.writeFile(path.join(b, "same.txt"), "same");
 			await fs.writeFile(path.join(b, "local.txt"), "local");
-			await pushwork(["track", "--server", server, await urlOf(a)], b);
+			await pushwork(["track", "--sync-server", server, await urlOf(a)], b);
 
 			expect([...(await userFiles(b)).keys()].sort()).toEqual(["local.txt", "same.txt"]);
 			expect(await urlOf(b)).toBe(await urlOf(a));
@@ -141,7 +141,7 @@ describe("pushwork", () => {
 			await init(a);
 			const b = await dir("b");
 			await fs.writeFile(path.join(b, "x.txt"), "v2");
-			await pushwork(["track", "--server", server, await urlOf(a)], b);
+			await pushwork(["track", "--sync-server", server, await urlOf(a)], b);
 			await sync(b, a);
 			expect(await readText(path.join(a, "x.txt"))).toBe("v2");
 		});
@@ -157,7 +157,7 @@ describe("pushwork", () => {
 			const b = await dir("b");
 			await fs.writeFile(path.join(b, "both.txt"), "local");
 			await fs.writeFile(path.join(b, "local.txt"), "local only");
-			await pushwork(["merge", "--server", server, await urlOf(a)], b);
+			await pushwork(["merge", "--sync-server", server, await urlOf(a)], b);
 			await sync(a);
 
 			const expected = new Map([
@@ -184,7 +184,7 @@ describe("pushwork", () => {
 			await fs.writeFile(path.join(b, ".pushwork", "storage.lmdb"), "old");
 
 			await expect(pushwork(["status"], b)).rejects.toThrow(/pushwork migrate/);
-			await pushwork(["migrate", "--server", server], b);
+			await pushwork(["migrate", "--sync-server", server], b);
 
 			expect(await urlOf(b)).toBe(await urlOf(a));
 			expect(await readText(path.join(b, ".pushwork", "pushwork_migration_backup_safe_to_delete", "storage.lmdb"))).toBe("old");
@@ -252,7 +252,7 @@ describe("pushwork", () => {
 			await fs.mkdir(path.join(a, "dist"));
 			await fs.writeFile(path.join(a, "dist", "main.js"), "v1");
 			await fs.writeFile(path.join(a, "README"), "hi");
-			await pushwork(["init", "--server", server, "--shape", "patchwork-folder"], a);
+			await pushwork(["init", "--sync-server", server, "--shape", "patchwork-folder"], a);
 			const b = path.join(work, "b");
 			await clone(await urlOf(a), b);
 			expect(await userFiles(b)).toEqual(await userFiles(a));
@@ -319,7 +319,7 @@ describe("pushwork", () => {
 			const out = await dir("out");
 			await fs.writeFile(path.join(a, "note.md"), "loose");
 			await init(a);
-			await pushwork(["yoink", "--server", server, await fileUrl(a, "note.md")], out);
+			await pushwork(["yoink", "--sync-server", server, await fileUrl(a, "note.md")], out);
 			expect(await readText(path.join(out, "note.md"))).toBe("loose");
 		});
 

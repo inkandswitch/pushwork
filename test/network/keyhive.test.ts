@@ -58,4 +58,20 @@ describe("init --keyhive", () => {
 		expect(await readText(path.join(a, "hello.txt"))).toBe("edited by a stranger");
 		expect(await readText(path.join(a, "new.txt"))).toBe("new from a stranger");
 	}, 180_000);
+
+	it("--sync-server: data on one server, keyhive on another", async () => {
+		const { work, a, b, stranger } = await setup();
+		const sync = "wss://subduction.sync.inkandswitch.com";
+		await pushwork(["init", "--keyhive", "--public-access", "read", "--sync-server", sync], a);
+		const config = JSON.parse(await readText(path.join(a, ".pushwork", "config.json")));
+		expect(config).toMatchObject({ syncServer: sync, keyhiveServer: "keyhive" });
+		const url = (await pushwork(["url"], a)).stdout.trim();
+		await pushwork(["clone", "--sync-server", sync, url, b], work, stranger);
+		expect(await userFiles(b)).toEqual(await userFiles(a));
+
+		await fs.writeFile(path.join(a, "hello.txt"), "edited by the owner");
+		expect((await pushwork(["--porcelain", "sync"], a)).stdout).toContain("sync\tsynced");
+		await pushwork(["sync"], b, stranger);
+		expect(await readText(path.join(b, "hello.txt"))).toBe("edited by the owner");
+	}, 180_000);
 });
