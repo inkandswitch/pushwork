@@ -27,6 +27,8 @@ import {
 const debug = log("docs");
 // for connecting and for each sync round
 const TIMEOUT_MS = 10_000;
+const SYNC_ROUNDS = 6;
+const SEND_SETTLE_MS = 50;
 
 // keyhive only; plain docs store blobs as they are
 export type Codec = {
@@ -306,12 +308,15 @@ export class Docs {
 		);
 	}
 
-	// synced means a round where nothing moved either way; a server that keeps asking is refusing our writes
+	// synced means a round where nothing moved either way; a server that keeps asking is refusing our writes.
+	// The server only counts a commit as held once its storage write finishes, so it can ask again for
+	// what we sent a moment ago; after a round where we only sent, wait (50ms, doubling) before asking.
 	private syncDoc(id: DocumentId): Promise<Result> {
 		return this.limit(async () => {
 			const sid = toSedimentreeId(id);
 			let result: Result = { ok: false, received: false };
-			for (let round = 0; round < 4; round++) {
+			let wait = SEND_SETTLE_MS;
+			for (let round = 0; round < SYNC_ROUNDS; round++) {
 				const r = await this.node.syncWithPeer(this.peer!, sid, false, TIMEOUT_MS);
 				if (!r.success) {
 					result.error = r.transportErrors[0]?.message ?? "not authorized / not found";
@@ -321,6 +326,10 @@ export class Docs {
 				if (r.stats.totalSent === 0 && r.stats.totalReceived === 0) {
 					result.ok = true;
 					break;
+				}
+				if (r.stats.totalReceived === 0) {
+					await new Promise(resolve => setTimeout(resolve, wait));
+					wait *= 2;
 				}
 			}
 			if (!result.ok) debug("unsynced %s: %s", bare(id), result.error ?? "server kept requesting");
