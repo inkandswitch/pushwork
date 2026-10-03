@@ -118,6 +118,83 @@ describe("pushwork", () => {
 		});
 	});
 
+	describe("track", () => {
+		it("adopts the url without touching files, and status shows the difference", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "same.txt"), "same");
+			await fs.writeFile(path.join(a, "remote.txt"), "remote");
+			await init(a);
+			const b = await dir("b");
+			await fs.writeFile(path.join(b, "same.txt"), "same");
+			await fs.writeFile(path.join(b, "local.txt"), "local");
+			await pushwork(["track", "--server", server, await urlOf(a)], b);
+
+			expect([...(await userFiles(b)).keys()].sort()).toEqual(["local.txt", "same.txt"]);
+			expect(await urlOf(b)).toBe(await urlOf(a));
+			const status = (await pushwork(["--porcelain", "status"], b)).stdout;
+			expect(status.trim().split("\n").sort()).toEqual(["added\tlocal.txt", "deleted\tremote.txt"]);
+		});
+
+		it("then syncs local edits to the url", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "x.txt"), "v1");
+			await init(a);
+			const b = await dir("b");
+			await fs.writeFile(path.join(b, "x.txt"), "v2");
+			await pushwork(["track", "--server", server, await urlOf(a)], b);
+			await sync(b, a);
+			expect(await readText(path.join(a, "x.txt"))).toBe("v2");
+		});
+	});
+
+	describe("merge", () => {
+		it("keeps files from both sides and the local copy wins", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "both.txt"), "remote");
+			await fs.mkdir(path.join(a, "sub"));
+			await fs.writeFile(path.join(a, "sub", "remote.txt"), "remote only");
+			await init(a);
+			const b = await dir("b");
+			await fs.writeFile(path.join(b, "both.txt"), "local");
+			await fs.writeFile(path.join(b, "local.txt"), "local only");
+			await pushwork(["merge", "--server", server, await urlOf(a)], b);
+			await sync(a);
+
+			const expected = new Map([
+				["both.txt", Buffer.from("local")],
+				["local.txt", Buffer.from("local only")],
+				[path.join("sub", "remote.txt"), Buffer.from("remote only")],
+			]);
+			expect(await userFiles(b)).toEqual(expected);
+			expect(await userFiles(a)).toEqual(expected);
+		});
+	});
+
+	describe("migrate", () => {
+		it("upgrades a pushwork 2 repo in place, keeping the old state", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "x.txt"), "v1");
+			await init(a);
+			const b = await dir("b");
+			await fs.writeFile(path.join(b, "x.txt"), "v1");
+			await fs.writeFile(path.join(b, "new.txt"), "local edit");
+			await fs.mkdir(path.join(b, ".pushwork"));
+			const oldConfig = { version: 5, rootUrl: await urlOf(a), backend: "subduction", shape: "vfs" };
+			await fs.writeFile(path.join(b, ".pushwork", "config.json"), JSON.stringify(oldConfig));
+			await fs.writeFile(path.join(b, ".pushwork", "storage.lmdb"), "old");
+
+			await expect(pushwork(["status"], b)).rejects.toThrow(/pushwork migrate/);
+			await pushwork(["migrate", "--server", server], b);
+
+			expect(await urlOf(b)).toBe(await urlOf(a));
+			expect(await readText(path.join(b, ".pushwork", "pushwork_migration_backup_safe_to_delete", "storage.lmdb"))).toBe("old");
+			const status = (await pushwork(["--porcelain", "status"], b)).stdout;
+			expect(status.trim()).toBe("added\tnew.txt");
+			await sync(b, a);
+			expect(await readText(path.join(a, "new.txt"))).toBe("local edit");
+		});
+	});
+
 	describe("sync", () => {
 		it("propagates a new file from A to B", async () => {
 			const { a, b } = await pair();

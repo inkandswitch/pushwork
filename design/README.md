@@ -50,5 +50,5 @@ Sync is a decode → diff → encode cycle:
 - **The CRDT is the merge** — no conflict resolution UI; concurrent edits converge via Automerge.
 - **Honest verdicts** — the CLI only prints SYNCED when a sync round with the server for every document had nothing left to exchange; otherwise PENDING.
 - **Immutability in the link layer** — artifact subtrees are frozen by pinning heads in URLs, not by content conventions.
-- **Strict config versioning** — other config versions hard-error with instructions to re-clone; nothing is converted in place.
+- **Strict config versioning** — other config versions hard-error and point at `pushwork migrate`, which re-tracks the root URL without pushing anything.
 - **Offline-first** — `save`, `status`, `diff`, `heads`, `cut`/`paste` all work without a network connection.

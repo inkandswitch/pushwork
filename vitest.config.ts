@@ -1,4 +1,4 @@
-import { configDefaults, defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config"
 
 // test/network talks to the real servers; it only runs with `--mode network`.
 export default defineConfig(({ mode }) => ({

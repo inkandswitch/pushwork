@@ -13,8 +13,8 @@ import {
 	KeyhiveBlobInterceptor,
 	KeyhiveStorage,
 	KeyhiveSubductionAdapter,
-	KEYHIVE_SYNC_SERVER_CONTACT_CARD_JSON as SERVER_CARD,
-	KEYHIVE_SYNC_SERVER_PEER_ID as SERVER_PEER,
+	KEYHIVE_SYNC_SERVER_CONTACT_CARD_JSON,
+	SUBDUCTION_SYNC_SERVER_CONTACT_CARD_JSON,
 	Signer,
 	initKeyhiveWasm,
 	peerIdFromSigner,
@@ -24,13 +24,44 @@ import { PromiseQueue } from "@automerge/automerge-repo-keyhive/dist/network-ada
 import type { Codec, Docs } from "./docs.js";
 import type { DocumentId } from "./url.js";
 
-// subduction.sync.inkandswitch.com doesn't answer keyhive sync (checked 2026-10-03)
-const SERVER = "wss://keyhive.sync.automerge.org";
+// the sync servers ARK knows, by short name
+export const SERVERS: Record<string, { url: string; card: string }> = {
+	subduction: { url: "wss://subduction.sync.inkandswitch.com", card: SUBDUCTION_SYNC_SERVER_CONTACT_CARD_JSON },
+	keyhive: { url: "wss://keyhive.sync.automerge.org", card: KEYHIVE_SYNC_SERVER_CONTACT_CARD_JSON },
+};
+
+/** What `pushwork keyhive server` stores: a built-in name, or a url and card (a name or JSON). */
+export type Settings = { server?: string; card?: string };
+
+export const DEFAULT_SERVER_NAME = "keyhive";
+
+/** The server url and contact card JSON that keyhive repos sync through. */
+export function resolveSettings(settings: Settings): { url: string; card: string } {
+	const server = settings.server ?? DEFAULT_SERVER_NAME;
+	const named = SERVERS[server];
+	const url = named?.url ?? server;
+	const card = settings.card ? (SERVERS[settings.card]?.card ?? settings.card) : named?.card;
+	if (!card) throw new Error(`no contact card for ${url}; set one with \`pushwork keyhive server ${url} <card>\``);
+	return { url, card };
+}
+
+/** The peer id a contact card's server answers to (its key, base64), or throws if it isn't a card. */
+export function cardPeerId(json: string): string {
+	initKeyhiveWasm();
+	return Buffer.from(ContactCard.fromJson(json).id.toBytes()).toString("base64");
+}
+
+export type AccessLevel = "relay" | "read" | "edit" | "admin";
 
 export type Hive = {
 	server: string;
+	id: string;
+	contactCard(): Promise<string>;
 	codec: Codec;
-	createPublicGroup(): Promise<string>;
+	/** A new group for a repo's docs, granting the public and the server the given access. */
+	createGroup(access: { public?: AccessLevel; server: AccessLevel }): Promise<string>;
+	/** The group a doc was created in (hex), if this hive knows it. */
+	groupOf(id: DocumentId): Promise<string | undefined>;
 	newId(group: string): () => Promise<DocumentId>;
 	canWrite(id: DocumentId): Promise<boolean>;
 	sync(docs: Docs): Promise<void>;
@@ -53,7 +84,13 @@ const noStorage = {
 
 // `file` holds the keyhive archive; the seed signs for both keyhive and subduction.
 // A reader neither locks nor writes the archive back.
-export async function openHive(file: string, seed: Uint8Array, reader = false): Promise<Hive> {
+export async function openHive(
+	file: string,
+	seed: Uint8Array,
+	settings: Settings,
+	reader = false,
+): Promise<Hive> {
+	const { url, card: cardJson } = resolveSettings(settings);
 	initKeyhiveWasm();
 	if (!/keyhive/.test(process.env.DEBUG ?? "")) setKeyhiveLogLevel("silent");
 	const unlock = reader ? undefined : await lock(file);
@@ -66,7 +103,7 @@ export async function openHive(file: string, seed: Uint8Array, reader = false): 
 	const kh = bytes
 		? await new Archive(bytes).tryToKeyhive(store, signer, () => {})
 		: await Keyhive.init(signer, store, () => {});
-	const card = ContactCard.fromJson(SERVER_CARD);
+	const card = ContactCard.fromJson(cardJson);
 	const server = (await kh.getAgent(card.id)) ?? (await kh.receiveContactCard(card)).toAgent();
 	// keyhive's wasm is not reentrant: every call into it, ours and ARK's, goes through one queue
 	const queue = new PromiseQueue();
@@ -74,7 +111,9 @@ export async function openHive(file: string, seed: Uint8Array, reader = false): 
 	let syncer: Promise<() => Promise<void>> | undefined;
 
 	return {
-		server: SERVER,
+		server: url,
+		id: Buffer.from(signer.verifyingKey).toString("base64"),
+		contactCard: () => queue.run(async () => (await kh.contactCard()).toJson()),
 		codec: {
 			async encode(id, head, parents, blob) {
 				const out = await crypt.transformOutgoing(ark(id), head, parents, blob);
@@ -84,12 +123,22 @@ export async function openHive(file: string, seed: Uint8Array, reader = false): 
 			decode: (id, head, blob) => crypt.transformIncoming(ark(id), head, blob),
 		},
 
-		createPublicGroup: () =>
+		createGroup: access =>
 			queue.run(async () => {
 				const group = await kh.generateGroup([]);
-				await kh.addMember((await kh.getAgent(Identifier.publicId()))!, group.toMembered(), Access.read(), []);
-				await kh.addMember(server, group.toMembered(), Access.relay(), []);
+				if (access.public) {
+					const anyone = (await kh.getAgent(Identifier.publicId()))!;
+					await kh.addMember(anyone, group.toMembered(), Access.fromString(access.public), []);
+				}
+				await kh.addMember(server, group.toMembered(), Access.fromString(access.server), []);
 				return Buffer.from(group.groupId.toBytes()).toString("hex");
+			}),
+
+		groupOf: id =>
+			queue.run(async () => {
+				const doc = await kh.getDocument(new KeyhiveDocumentId(bs58check.decode(id)));
+				const group = (await doc?.members())?.find(m => m.who.isGroup());
+				return group && Buffer.from(group.who.id.toBytes()).toString("hex");
 			}),
 
 		newId: hex => () =>
@@ -103,12 +152,20 @@ export async function openHive(file: string, seed: Uint8Array, reader = false): 
 		canWrite: id =>
 			queue.run(async () => {
 				const doc = new KeyhiveDocumentId(bs58check.decode(id));
-				const access = await kh.bestAccessForDoc(new Identifier(signer.verifyingKey), doc);
-				return access?.atLeast(Access.edit()) ?? false;
+				const edit = Access.edit();
+				for (const who of [new Identifier(signer.verifyingKey), Identifier.publicId()]) {
+					if ((await kh.bestAccessForDoc(who, doc))?.atLeast(edit)) return true;
+				}
+				return false;
 			}),
 
 		async sync(docs) {
-			syncer ??= adapterSync(kh, signer, queue, docs.node);
+			const peer = Buffer.from(card.id.toBytes()).toString("base64");
+			const connected = (await docs.node.getConnectedPeerIds()).map(p => Buffer.from(p.toBytes()).toString("base64"));
+			if (!connected.includes(peer)) {
+				throw new Error(`${url} is not the server in the keyhive contact card (it is ${connected[0] ?? "not connected"})`);
+			}
+			syncer ??= adapterSync(kh, signer, queue, docs.node, peer);
 			await (await syncer)();
 		},
 
@@ -161,7 +218,13 @@ type Peer = { syncpoint: number | null; lastKeyhiveRequestSent: number };
 
 // ARK has no "synced" signal. A round is done when the server confirms, which sets the
 // peer's private syncpoint; rounds repeat while they bring in ops, as the server pages.
-async function adapterSync(kh: Keyhive, signer: Signer, queue: PromiseQueue, node: Docs["node"]) {
+async function adapterSync(
+	kh: Keyhive,
+	signer: Signer,
+	queue: PromiseQueue,
+	node: Docs["node"],
+	serverPeer: string,
+) {
 	const adapter = new KeyhiveSubductionAdapter({
 		subduction: node,
 		keyhive: kh,
@@ -169,10 +232,10 @@ async function adapterSync(kh: Keyhive, signer: Signer, queue: PromiseQueue, nod
 		keyhiveQueue: queue,
 		contactCard: await queue.run(() => kh.contactCard()),
 		localPeerId: peerIdFromSigner(signer),
-		remotePeerId: SERVER_PEER,
+		remotePeerId: serverPeer as ReturnType<typeof peerIdFromSigner>,
 		cachingMode: "none",
 	});
-	const peer: Peer = (adapter as any).peers.get(SERVER_PEER);
+	const peer: Peer = (adapter as any).peers.get(serverPeer);
 	let confirmed = () => {};
 	let syncpoint = peer.syncpoint;
 	Object.defineProperty(peer, "syncpoint", {

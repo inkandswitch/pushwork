@@ -21,20 +21,20 @@ Per-repo configuration lives at `.pushwork/config.json`; document storage lives 
 | `shape` | Document layout: `"vfs"`, `"patchwork-folder"`, or a custom module path (see [`shapes`](./shapes.md)) |
 | `artifactDirectories` | Frozen subtrees (see [`artifacts`](./artifacts.md)) |
 | `server` | Optional. The sync server, when it isn't the default |
-| `publishGroup` | Optional. The keyhive group of a tree made with `init --publish` |
 
-Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16.
+Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16. Its keyhive group isn't stored either; it's read from the root document's members in the local keyhive state.
 
 `readConfig` strips heads from `rootUrl`, because the root is always opened live so sync can change it.
 
 ## Older versions
 
-There is no migration. A config with any other version throws with instructions:
+A config with any other version throws, pointing at `pushwork migrate`. `readOldConfig` reads the root URL, shape and artifact directories from every earlier layout (the original pushwork's `root_directory_url` or `snapshot.json`, and pushwork 2's versions 1–5). `migrate` then:
 
-- Repos on the retired sync3 server are told to `rm -rf .pushwork && pushwork init`, which republishes the directory as a new repo.
-- Everything else is told to run `npx pushwork@2 sync` to publish local edits, then `pushwork clone <rootUrl> <newdir> --shape <shape>`, with the URL and shape filled in.
+1. moves everything in `.pushwork/` to `.pushwork/pushwork_migration_backup_safe_to_delete/`, since the old storage can't be read without automerge-repo;
+2. tracks the root URL, as `pushwork track` does, writing a current config and fetching the tree into fresh storage;
+3. puts everything back if the fetch fails.
 
-Re-cloning instead of converting in place means a stale working tree can never overwrite newer data on the server.
+It pushes nothing. The fetched tree becomes the saved state, so `status` shows how the working tree differs from the server, and the next `sync` publishes those differences. Repos on the retired sync3 server can't be fetched and are told to `rm -rf .pushwork && pushwork init`.
 
 ## Changing the format
 

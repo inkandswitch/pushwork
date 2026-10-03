@@ -69,6 +69,9 @@ pushwork diff
 | --- | --- |
 | `pushwork init [dir]` | Initialize pushwork in a directory (default `.`). |
 | `pushwork clone <url> <dir>` | Clone an `automerge:` URL into a directory. |
+| `pushwork track <url> [dir]` | Follow an `automerge:` URL from an existing directory without touching its files. The next `sync` pushes whatever differs, including files missing here as deletions, so check `status` first. |
+| `pushwork merge <url> [dir]` | Join an existing directory with an `automerge:` URL, keeping files from both sides: files only the URL has are written to disk, then local files are pushed. Where both have a file, the local copy wins. |
+| `pushwork migrate` | Upgrade a pushwork 2 repo in place (see below). |
 | `pushwork sync` | Sync local changes with peers and merge remote changes to disk. |
 | `pushwork save` (alias `commit`) | Commit local changes to local storage without contacting the server. |
 | `pushwork status` | Show changes against the saved state. |
@@ -101,7 +104,9 @@ These apply to every command:
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
 | `--server <url>` | both | Sync server for this repo, saved in its config. Defaults to `wss://subduction.sync.inkandswitch.com`. |
 | `--offline` | init | Create the repo without contacting the server. The next `sync` publishes it. |
-| `--publish` | init | Make a tree everyone can read and only you can write (see [Publishing](#publishing)). |
+| `--keyhive` | init | Protect the repo with keyhive (see [Keyhive](#keyhive)). Only you can read it, unless `--public-access` says otherwise. |
+| `--public-access <level>` | init | With `--keyhive`: what anyone may do, `relay`, `read`, `edit` or `admin`. Unset means no access. |
+| `--server-access <level>` | init | With `--keyhive`: what the keyhive server may do. Defaults to `relay`: store and forward, but not read. |
 
 On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.type` of `directory` → `vfs`, `folder` → `patchwork-folder`); `--shape` is only the fallback when the type isn't recognized.
 
@@ -119,11 +124,28 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 | `PENDING` | Some documents weren't confirmed by the server (`--porcelain` lists them). The next `sync` retries them. |
 | `OFFLINE` | The server couldn't be reached. Local changes are saved and go out on the next `sync`. |
 
-## Publishing
+## Keyhive
 
-`pushwork init --publish` creates a tree that anyone with the URL can clone and read, but only you can change. Its documents are protected with [keyhive](https://github.com/inkandswitch/keyhive), and the server refuses writes from anyone else. A clone of a published tree is read-only: `sync` pulls, and refuses to run while you have local edits (`pushwork cut` them first).
+`pushwork init --keyhive` creates a repo whose documents are protected with [keyhive](https://github.com/inkandswitch/keyhive). The repo gets a keyhive group that you own; every document in it belongs to that group, and the server refuses writes from anyone without edit access. Who else gets in is up to two flags:
 
-Your signing key is `~/.pushwork/key` and your keyhive state is `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are the only thing that can write to trees you publish. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a published tree, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it. Published trees sync through `wss://keyhive.sync.automerge.org`, which speaks keyhive, so `--publish` can't be combined with `--server`.
+| | Means |
+| --- | --- |
+| `--keyhive` | Private: only you can read or write. |
+| `--keyhive --public-access read` | Anyone with the URL can clone and read; only you can write. Good for sharing tools. |
+| `--keyhive --public-access edit` | Anyone with the URL can read and write. |
+| `--server-access read` | The server can read the documents too, not just relay them. |
+
+On a clone without edit access, `sync` only pulls, and refuses to run while you have local edits (`pushwork cut` them first). Cloning a repo you can't read fails with an error saying so.
+
+Your signing key is `~/.pushwork/key` and your keyhive state is `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it. Keyhive repos sync through the keyhive server rather than `--server`, so the two can't be combined.
+
+The keyhive server is a per-machine setting in `~/.pushwork/keyhive.json`. It defaults to `wss://keyhive.sync.automerge.org` (`keyhive`). `subduction.sync.inkandswitch.com` (`subduction`) is built in too, but it doesn't answer keyhive sync at the moment.
+
+| Command | Description |
+| --- | --- |
+| `pushwork keyhive` | Show the keyhive server, its peer id, your keyhive id and a contact card for you. |
+| `pushwork keyhive server <name>` | Use a built-in server, `keyhive` or `subduction`, with its contact card. |
+| `pushwork keyhive server <url> <card>` | Use any `ws(s)://` server. The card is the server's contact card: a built-in name, its JSON, an `http(s)://` url serving it, or a file. pushwork checks that the server it connects to is the one in the card. |
 
 ## Configuration
 
@@ -147,7 +169,7 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 }
 ```
 
-`server` is present only when the repo was created with `--server`. A tree made with `init --publish` also has `publishGroup`, the keyhive group its documents belong to.
+`server` is present only when the repo was created with `--server`.
 
 ### Ignore files
 
@@ -249,13 +271,15 @@ Each document is stored as a sedimentree: loose commits plus fragments that bund
 
 ## Upgrading from pushwork 2
 
-pushwork 3 uses a new storage format and doesn't read pushwork 2 repos. In an old repo, run `npx pushwork@2 sync` to publish any local edits, then clone it fresh:
+pushwork 3 uses a new storage format. In an old repo, run:
 
 ```sh
-pushwork clone <rootUrl> <newdir> --shape <shape>
+pushwork migrate
 ```
 
-Running pushwork 3 in an old repo prints this command with the right URL and shape filled in. Repos on the retired sync3 server can't be cloned; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo.
+This keeps the root URL, shape and artifact directories, moves the old `.pushwork` contents to `.pushwork/pushwork_migration_backup_safe_to_delete/`, and fetches the repo from the server as `track` does. Nothing is pushed: the next `sync` publishes whatever differs from the server, so check `pushwork status` first. Local edits that pushwork 2 saved but never synced only survive if the files are still on disk; to be sure, run `npx pushwork@2 sync` before migrating.
+
+Repos on the retired sync3 server can't be migrated; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo.
 
 ## Programmatic API
 
@@ -280,6 +304,9 @@ const {diff} = await status("./my-project")
 | --- | --- |
 | `init` | `(opts: InitOpts, report?: Reporter, warn?: Warn) => Promise<RepoSummary>` |
 | `clone` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
+| `track` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
+| `merge` | `(opts: CloneOpts, report?: Reporter, warn?: Warn) => Promise<RepoSummary>` |
+| `migrate` | `(cwd: string, opts?: { server?: string }, report?: Reporter) => Promise<RepoSummary>` |
 | `sync` | `(cwd: string, opts?: { nuclear?: boolean }, report?: Reporter, warn?: Warn) => Promise<SyncSummary>` |
 | `save` | `(cwd: string, report?: Reporter, warn?: Warn) => Promise<void>` |
 | `status` | `(cwd: string) => Promise<{ diff: Diff }>` |
@@ -300,7 +327,7 @@ type InitOpts = {
 	artifactDirectories?: readonly string[] // default: ["dist"]
 	online?: boolean // default: true
 	server?: string // default: DEFAULT_SERVER
-	publish?: boolean // see Publishing; can't be combined with server
+	keyhive?: {publicAccess?: AccessLevel; serverAccess?: AccessLevel} // see Keyhive; can't be combined with server
 }
 
 type CloneOpts = {
@@ -334,7 +361,7 @@ Set `DEBUG=pushwork:*` for pushwork's debug log (`DEBUG=true` turns on everythin
 | `pnpm build` | Compile TypeScript to `dist/`. |
 | `pnpm dev` | `tsc --watch`. |
 | `pnpm test` | Run the Vitest suite against a local test server. |
-| `pnpm test:network` | Run the tests in `test/network/` against the real servers: the default server and, for publishing, the keyhive server. |
+| `pnpm test:network` | Run the tests in `test/network/` against the real servers: the default server and, for keyhive repos, the keyhive server. |
 | `pnpm test:watch` / `pnpm test:coverage` | Watch / coverage modes. |
 | `pnpm typecheck` | `tsc --noEmit`. |
 | `pnpm lint` / `pnpm lint:fix` | ESLint over `src`. |

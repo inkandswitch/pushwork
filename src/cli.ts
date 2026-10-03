@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
-import { Command } from "@commander-js/extra-typings";
+import { Command, Option } from "@commander-js/extra-typings";
 import * as path from "path";
 import {
 	clone,
+	merge,
+	ACCESS_LEVELS,
+	keyhiveInfo,
+	setKeyhiveServer,
+	migrate,
+	track,
 	cutWorkdir,
 	diff,
 	heads,
@@ -131,7 +137,15 @@ program
 	.argument("[dir]", "Directory to initialize", ".")
 	.option("--offline", "Don't contact the sync server")
 	.option("--server <url>", "Sync server to use for this repo")
-	.option("--publish", "Publish with keyhive: anyone can read and clone, only you can write")
+	.option("--keyhive", "Protect the repo with keyhive (only you can read it, unless --public-access says otherwise)")
+	.addOption(
+		new Option("--public-access <level>", "With --keyhive: what anyone may do with the repo").choices(ACCESS_LEVELS),
+	)
+	.addOption(
+		new Option("--server-access <level>", "With --keyhive: what the sync server may do (default relay)").choices(
+			ACCESS_LEVELS,
+		),
+	)
 	.option(
 		"--shape <shape>",
 		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
@@ -146,6 +160,9 @@ program
 	.action(async (dir, opts) => {
 		dlog("init dir=%s opts=%o", dir, opts);
 		const root = path.resolve(dir);
+		if (!opts.keyhive && (opts.publicAccess || opts.serverAccess)) {
+			throw new Error("--public-access and --server-access only apply with --keyhive");
+		}
 		out.intro("pushwork init");
 		out.task(opts.offline ? "Initializing" : "Connecting to sync server");
 		const info = await init(
@@ -155,7 +172,9 @@ program
 				artifactDirectories: opts.artifactDir,
 				online: !opts.offline,
 				server: opts.server,
-				publish: opts.publish,
+				keyhive: opts.keyhive
+					? { publicAccess: opts.publicAccess, serverAccess: opts.serverAccess }
+					: undefined,
 			},
 			report,
 			warn,
@@ -168,44 +187,135 @@ program
 		flushWarnings();
 	});
 
-program
-	.command("clone")
-	.description("Clone an automerge URL into a directory")
-	.argument("<url>", "automerge: URL")
-	.argument("<dir>", "Target directory")
-	.option("--server <url>", "Sync server to use for this repo")
-	.option(
-		"--shape <shape>",
-		"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
-		"vfs",
-	)
-	.option(
-		"--artifact-dir <dir>",
-		"Directory whose contents are stored as ImmutableString and pinned with heads in the root doc. Repeatable.",
-		collect,
-		undefined as string[] | undefined,
-	)
-	.action(async (u, dir, opts) => {
+const attachCommand = (name: string, description: string, dirArg: string) =>
+	program
+		.command(name)
+		.description(description)
+		.argument("<url>", "automerge: URL")
+		.argument(dirArg, "Target directory", dirArg === "[dir]" ? "." : undefined)
+		.option("--server <url>", "Sync server to use for this repo")
+		.option(
+			"--shape <shape>",
+			"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
+			"vfs",
+		)
+		.option(
+			"--artifact-dir <dir>",
+			"Directory whose contents are stored as ImmutableString and pinned with heads in the root doc. Repeatable.",
+			collect,
+			undefined as string[] | undefined,
+		);
+
+const attachOpts = (
+	u: string,
+	root: string,
+	opts: { shape: string; artifactDir?: string[]; server?: string },
+) => ({
+	url: u,
+	dir: root,
+	shape: opts.shape,
+	artifactDirectories: opts.artifactDir,
+	server: opts.server,
+	onStrategyDoc: pickStrategyInteractively,
+});
+
+attachCommand("clone", "Clone an automerge URL into a directory", "<dir>").action(
+	async (u, dir, opts) => {
 		dlog("clone url=%s dir=%s opts=%o", u, dir, opts);
 		const root = path.resolve(dir);
 		out.intro("pushwork clone");
 		out.task("Connecting to sync server");
-		const info = await clone(
-			{
-				url: u,
-				dir: root,
-				shape: opts.shape,
-				artifactDirectories: opts.artifactDir,
-				server: opts.server,
-				onStrategyDoc: pickStrategyInteractively,
-			},
-			report,
-		);
+		const info = await clone(attachOpts(u, root, opts), report);
 		out.done(); // complete the final phase line before the summary
 		out.obj(summaryRows(root, info, "downloaded"));
 		out.block("CLONED", info.url);
 		reportSync(info.sync);
 		out.outro("Done");
+	},
+);
+
+attachCommand(
+	"track",
+	"Follow an automerge URL from an existing directory, leaving its files as they are",
+	"[dir]",
+).action(async (u, dir, opts) => {
+	dlog("track url=%s dir=%s opts=%o", u, dir, opts);
+	const root = path.resolve(dir);
+	out.intro("pushwork track");
+	out.task("Connecting to sync server");
+	const info = await track(attachOpts(u, root, opts), report);
+	out.done();
+	out.obj(summaryRows(root, info, "tracked"));
+	out.block("TRACKING", info.url);
+	out.info("the next sync pushes local differences, including files missing here as deletions");
+	out.outro("Done");
+});
+
+attachCommand(
+	"merge",
+	"Join an existing directory with an automerge URL, keeping files from both (local wins)",
+	"[dir]",
+).action(async (u, dir, opts) => {
+	dlog("merge url=%s dir=%s opts=%o", u, dir, opts);
+	const root = path.resolve(dir);
+	out.intro("pushwork merge");
+	out.task("Connecting to sync server");
+	const info = await merge(attachOpts(u, root, opts), report, warn);
+	out.done();
+	out.obj(summaryRows(root, info, "in the url"));
+	out.block("MERGED", info.url);
+	reportSync(info.sync);
+	out.outro("Done");
+	flushWarnings();
+});
+
+program
+	.command("migrate")
+	.description("Upgrade a pushwork 2 repo in place (the old .pushwork is kept in .pushwork/pushwork_migration_backup_safe_to_delete)")
+	.option("--server <url>", "Sync server to use for this repo")
+	.action(async (opts) => {
+		const root = process.cwd();
+		out.intro("pushwork migrate");
+		out.task("Connecting to sync server");
+		const info = await migrate(root, { server: opts.server }, report);
+		out.done();
+		out.obj(summaryRows(root, info, "tracked"));
+		const { diff: d } = await status(root);
+		const total = d.added.length + d.modified.length + d.deleted.length;
+		if (total) {
+			out.warn(
+				`${plural(total, "file")} here differ from the server; the next sync pushes them. Check \`pushwork status\` first.`,
+			);
+		}
+		out.outro("Done");
+	});
+
+const keyhive = program
+	.command("keyhive")
+	.description("Show the keyhive server keyhive repos sync through, and your contact card")
+	.action(async () => {
+		const info = await keyhiveInfo();
+		out.obj({
+			Server: info.serverName ? `${info.server} (${info.serverName})` : info.server,
+			"Server card": info.cardName ? `${info.cardName} (built in)` : "custom",
+			"Server peer": info.serverPeer,
+			"Your id": info.id,
+			"Built in": Object.entries(info.builtIn)
+				.map(([name, url]) => `${name} → ${url}`)
+				.join(", "),
+		});
+		out.info("Your contact card:");
+		out.log(info.me);
+	});
+
+keyhive
+	.command("server")
+	.description("Set the keyhive sync server for new keyhive repos on this machine")
+	.argument("<server>", "A built-in name (keyhive, subduction) or a ws(s):// url")
+	.argument("[card]", "The server's contact card, required with a url: a built-in name, JSON, an http(s) url or a file")
+	.action(async (server, card) => {
+		await setKeyhiveServer(server, card);
+		out.log(`keyhive server set to ${server}`);
 	});
 
 program

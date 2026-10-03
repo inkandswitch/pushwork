@@ -1,6 +1,11 @@
 export {
 	init,
 	clone,
+	track,
+	merge,
+	migrate,
+	keyhiveInfo,
+	setKeyhiveServer,
 	sync,
 	save,
 	status,

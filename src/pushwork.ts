@@ -7,12 +7,13 @@ import {
 	configExists,
 	pushworkDir,
 	readConfig,
+	readOldConfig,
 	storageDir,
 	writeConfig,
 	type PushworkConfig,
 } from "./config.js";
 import { Docs, limiter, type SyncReport } from "./docs.js";
-import type { Hive } from "./keyhive.js";
+import type { AccessLevel, Hive, Settings as KeyhiveSettings } from "./keyhive.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
@@ -88,8 +89,11 @@ export type InitOpts = {
 	artifactDirectories?: readonly string[];
 	online?: boolean; // default: true
 	server?: string;
-	publish?: boolean;
+	/** Protect the repo with keyhive. Without public access, only you can read it. */
+	keyhive?: { publicAccess?: AccessLevel; serverAccess?: AccessLevel };
 };
+
+export const ACCESS_LEVELS: readonly AccessLevel[] = ["relay", "read", "edit", "admin"];
 
 export type CloneOpts = {
 	url: string;
@@ -134,18 +138,111 @@ async function openDocs(
 	});
 }
 
-const isPublished = (url: AutomergeUrl) => isProtected(parseAutomergeUrl(url).documentId);
+const isKeyhive = (url: AutomergeUrl) => isProtected(parseAutomergeUrl(url).documentId);
 
-// Published repos are encrypted with keyhive and sync through the one server that speaks it.
+// Keyhive repos are encrypted with keyhive and sync through the one server that speaks it.
 // ARK is loaded only here, so plain repos never pay for it. The archive is per user, like
 // the key: keyhive breaks when one identity starts over in a fresh archive.
+const pushworkHome = () => path.join(os.homedir(), ".pushwork");
+const settingsFile = () => path.join(pushworkHome(), "keyhive.json");
+
+async function readKeyhiveSettings(): Promise<KeyhiveSettings> {
+	try {
+		return JSON.parse(await fs.readFile(settingsFile(), "utf8"));
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw e;
+	}
+}
+
 async function openHive(seed: Uint8Array, server?: string, reader = false): Promise<Hive> {
 	const { openHive } = await import("./keyhive.js");
-	const hive = await openHive(path.join(os.homedir(), ".pushwork", "keyhive"), seed, reader);
+	const settings = await readKeyhiveSettings();
+	const hive = await openHive(path.join(pushworkHome(), "keyhive"), seed, settings, reader);
 	if (server && server !== hive.server) {
-		throw new Error(`published repos sync through ${hive.server} only`);
+		await hive.close();
+		throw new Error(
+			`keyhive repos sync through the keyhive server (${hive.server}); change it with \`pushwork keyhive server\``,
+		);
 	}
 	return hive;
+}
+
+export type KeyhiveInfo = {
+	server: string;
+	serverName?: string;
+	card: string;
+	cardName?: string;
+	serverPeer: string;
+	/** This machine's keyhive id (base64) and a fresh contact card for it. */
+	id: string;
+	me: string;
+	builtIn: Record<string, string>;
+};
+
+/** The keyhive server keyhive repos use, and this machine's own contact card. */
+export async function keyhiveInfo(): Promise<KeyhiveInfo> {
+	const { SERVERS, DEFAULT_SERVER_NAME, resolveSettings, cardPeerId } = await import("./keyhive.js");
+	const settings = await readKeyhiveSettings();
+	const { url, card } = resolveSettings(settings);
+	const serverName = settings.server ?? DEFAULT_SERVER_NAME;
+	// each contact card carries a fresh share key, so the hive must be saved after making one
+	const hive = await openHive(await loadSeed());
+	try {
+		return {
+			server: url,
+			serverName: SERVERS[serverName] ? serverName : undefined,
+			card,
+			cardName: SERVERS[settings.card ?? serverName] && (settings.card ?? serverName),
+			serverPeer: cardPeerId(card),
+			id: hive.id,
+			me: await hive.contactCard(),
+			builtIn: Object.fromEntries(Object.entries(SERVERS).map(([name, { url }]) => [name, url])),
+		};
+	} finally {
+		await hive.close();
+	}
+}
+
+/**
+ * Set the keyhive sync server: a built-in name (or its url), or any ws(s):// url
+ * with the server's contact card, given as a built-in name, JSON, an http(s) url
+ * or a file.
+ */
+export async function setKeyhiveServer(server: string, card?: string): Promise<void> {
+	const { SERVERS, cardPeerId } = await import("./keyhive.js");
+	const named = Object.entries(SERVERS).find(([name, { url }]) => server === name || server === url)?.[0];
+	if (!named && !/^wss?:\/\//.test(server)) {
+		throw new Error(`expected ${Object.keys(SERVERS).join(", ")} or a ws(s):// url, got ${server}`);
+	}
+	if (!card) {
+		if (!named) throw new Error(`a server url needs its contact card: pushwork keyhive server ${server} <card>`);
+		return writeKeyhiveSettings({ server: named });
+	}
+	const url = named ? SERVERS[named].url : server;
+	if (SERVERS[card]) return writeKeyhiveSettings({ server: url, card });
+	const json = await readCard(card);
+	try {
+		cardPeerId(json);
+	} catch {
+		throw new Error(`${card} is not a keyhive contact card`);
+	}
+	await writeKeyhiveSettings({ server: url, card: json });
+}
+
+async function readCard(card: string): Promise<string> {
+	if (card.trimStart().startsWith("{")) return card.trim();
+	if (/^https?:\/\//.test(card)) {
+		const res = await fetch(card);
+		if (!res.ok) throw new Error(`fetching ${card}: ${res.status} ${res.statusText}`);
+		return (await res.text()).trim();
+	}
+	return (await fs.readFile(card, "utf8")).trim();
+}
+
+async function writeKeyhiveSettings(settings: KeyhiveSettings): Promise<void> {
+	await fs.mkdir(pushworkHome(), { recursive: true });
+	await fs.writeFile(settingsFile(), JSON.stringify(settings, null, 2) + "\n");
 }
 
 // a reader (status, diff, cut...) changes no docs, so it leaves the keyhive archive alone
@@ -153,17 +250,16 @@ async function openRepo(cwd: string, { online = false, reader = false } = {}) {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 	const seed = await loadSeed();
-	const hive = isPublished(config.rootUrl) ? await openHive(seed, config.server, reader) : undefined;
+	const hive = isKeyhive(config.rootUrl) ? await openHive(seed, config.server, reader) : undefined;
 	const server = online ? (hive?.server ?? config.server ?? DEFAULT_SERVER) : undefined;
-	const docs = await openDocs(root, seed, server, hive, config.publishGroup);
-	return { root, config, docs, hive };
+	const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
+	const docs = await openDocs(root, seed, server, hive, group);
+	return { root, config, docs, hive, group };
 }
 
-// Only the publisher writes a published repo; everyone else pulls.
-const canWrite = async (config: PushworkConfig, hive?: Hive) =>
-	!hive ||
-	(config.publishGroup !== undefined &&
-		(await hive.canWrite(parseAutomergeUrl(config.rootUrl).documentId)));
+// In a keyhive repo, only those with edit access (and the group, to add docs to) write.
+const canWrite = async (config: PushworkConfig, hive?: Hive, group?: string) =>
+	!hive || (group !== undefined && (await hive.canWrite(parseAutomergeUrl(config.rootUrl).documentId)));
 
 // The server drops docs whose keyhive membership it hasn't seen, so that goes first.
 async function syncAll(docs: Docs, hive?: Hive): Promise<void> {
@@ -226,7 +322,7 @@ export async function init(
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	if (opts.publish && opts.server) throw new Error("--publish can't be used with --server");
+	if (opts.keyhive && opts.server) throw new Error("--keyhive can't be used with --server");
 	// An existing `.pushworkattributes` is authoritative; keep config.json's list empty.
 	const attrs = await readAttributes(root);
 	if (attrs?.hasArtifactRules && opts.artifactDirectories?.length) {
@@ -243,8 +339,11 @@ export async function init(
 		: (p) => isInArtifactDir(p, artifactDirs);
 
 	const seed = await loadSeed();
-	const hive = opts.publish ? await openHive(seed) : undefined;
-	const group = await hive?.createPublicGroup();
+	const hive = opts.keyhive ? await openHive(seed) : undefined;
+	const group = await hive?.createGroup({
+		public: opts.keyhive?.publicAccess,
+		server: opts.keyhive?.serverAccess ?? "relay",
+	});
 	const server = online ? (hive?.server ?? opts.server ?? DEFAULT_SERVER) : undefined;
 	const docs = await openDocs(root, seed, server, hive, group);
 	try {
@@ -268,7 +367,6 @@ export async function init(
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 			...(opts.server ? { server: opts.server } : {}),
-			...(group ? { publishGroup: group } : {}),
 		});
 		return { url, files: fsFiles.size, sync: await summarize(docs, url) };
 	} finally {
@@ -277,23 +375,24 @@ export async function init(
 	}
 }
 
-export async function clone(
-	opts: CloneOpts,
-	report: Reporter = noReport,
-): Promise<RepoSummary> {
+type Attach = "clone" | "track" | "merge";
+
+// Sets up `opts.dir` to follow an existing url. clone makes the directory match
+// it; track leaves the directory alone; merge writes the files only the url has.
+async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<RepoSummary> {
 	if (!isValidAutomergeUrl(opts.url)) {
 		throw new Error(`invalid automerge URL: ${opts.url}`);
 	}
 	const url = stripHeads(opts.url);
 	const root = path.resolve(opts.dir);
-	dlog("clone url=%s root=%s shape=%s", url, root, opts.shape);
+	dlog("%s url=%s root=%s shape=%s", mode, url, root, opts.shape);
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
 	const seed = await loadSeed();
-	const hive = isPublished(url) ? await openHive(seed, opts.server) : undefined;
+	const hive = isKeyhive(url) ? await openHive(seed, opts.server) : undefined;
 	const server = hive?.server ?? opts.server ?? DEFAULT_SERVER;
 	const docs = await openDocs(root, seed, server, hive);
 	try {
@@ -302,11 +401,25 @@ export async function clone(
 		}
 		report("Fetching repository");
 		await hive?.sync(docs);
+		if (hive && !(await docs.find(url).then(() => true, () => false))) {
+			throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
+		}
 		const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
 		const tree = await shape.decode({ docs, root: url });
 		const files = flattenLeaves(tree).size;
 		report(`Downloading ${plural(files, "file")}`);
-		await materializeTree(docs, root, tree);
+		if (mode === "clone") {
+			await materializeTree(docs, root, tree);
+		} else {
+			const remote = await readFileBytes(docs, tree);
+			if (mode === "merge") {
+				const present = await walk(root);
+				for (const [posixPath, { bytes }] of remote) {
+					if (present.has(posixPath)) continue;
+					await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
+				}
+			}
+		}
 
 		// If the repo carries its own artifact attributes, config.json defers to them.
 		const attrs = await readAttributes(root);
@@ -325,6 +438,68 @@ export async function clone(
 		await docs.close();
 		await hive?.close();
 	}
+}
+
+export const clone = (opts: CloneOpts, report: Reporter = noReport) =>
+	attach(opts, "clone", report);
+
+export const MIGRATION_BACKUP = "pushwork_migration_backup_safe_to_delete";
+
+/**
+ * Upgrade a pushwork 2 repo in place. The old `.pushwork` contents move to
+ * `.pushwork/${MIGRATION_BACKUP}/`, then the root url is tracked afresh.
+ * Nothing is pushed: the next `sync` publishes whatever differs, so check `status` first.
+ */
+export async function migrate(
+	cwd: string,
+	opts: { server?: string } = {},
+	report: Reporter = noReport,
+): Promise<RepoSummary> {
+	const root = path.resolve(cwd);
+	const old = await readOldConfig(root);
+	if (!old) throw new Error("this repo is already up to date");
+	const dir = pushworkDir(root);
+	const backup = path.join(dir, MIGRATION_BACKUP);
+	const moved = (await fs.readdir(dir)).filter((name) => name !== MIGRATION_BACKUP);
+	await fs.mkdir(backup, { recursive: true });
+	for (const name of moved) await fs.rename(path.join(dir, name), path.join(backup, name));
+	try {
+		return await attach(
+			{
+				url: old.rootUrl,
+				dir: root,
+				shape: old.shape,
+				artifactDirectories: old.artifactDirectories,
+				server: opts.server,
+			},
+			"track",
+			report,
+		);
+	} catch (e) {
+		await fs.rm(storageDir(root), { recursive: true, force: true });
+		for (const name of moved) await fs.rename(path.join(backup, name), path.join(dir, name));
+		await fs.rmdir(backup);
+		throw e;
+	}
+}
+
+/** Follow `opts.url` from `opts.dir` without touching the files in it. */
+export const track = (opts: CloneOpts, report: Reporter = noReport) =>
+	attach(opts, "track", report);
+
+/**
+ * Join `opts.dir` and `opts.url` without losing anything on either side: files
+ * only the url has are written to disk, then a sync pushes the local files.
+ * Where both have a file, the local copy wins.
+ */
+export async function merge(
+	opts: CloneOpts,
+	report: Reporter = noReport,
+	warn: Warn = noWarn,
+): Promise<RepoSummary> {
+	const { url, files } = await attach(opts, "merge", report);
+	const sync = await commitWorkdir(path.resolve(opts.dir), true, report, warn);
+	return { url, files, sync };
 }
 
 type RootDoc = {
@@ -371,7 +546,7 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 // Inside a repo, yoink/yeet use its server but not its storage: a doc the repo tracks
 // that changed underneath it would look like a local edit to its next sync and be undone.
 async function openDetached(root: string, url: AutomergeUrl, server?: string): Promise<Docs> {
-	if (isPublished(url)) throw new Error("yoink and yeet don't support published docs");
+	if (isKeyhive(url)) throw new Error("yoink and yeet don't support keyhive docs");
 	const config = (await configExists(root)) ? await readConfig(root) : undefined;
 	return Docs.open({
 		storage: new MemoryStorage(),
@@ -443,10 +618,10 @@ export async function sync(
 	warn: Warn = noWarn,
 ): Promise<SyncSummary> {
 	if (!opts.nuclear) return commitWorkdir(cwd, true, report, warn);
-	const { root, config, docs, hive } = await openRepo(cwd, { online: true });
+	const { root, config, docs, hive, group } = await openRepo(cwd, { online: true });
 	try {
 		report("Recreating documents");
-		await nuclearize(docs, root, config, hive, warn);
+		await nuclearize(docs, root, config, hive, group, warn);
 		if (docs.online) report("Publishing to sync server");
 		await syncAll(docs, hive);
 		return await summarize(docs, config.rootUrl);
@@ -461,17 +636,24 @@ export async function sync(
  * Anyone holding an old file URL keeps it; this repo stops referencing it.
  */
 export async function nuclearizeRepo(cwd: string, warn: Warn = noWarn): Promise<void> {
-	const { root, config, docs, hive } = await openRepo(cwd);
+	const { root, config, docs, hive, group } = await openRepo(cwd);
 	try {
-		await nuclearize(docs, root, config, hive, warn);
+		await nuclearize(docs, root, config, hive, group, warn);
 	} finally {
 		await docs.close();
 		await hive?.close();
 	}
 }
 
-async function nuclearize(docs: Docs, root: string, config: PushworkConfig, hive: Hive | undefined, warn: Warn) {
-	if (!(await canWrite(config, hive))) throw new Error("read-only repo");
+async function nuclearize(
+	docs: Docs,
+	root: string,
+	config: PushworkConfig,
+	hive: Hive | undefined,
+	group: string | undefined,
+	warn: Warn,
+) {
+	if (!(await canWrite(config, hive, group))) throw new Error("read-only repo");
 	const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
 	const shape = await resolveShape(config.shape);
 	const oldTree = await shape.decode({ docs, root: config.rootUrl });
@@ -510,7 +692,7 @@ async function commitWorkdir(
 	report: Reporter,
 	warn: Warn,
 ): Promise<SyncSummary> {
-	const { root, config, docs, hive } = await openRepo(cwd, { online });
+	const { root, config, docs, hive, group } = await openRepo(cwd, { online });
 	dlog("commit online=%s root=%s", online, root);
 	try {
 		const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
@@ -522,7 +704,7 @@ async function commitWorkdir(
 		const prevFiles = await readFileBytes(docs, prevTree);
 		report("Scanning working tree");
 		const fsFiles = await walk(root);
-		const writable = await canWrite(config, hive);
+		const writable = await canWrite(config, hive, group);
 		let tree = prevTree;
 		if (writable) {
 			report(online ? "Committing local changes" : "Writing documents");
@@ -739,12 +921,17 @@ async function refreshPins(
 }
 
 async function readFileBytes(docs: Docs, tree: VfsNode): Promise<Files> {
-	const out: Files = new Map();
-	for (const [posixPath, url] of flattenLeaves(tree)) {
-		const doc = await docs.find<UnixFileEntry>(url);
-		out.set(posixPath, { url, bytes: contentToBytes(doc.content) });
-	}
-	return out;
+	const limit = limiter(16);
+	const leaves = [...flattenLeaves(tree)];
+	const docsByLeaf = await Promise.all(
+		leaves.map(([, url]) => limit(() => docs.find<UnixFileEntry>(url))),
+	);
+	return new Map(
+		leaves.map(([posixPath, url], i) => [
+			posixPath,
+			{ url, bytes: contentToBytes(docsByLeaf[i].content) },
+		]),
+	);
 }
 
 // Make the working tree match `tree`: write what differs, delete what's not in it.

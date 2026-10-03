@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { readConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
+import { readConfig, readOldConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
 
 const url = "automerge:qLoujReChD4mrphFKSHcteTf7m";
 
@@ -36,16 +36,47 @@ describe("config", () => {
 		expect(config.artifactDirectories).toEqual([]);
 	});
 
-	it("asks v5 subduction repos to re-clone", async () => {
-		const root = await withConfig({ version: 5, rootUrl: url, backend: "subduction", shape: "patchwork-folder" });
-		await expect(readConfig(root)).rejects.toThrow(
-			`Run \`npx pushwork@2 sync\` to publish any local edits, then \`pushwork clone ${url} <newdir> --shape patchwork-folder\``,
-		);
+	it("points old configs at migrate", async () => {
+		const root = await withConfig({ version: 5, rootUrl: url, backend: "subduction", shape: "vfs" });
+		await expect(readConfig(root)).rejects.toThrow("run `pushwork migrate`");
 	});
 
-	it("asks original subduction repos to re-clone as folders", async () => {
-		const root = await withConfig({ root_directory_url: url, subduction: true });
-		await expect(readConfig(root)).rejects.toThrow(`pushwork clone ${url} <newdir> --shape patchwork-folder`);
+	it("reads what migrate needs from a v5 config", async () => {
+		const root = await withConfig({
+			version: 5,
+			rootUrl: url,
+			backend: "subduction",
+			shape: "patchwork-folder",
+			artifactDirectories: ["out"],
+		});
+		expect(await readOldConfig(root)).toEqual({
+			rootUrl: url,
+			shape: "patchwork-folder",
+			artifactDirectories: ["out"],
+		});
+	});
+
+	it("reads original pushwork configs as folders", async () => {
+		const root = await withConfig({ root_directory_url: url, subduction: true, artifact_directories: ["dist"] });
+		expect(await readOldConfig(root)).toEqual({
+			rootUrl: url,
+			shape: "patchwork-folder",
+			artifactDirectories: ["dist"],
+		});
+	});
+
+	it("finds an original repo's root url in snapshot.json", async () => {
+		const root = await withConfig({ subduction: true });
+		await fs.writeFile(
+			path.join(root, ".pushwork", "snapshot.json"),
+			JSON.stringify({ rootDirectoryUrl: url }),
+		);
+		expect((await readOldConfig(root))?.rootUrl).toBe(url);
+	});
+
+	it("has nothing to migrate in a v6 config", async () => {
+		const root = await withConfig({ version: 6, rootUrl: url, shape: "vfs" });
+		expect(await readOldConfig(root)).toBeUndefined();
 	});
 
 	it("asks legacy repos to republish", async () => {
@@ -54,7 +85,7 @@ describe("config", () => {
 			{ rootUrl: url, backend: "legacy" },
 			{ root_directory_url: url, sync_server: "wss://sync3.automerge.org" },
 		]) {
-			await expect(readConfig(await withConfig(config))).rejects.toThrow(
+			await expect(readOldConfig(await withConfig(config))).rejects.toThrow(
 				"retired sync3 server; `rm -rf .pushwork && pushwork init`",
 			);
 		}

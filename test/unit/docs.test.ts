@@ -165,7 +165,8 @@ describe("Docs offline", () => {
 		expect(await third.find<Counter>(url)).toEqual(doc);
 		expect(await third.heads(url)).toEqual(A.getHeads(doc));
 		await third.close();
-	});
+		// a fragment forms on about one change in 256, and every change is saved with fsyncs
+	}, 180_000);
 });
 
 describe("Docs online", () => {
