@@ -220,9 +220,13 @@ A _shape_ controls how the directory tree is encoded into Automerge documents.
 | --- | --- | --- |
 | VFS _(default)_ | `vfs` | A single directory doc (`@patchwork.type: "directory"`) whose keys are posix file paths mapping to file-doc URLs. |
 | Patchwork folder | `patchwork-folder` | A recursive folder-of-docs (`@patchwork.type: "folder"`) compatible with Patchwork and original pushwork repos. |
-| Custom | _module path_ | A module with a `default` export implementing `{ encode, decode }`. |
+| Custom | _module path_ | A module whose `default` export is `{ encode, decode }`: `encode` turns files (a `Map` of posix path to bytes) into a root doc, `decode` reads them back. See [`design/shapes.md`](./design/shapes.md). |
 
-Select a shape with `--shape` at `init`/`clone`.
+Select a shape with `--shape` at `init`/`clone`. [`examples/shapes/slay.js`](./examples/shapes/slay.js) is a custom shape for [slaygrounds](https://github.com/chee/slaygrounds) projects, which keep their files inline in one document:
+
+```sh
+pushwork clone --sync-server wss://galaxy.observer --shape examples/shapes/slay.js automerge:... my-project
+```
 
 ## Stashing changes
 

@@ -1,5 +1,6 @@
 import { log } from "../log.js";
 import { isValidAutomergeUrl } from "../url.js";
+import { readFileDocs, writeFileDocs } from "./file-docs.js";
 import { flattenLeaves, newDir, setFileAt, type Shape } from "./types.js";
 
 const dlog = log("shapes:vfs");
@@ -25,9 +26,9 @@ const isDirectoryDoc = (doc: unknown): doc is DirectoryDoc => {
 const RESERVED = new Set([META, "lastSyncAt"]);
 
 export const vfsShape: Shape = {
-	async encode({ docs, tree, previousRoot, title }) {
-		if (tree.kind !== "dir") throw new Error("vfs: root must be a dir");
-		const flat = flattenLeaves(tree);
+	async encode({ docs, files, previousRoot, title, isArtifact = () => false, fresh }) {
+		const previous = previousRoot && !fresh ? await vfsShape.decode({ docs, root: previousRoot }) : undefined;
+		const flat = flattenLeaves(await writeFileDocs(docs, files, previous, isArtifact));
 		dlog("encode keys=%d previousRoot=%s", flat.size, previousRoot ?? "<new>");
 
 		const url =
@@ -66,6 +67,6 @@ export const vfsShape: Shape = {
 			setFileAt(tree, segments, value);
 		}
 		dlog("decode url=%s", root);
-		return tree;
+		return readFileDocs(docs, tree);
 	},
 };

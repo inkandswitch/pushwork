@@ -14,16 +14,26 @@ export type UnixFileEntry = {
 	name: string;
 };
 
+/** A file's bytes, and the doc that holds it when it has one of its own. */
+export type File = { bytes: Uint8Array; url?: AutomergeUrl };
+
+/**
+ * How a tree of files is laid out in documents. A shape maps a root doc to
+ * files by posix path and back; whether a file gets a doc of its own is up to it.
+ */
 export interface Shape {
 	encode(args: {
 		docs: Docs;
-		tree: VfsNode;
+		files: Map<string, Uint8Array>;
+		/** The root to update; without it, make a new one. */
 		previousRoot?: AutomergeUrl;
 		title?: string;
-		// shapes with a doc per directory pin links to artifact dirs
-		isArtifactDir?: (posixPath: string) => boolean;
+		/** Artifact paths (files or directories) are frozen: linked pinned to their heads. */
+		isArtifact?: (posixPath: string) => boolean;
+		/** Make every document afresh rather than reusing the ones under `previousRoot`. */
+		fresh?: boolean;
 	}): Promise<AutomergeUrl>;
-	decode(args: { docs: Docs; root: AutomergeUrl }): Promise<VfsNode>;
+	decode(args: { docs: Docs; root: AutomergeUrl }): Promise<Map<string, File>>;
 }
 
 export const newDir = (): VfsNode => ({ kind: "dir", entries: new Map() });

@@ -12,7 +12,7 @@ import {
 	writeConfig,
 	type PushworkConfig,
 } from "./config.js";
-import { Docs, limiter, type SyncReport } from "./docs.js";
+import { Docs, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, Settings as KeyhiveSettings } from "./keyhive.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
@@ -38,20 +38,16 @@ import {
 } from "./snarf.js";
 import {
 	applyFileEntry,
-	contentToBytes,
-	flattenLeaves,
 	isInArtifactDir,
 	makeFileEntry,
-	newDir,
 	normalizeArtifactDir,
 	patchworkFolderShape,
 	readFileEntry,
 	resolveShape,
-	setFileAt,
 	vfsShape,
+	type File,
 	type Shape,
 	type UnixFileEntry,
-	type VfsNode,
 } from "./shapes/index.js";
 import { loadCustomShape } from "./shapes/custom.js";
 
@@ -72,7 +68,7 @@ const noWarn: Warn = () => {};
 /** Whether a repo-relative posix path is an artifact (immutable, heads-pinned). */
 type IsArtifact = (posixPath: string) => boolean;
 
-type Files = Map<string, { url: AutomergeUrl; bytes: Uint8Array }>;
+type Files = Map<string, File>;
 
 /** The server's verdict plus the root doc's heads (bs58check, as in URLs). */
 export type SyncSummary = SyncReport & { url: AutomergeUrl; heads: string[] };
@@ -302,9 +298,8 @@ async function loadSavedTree(cwd: string) {
 	};
 	try {
 		const shape = await resolveShape(config.shape);
-		const tree = await shape.decode({ docs, root: config.rootUrl });
-		const files = await readFileBytes(docs, tree);
-		return { root, config, docs, shape, tree, files, close };
+		const files = await readSaved(docs, shape, config.rootUrl);
+		return { root, config, docs, shape, files, close };
 	} catch (e) {
 		await close();
 		throw e;
@@ -377,12 +372,8 @@ export async function init(
 		report("Reading working tree");
 		const fsFiles = await walk(root);
 		report(`Encoding ${plural(fsFiles.size, "file")}`);
-		const tree = await pushFiles(docs, fsFiles, undefined, isArtifact);
-		const url = await shape.encode({
-			docs,
-			tree,
+		const url = await writeFiles(docs, shape, fsFiles, undefined, isArtifact, {
 			title: path.basename(root) || undefined,
-			isArtifactDir: isArtifact,
 		});
 		dlog("init root doc %s", url);
 		if (docs.online) report(`Publishing ${plural(fsFiles.size, "file")} to the sync server`);
@@ -436,19 +427,16 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 			throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
 		}
 		const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
-		const tree = await shape.decode({ docs, root: url });
-		const files = flattenLeaves(tree).size;
-		report(`Downloading ${plural(files, "file")}`);
+		report("Downloading files");
+		const remote = await readSaved(docs, shape, url);
+		const files = remote.size;
 		if (mode === "clone") {
-			await materializeTree(docs, root, tree);
-		} else {
-			const remote = await readFileBytes(docs, tree);
-			if (mode === "merge") {
-				const present = await walk(root);
-				for (const [posixPath, { bytes }] of remote) {
-					if (present.has(posixPath)) continue;
-					await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
-				}
+			await materialize(root, remote);
+		} else if (mode === "merge") {
+			const present = await walk(root);
+			for (const [posixPath, { bytes }] of remote) {
+				if (present.has(posixPath)) continue;
+				await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
 			}
 		}
 
@@ -688,25 +676,14 @@ async function nuclearize(
 	if (!(await canWrite(config, hive, group))) throw new Error("read-only repo");
 	const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
 	const shape = await resolveShape(config.shape);
-	const oldTree = await shape.decode({ docs, root: config.rootUrl });
-	const tree = newDir();
-	for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
-		const old = await docs.find<UnixFileEntry>(stripHeads(fileUrl));
-		const url = await docs.create<UnixFileEntry>({
-			"@patchwork": { type: "file" },
-			name: old.name,
-			extension: old.extension,
-			mimeType: old.mimeType,
-			content: old.content,
-		});
-		setFileAt(tree, posixPath.split("/"), isArtifact(posixPath) ? await docs.pin(url) : url);
-	}
+	const saved = await shape.decode({ docs, root: config.rootUrl });
 	await shape.encode({
 		docs,
-		tree,
+		files: bytesOf(saved),
 		previousRoot: config.rootUrl,
 		title: path.basename(root) || undefined,
-		isArtifactDir: isArtifact,
+		isArtifact,
+		fresh: true,
 	});
 }
 
@@ -732,18 +709,13 @@ async function commitWorkdir(
 		const rootUrl = config.rootUrl;
 
 		// diff against the last local state, not the server's
-		const prevTree = await shape.decode({ docs, root: rootUrl });
-		const prevFiles = await readFileBytes(docs, prevTree);
+		const prevFiles = await readSaved(docs, shape, rootUrl);
 		report("Scanning working tree");
 		const fsFiles = await walk(root);
 		const writable = await canWrite(config, hive, group);
-		let tree = prevTree;
 		if (writable) {
 			report(online ? "Committing local changes" : "Writing documents");
-			tree = await pushFiles(docs, fsFiles, prevFiles, isArtifact);
-			if (!sameTree(prevTree, tree)) {
-				await shape.encode({ docs, tree, previousRoot: rootUrl, isArtifactDir: isArtifact });
-			}
+			await writeFiles(docs, shape, fsFiles, prevFiles, isArtifact, { previousRoot: rootUrl });
 		} else if (changes(prevFiles, fsFiles).length) {
 			throw new Error("read-only repo; `pushwork cut` your changes first");
 		}
@@ -751,13 +723,13 @@ async function commitWorkdir(
 		if (docs.online) {
 			report("Syncing with server");
 			await syncAll(docs, hive);
-			if (writable && [...flattenLeaves(tree).keys()].some(isArtifact)) {
+			if (writable && [...fsFiles.keys()].some(isArtifact)) {
 				const moved = await refreshPins(docs, rootUrl, shape, isArtifact);
 				if (moved.length) await docs.sync(moved);
 			}
 			report("Writing changes");
 		}
-		await materializeTree(docs, root, await shape.decode({ docs, root: rootUrl }));
+		await materialize(root, await readSaved(docs, shape, rootUrl));
 		return await summarize(docs, rootUrl);
 	} finally {
 		await docs.close();
@@ -776,7 +748,7 @@ export type HeadsEntry = {
  * path exactly or as a folder prefix; "/" shows only the root doc.
  */
 export async function heads(cwd: string, pathspec?: string): Promise<HeadsEntry[]> {
-	const { config, docs, tree, close } = await loadSavedTree(cwd);
+	const { config, docs, files, close } = await loadSavedTree(cwd);
 	try {
 		const entries: HeadsEntry[] = [];
 		const add = async (p: string, url: AutomergeUrl) => {
@@ -785,7 +757,7 @@ export async function heads(cwd: string, pathspec?: string): Promise<HeadsEntry[
 			}
 		};
 		await add("/", config.rootUrl);
-		for (const [p, url] of flattenLeaves(tree)) await add(p, url);
+		for (const [p, { url }] of files) if (url) await add(p, url);
 		return entries.sort((a, b) => a.path.localeCompare(b.path));
 	} finally {
 		await close();
@@ -831,7 +803,7 @@ export async function cutWorkdir(
 	cwd: string,
 	opts: { name?: string } = {},
 ): Promise<{ id: number; entries: number }> {
-	const { root, docs, tree, changes, close } = await workdirChanges(cwd);
+	const { root, files, changes, close } = await workdirChanges(cwd);
 	try {
 		if (changes.length === 0) throw new Error("nothing to cut: working tree clean");
 		const snarf = await appendSnarf(root, {
@@ -842,7 +814,7 @@ export async function cutWorkdir(
 				...(c.after ? { contentBase64: encodeBytes(c.after) } : {}),
 			})),
 		});
-		await materializeTree(docs, root, tree);
+		await materialize(root, files);
 		return { id: snarf.id, entries: changes.length };
 	} finally {
 		await close();
@@ -904,87 +876,53 @@ function changes(saved: Files, current: FileTree): Change[] {
 }
 
 // Edited files change their doc in place, so file URLs stay stable.
-async function pushFiles(
-	docs: Docs,
-	fsFiles: FileTree,
-	saved: Files | undefined,
-	isArtifact: IsArtifact,
-): Promise<VfsNode> {
-	const tree = newDir();
-	for (const [posixPath, bytes] of fsFiles) {
-		const artifact = isArtifact(posixPath);
-		const fresh = makeFileEntry(posixPath, bytes, artifact);
-		const prev = saved?.get(posixPath);
-		let url: AutomergeUrl;
-		if (!prev) {
-			url = await docs.create(fresh);
-		} else {
-			url = stripHeads(prev.url);
-			if (!byteEq(prev.bytes, bytes)) {
-				await docs.change<UnixFileEntry>(url, (d) => applyFileEntry(d, fresh));
-			}
-		}
-		setFileAt(tree, posixPath.split("/"), artifact ? await docs.pin(url) : url);
-	}
-	return tree;
-}
 
 // Re-pin artifact leaves to their docs' current (post-merge) heads. Returns the docs that moved.
+// Encode the saved files again so artifacts pin to the heads sync brought in;
+// returns the docs that changed.
 async function refreshPins(
 	docs: Docs,
 	rootUrl: AutomergeUrl,
 	shape: Shape,
 	isArtifact: IsArtifact,
 ): Promise<AutomergeUrl[]> {
-	const tree = newDir();
-	let moved = false;
-	for (const [p, url] of flattenLeaves(await shape.decode({ docs, root: rootUrl }))) {
-		const pinned = isArtifact(p) ? await docs.pin(url) : url;
-		moved ||= pinned !== url;
-		setFileAt(tree, p.split("/"), pinned);
-	}
-	if (!moved) return [];
 	const headsOf = async () =>
 		new Map(await Promise.all(docs.urls().map(async (u) => [u, (await docs.heads(u)).join()] as const)));
+	const files = bytesOf(await shape.decode({ docs, root: rootUrl }));
 	const before = await headsOf();
-	await shape.encode({ docs, tree, previousRoot: rootUrl, isArtifactDir: isArtifact });
+	await shape.encode({ docs, files, previousRoot: rootUrl, isArtifact });
 	const after = await headsOf();
 	return [...after].filter(([u, h]) => before.get(u) !== h).map(([u]) => u);
 }
 
-async function readFileBytes(docs: Docs, tree: VfsNode): Promise<Files> {
-	const limit = limiter(16);
-	const leaves = [...flattenLeaves(tree)];
-	const docsByLeaf = await Promise.all(
-		leaves.map(([, url]) => limit(() => docs.find<UnixFileEntry>(url))),
-	);
-	return new Map(
-		leaves.map(([posixPath, url], i) => [
-			posixPath,
-			{ url, bytes: contentToBytes(docsByLeaf[i].content) },
-		]),
-	);
+const readSaved = (docs: Docs, shape: Shape, root: AutomergeUrl): Promise<Files> => shape.decode({ docs, root });
+
+const bytesOf = (files: Files) => new Map([...files].map(([p, { bytes }]) => [p, bytes]));
+
+// Write the working tree's files into a root (a new one without `previousRoot`),
+// leaving the root alone when nothing changed.
+async function writeFiles(
+	docs: Docs,
+	shape: Shape,
+	fsFiles: FileTree,
+	saved: Files | undefined,
+	isArtifact: IsArtifact,
+	{ previousRoot, title }: { previousRoot?: AutomergeUrl; title?: string },
+): Promise<AutomergeUrl> {
+	if (previousRoot && saved && changes(saved, fsFiles).length === 0) return previousRoot;
+	return shape.encode({ docs, files: fsFiles, previousRoot, title, isArtifact });
 }
 
 // Make the working tree match `tree`: write what differs, delete what's not in it.
-async function materializeTree(docs: Docs, root: string, tree: VfsNode): Promise<void> {
-	const desired = new Map<string, Uint8Array>();
-	const limit = limiter(16);
-	await Promise.all(
-		[...flattenLeaves(tree)].map(([posixPath, url]) =>
-			limit(async () => {
-				const doc = await docs.find<UnixFileEntry>(url);
-				desired.set(posixPath, contentToBytes(doc.content));
-			}),
-		),
-	);
+// Make the working tree hold exactly `files`.
+async function materialize(root: string, files: Files): Promise<void> {
 	const present = await walk(root);
-	for (const [posixPath, bytes] of desired) {
+	for (const [posixPath, { bytes }] of files) {
 		if (byteEq(present.get(posixPath), bytes)) continue;
 		await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
 	}
 	for (const posixPath of present.keys()) {
-		if (desired.has(posixPath)) continue;
+		if (files.has(posixPath)) continue;
 		await fs.rm(path.join(root, fromPosix(posixPath)), { force: true });
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
@@ -1001,12 +939,5 @@ async function pruneEmptyDirs(root: string, relDir: string): Promise<void> {
 	}
 }
 
-function sameTree(a: VfsNode, b: VfsNode): boolean {
-	const av = flattenLeaves(a);
-	const bv = flattenLeaves(b);
-	if (av.size !== bv.size) return false;
-	for (const [k, v] of av) if (bv.get(k) !== v) return false;
-	return true;
-}
 
 export const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;

@@ -2,6 +2,7 @@ import * as path from "path";
 import type { Docs } from "../docs.js";
 import { log } from "../log.js";
 import { isValidAutomergeUrl, stripHeads, type AutomergeUrl } from "../url.js";
+import { readFileDocs, writeFileDocs } from "./file-docs.js";
 import { type Shape, type VfsNode } from "./types.js";
 
 const dlog = log("shapes:folder");
@@ -42,14 +43,15 @@ const childPath = (dirPath: string, name: string) =>
 	dirPath ? `${dirPath}/${name}` : name;
 
 export const patchworkFolderShape: Shape = {
-	async encode({ docs, tree, previousRoot, isArtifactDir = () => false }) {
-		if (tree.kind !== "dir") throw new Error("folder: root must be a dir");
+	async encode({ docs, files, previousRoot, isArtifact = () => false, fresh }) {
+		const previous = previousRoot && !fresh ? await patchworkFolderShape.decode({ docs, root: previousRoot }) : undefined;
+		const tree = await writeFileDocs(docs, files, previous, isArtifact);
 		if (previousRoot) {
 			dlog("encode reusing root=%s", previousRoot);
-			await syncFolder(docs, previousRoot, tree, "", isArtifactDir);
+			await syncFolder(docs, previousRoot, tree, "", isArtifact);
 			return previousRoot;
 		}
-		const url = await createFolder(docs, tree, "pushwork", "", isArtifactDir);
+		const url = await createFolder(docs, tree, "pushwork", "", isArtifact);
 		dlog("encode new root=%s", url);
 		return url;
 	},
@@ -58,7 +60,7 @@ export const patchworkFolderShape: Shape = {
 		const doc = await docs.find(root);
 		if (!isFolderDoc(doc)) throw new Error(`expected folder doc at ${root}`);
 		dlog("decode root=%s", root);
-		return readFolder(docs, doc);
+		return readFileDocs(docs, await readFolder(docs, doc));
 	},
 };
 

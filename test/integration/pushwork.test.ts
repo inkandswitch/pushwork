@@ -195,6 +195,31 @@ describe("pushwork", () => {
 		});
 	});
 
+	describe("slay shape", () => {
+		const slay = path.join(__dirname, "..", "..", "examples", "shapes", "slay.js");
+
+		it("round-trips nested, binary and deleted files, and merges concurrent text edits", async () => {
+			const a = await dir("a");
+			await fs.mkdir(path.join(a, "lib"));
+			await fs.writeFile(path.join(a, "entry.tsx"), "one\ntwo\nthree\n");
+			await fs.writeFile(path.join(a, "lib", "util.ts"), "export {}");
+			await fs.writeFile(path.join(a, "logo.png"), Buffer.from([0x89, 0x50, 0x00, 0xff]));
+			await fs.writeFile(path.join(a, "doomed.txt"), "bye");
+			await pushwork(["init", "--sync-server", server, "--shape", slay], a);
+			const b = path.join(work, "b");
+			await pushwork(["clone", "--sync-server", server, "--shape", slay, await urlOf(a), b]);
+			expect(await userFiles(b)).toEqual(await userFiles(a));
+
+			await fs.writeFile(path.join(a, "entry.tsx"), "ONE\ntwo\nthree\n");
+			await fs.rm(path.join(a, "doomed.txt"));
+			await fs.writeFile(path.join(b, "entry.tsx"), "one\ntwo\nTHREE\n");
+			await sync(a, b, a);
+			expect(await readText(path.join(a, "entry.tsx"))).toBe("ONE\ntwo\nTHREE\n");
+			expect(await userFiles(b)).toEqual(await userFiles(a));
+			expect(await exists(path.join(b, "doomed.txt"))).toBe(false);
+		});
+	});
+
 	describe("sync", () => {
 		it("propagates a new file from A to B", async () => {
 			const { a, b } = await pair();

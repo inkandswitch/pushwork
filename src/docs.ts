@@ -120,6 +120,9 @@ export class Docs {
 		return new Docs(node, options, options.server ? await connect(node, options.signer, options.server) : {});
 	}
 
+	/** Automerge's updateText, for use inside `change` by code (such as a custom shape) that can't import pushwork's Automerge. */
+	readonly updateText = A.updateText;
+
 	/** Connect to another server, such as a keyhive server, that docs don't sync with. */
 	async connect(server: string): Promise<void> {
 		const { peer, error } = await connect(this.node, this.options.signer, server);

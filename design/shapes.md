@@ -1,38 +1,45 @@
 # Shapes
 
-A _shape_ is a strategy for laying a directory tree out as Automerge documents. The rest of pushwork works against an in-memory `VfsNode` tree; shapes translate between that tree and a concrete document graph.
+A _shape_ is how a tree of files is laid out as Automerge documents. The rest of pushwork only deals in files, posix path to bytes; a shape maps those to a root document and back.
 
 ```
-                encode
-  VfsNode  ───────────────►  Automerge docs (rooted at one URL)
-  (dir/file tree)  ◄───────
-                decode
+                    encode
+  files by path  ───────────────►  Automerge docs (rooted at one URL)
+                 ◄───────────────
+                    decode
 ```
 
 ## The `Shape` Interface
 
 ```ts
+type File = {bytes: Uint8Array; url?: AutomergeUrl} // url: the file's own doc, if it has one
+
 interface Shape {
 	encode(args: {
 		docs: Docs
-		tree: VfsNode
+		files: Map<string, Uint8Array>
 		previousRoot?: AutomergeUrl // change this root in place instead of creating one
 		title?: string
-		isArtifactDir?: (posixPath: string) => boolean // see artifacts.md
+		isArtifact?: (posixPath: string) => boolean // see artifacts.md
+		fresh?: boolean // make every doc afresh instead of reusing those under previousRoot
 	}): Promise<AutomergeUrl>
 
-	decode(args: {docs: Docs; root: AutomergeUrl}): Promise<VfsNode>
+	decode(args: {docs: Docs; root: AutomergeUrl}): Promise<Map<string, File>>
 }
 ```
 
-`Docs` (`src/docs.ts`) is the whole document API a shape needs: `find`, `create`, `change`, `heads` and `pin`.
+`Docs` (`src/docs.ts`) is the whole document API a shape needs: `find`, `create`, `change`, `heads`, `pin`, and `updateText` (Automerge's, so a shape module doesn't need its own copy of Automerge).
 
-- `encode` with `previousRoot` changes the existing root doc in place, because the root URL is the repo's identity. Values that haven't changed aren't rewritten, so an unchanged tree leaves the root's heads alone.
-- `isArtifactDir` classifies repo-relative posix _directory_ paths; shapes that represent directories as their own docs pin those folder links with heads so the whole subtree reads as frozen (see [`artifacts`](./artifacts.md)).
+- `encode` always gets the whole tree. With `previousRoot` it changes the existing root doc in place, because the root URL is the repo's identity; pushwork doesn't call it when no file changed.
+- `isArtifact` classifies repo-relative posix paths, files and directories. Shapes that link documents pin artifact links to their current heads, so the subtree reads as frozen (see [`artifacts`](./artifacts.md)). After a sync, pushwork encodes the saved files again so pins catch up with heads that sync brought in.
+- `fresh` is `sync --nuclear`: keep the root, but stop reusing the docs under it.
+- `decode`'s `url` is optional; `pushwork heads` lists it when a file has one.
+
+Whether each file gets a document of its own is the shape's business. The builtin shapes do, through `writeFileDocs` / `readFileDocs` in `shapes/file-docs.ts`.
 
 ## File Documents
 
-All shapes share one leaf format, the Patchwork-compatible `UnixFileEntry`:
+The builtin shapes keep each file in a Patchwork-compatible `UnixFileEntry` doc:
 
 ```ts
 {
@@ -87,4 +94,6 @@ Flat and cheap — one doc for the whole tree structure — at the cost of folde
 
 ## Custom Shapes
 
-`resolveShape(name)` falls back to loading a module by path (`shapes/custom.ts`) for any non-builtin name. A custom shape module exports a `Shape`; the shape name is persisted per-repo in the config (see [`config`](./config.md)), so all peers of a repo agree on its layout.
+`resolveShape(name)` falls back to loading a module by path (`shapes/custom.ts`) for any non-builtin name. A custom shape module's default export is a `Shape`; the shape name is persisted per-repo in the config (see [`config`](./config.md)), so all peers of a repo agree on its layout.
+
+`examples/shapes/slay.js` is one: a [slaygrounds](https://github.com/chee/slaygrounds) project keeps its files inline, as strings and bytes in nested objects under `src`, with no doc per file.
