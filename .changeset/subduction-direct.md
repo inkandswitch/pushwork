@@ -13,3 +13,4 @@ Sync with Subduction directly instead of through automerge-repo
 - Shapes deal in files: `encode({ docs, files, previousRoot, title, isArtifact, fresh })` turns a map of posix path to bytes into a root doc, and `decode({ docs, root })` returns the files. Whether each file gets a doc of its own is up to the shape, so a shape can keep files inline (see `examples/shapes/slay.js`). Shapes take a `Docs` instance in place of a `Repo`, and roots are URLs in place of `DocHandle`s.
 - `sync` reports SYNCED, PENDING (with the documents the server hasn't confirmed) or OFFLINE. The library's `sync` returns that report, and `RepoSummary` no longer has `backend` or keyhive fields.
 - `clone` no longer follows legacy Patchwork "branches" documents.
+- New `pushwork shape install <file|url|automerge-url>`, `shape list` and `shape remove` manage shapes in `~/.pushwork/shapes/`, so `--shape <name>` works and a repo's config records the name instead of a path.

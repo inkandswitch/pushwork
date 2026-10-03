@@ -38,6 +38,9 @@ import {
 } from "./snarf.js";
 import {
 	applyFileEntry,
+	installShape,
+	listShapes,
+	removeShape,
 	isInArtifactDir,
 	makeFileEntry,
 	normalizeArtifactDir,
@@ -558,6 +561,40 @@ async function resolveCloneShape(
 	return { shape: await resolveShape(opts.shape), shapeName: opts.shape };
 }
 
+/**
+ * Install a shape from a file, an http(s) url, or an automerge: url of a file
+ * doc, so `--shape <name>` finds it. The name defaults to the source's file name.
+ */
+export async function shapeInstall(
+	cwd: string,
+	source: string,
+	opts: { name?: string; syncServer?: string } = {},
+): Promise<{ name: string; path: string }> {
+	let code: string;
+	let file: string;
+	if (isValidAutomergeUrl(source)) {
+		const docs = await openDetached(path.resolve(cwd), source, opts.syncServer);
+		try {
+			await docs.sync([stripHeads(source)]);
+			const { bytes, entry } = readFileEntry(await docs.find(source));
+			code = new TextDecoder().decode(bytes);
+			file = entry.name;
+		} finally {
+			await docs.close();
+		}
+	} else if (/^https?:\/\//.test(source)) {
+		const res = await fetch(source);
+		if (!res.ok) throw new Error(`fetching ${source}: ${res.status} ${res.statusText}`);
+		code = await res.text();
+		file = path.posix.basename(new URL(source).pathname);
+	} else {
+		code = await fs.readFile(path.resolve(cwd, source), "utf8");
+		file = path.basename(source);
+	}
+	const name = opts.name ?? file.replace(/\.[^.]*$/, "");
+	return { name, path: await installShape(name, code) };
+}
+
 export async function url(cwd: string): Promise<AutomergeUrl> {
 	const config = await readConfig(path.resolve(cwd));
 	return config.rootUrl;
@@ -566,7 +603,7 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 // Inside a repo, yoink/yeet use its server but not its storage: a doc the repo tracks
 // that changed underneath it would look like a local edit to its next sync and be undone.
 async function openDetached(root: string, url: AutomergeUrl, server?: string): Promise<Docs> {
-	if (isKeyhive(url)) throw new Error("yoink and yeet don't support keyhive docs");
+	if (isKeyhive(url)) throw new Error("a single keyhive doc can't be fetched on its own; clone its repo");
 	const config = (await configExists(root)) ? await readConfig(root) : undefined;
 	return Docs.open({
 		storage: new MemoryStorage(),
@@ -941,3 +978,5 @@ async function pruneEmptyDirs(root: string, relDir: string): Promise<void> {
 
 
 export const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+export { listShapes, removeShape };

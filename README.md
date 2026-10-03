@@ -83,6 +83,8 @@ pushwork diff
 | `pushwork cut [name]` | Stash working-tree changes and reset the tree to the saved state (offline). |
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
+| `pushwork shape install <source>` | Install a shape from a file, an `http(s)://` url or an `automerge:` file doc, so `--shape <name>` can use it. `--name` picks the name (default: the source's file name). |
+| `pushwork shape list` / `shape remove <name>` | List or remove installed shapes. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
 
 ### Global options
@@ -100,7 +102,7 @@ These apply to every command:
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
+| `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, an installed shape's name, or a path to a shape module. |
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
 | `--sync-server <url>` | both | Server for document data, saved in the repo's config. Defaults to `wss://subduction.sync.inkandswitch.com`, or for a keyhive repo, its keyhive server. |
 | `--keyhive-server <server>` | both | For a keyhive repo: its keyhive server, `keyhive`, `subduction` or a `ws(s)://` url. Saved in the repo's config. Defaults to this machine's setting (see [Keyhive](#keyhive)). |
@@ -222,10 +224,13 @@ A _shape_ controls how the directory tree is encoded into Automerge documents.
 | Patchwork folder | `patchwork-folder` | A recursive folder-of-docs (`@patchwork.type: "folder"`) compatible with Patchwork and original pushwork repos. |
 | Custom | _module path_ | A module whose `default` export is `{ encode, decode }`: `encode` turns files (a `Map` of posix path to bytes) into a root doc, `decode` reads them back. See [`design/shapes.md`](./design/shapes.md). |
 
-Select a shape with `--shape` at `init`/`clone`. [`examples/shapes/slay.js`](./examples/shapes/slay.js) is a custom shape for [slaygrounds](https://github.com/chee/slaygrounds) projects, which keep their files inline in one document:
+Select a shape with `--shape` at `init`/`clone`. A custom shape can be given as a path, but installing it is better: `pushwork shape install` copies it to `~/.pushwork/shapes/` (checking that it loads as a shape first), and the repo's config then records just its name, which works on any machine that has it installed.
+
+[`examples/shapes/slay.js`](./examples/shapes/slay.js) is a custom shape for [slaygrounds](https://github.com/chee/slaygrounds) projects, which keep their files inline in one document:
 
 ```sh
-pushwork clone --sync-server wss://galaxy.observer --shape examples/shapes/slay.js automerge:... my-project
+pushwork shape install examples/shapes/slay.js
+pushwork clone --sync-server wss://galaxy.observer --shape slay automerge:... my-project
 ```
 
 ## Stashing changes

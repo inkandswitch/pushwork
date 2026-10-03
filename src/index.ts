@@ -4,6 +4,7 @@ export {
 	track,
 	merge,
 	migrate,
+	shapeInstall,
 	keyhiveInfo,
 	setKeyhiveServer,
 	sync,
@@ -47,4 +48,6 @@ export {
 	normalizeArtifactDir,
 	readFileDocs,
 	writeFileDocs,
+	listShapes,
+	removeShape,
 } from "./shapes/index.js";

@@ -33,7 +33,9 @@ The steps of `sync`, in order (`commitWorkdir` in `src/pushwork.ts`):
 
 ## The verdict
 
-A document is synced when one `syncWithPeer` round sends nothing and receives nothing. pushwork tries up to four rounds per document. A server that keeps asking for data it never accepts (a write it refuses) never reaches a quiet round.
+A document is synced when one `syncWithPeer` round sends nothing and receives nothing. pushwork tries up to six rounds per document. A server that keeps asking for data it never accepts (a write it refuses) never reaches a quiet round.
+
+The server only counts a commit as held once its storage write has finished, so the round after we send can ask for the same commit again. After a round where we only sent, pushwork waits before the next one: 50ms, doubling each time, about 1.5s in all before it gives up.
 
 | Verdict | Condition |
 | --- | --- |

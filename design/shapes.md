@@ -94,6 +94,6 @@ Flat and cheap — one doc for the whole tree structure — at the cost of folde
 
 ## Custom Shapes
 
-`resolveShape(name)` falls back to loading a module by path (`shapes/custom.ts`) for any non-builtin name. A custom shape module's default export is a `Shape`; the shape name is persisted per-repo in the config (see [`config`](./config.md)), so all peers of a repo agree on its layout.
+`resolveShape(name)` resolves a builtin name, then a shape installed with `pushwork shape install` (`~/.pushwork/shapes/<name>.js`, `shapes/installed.ts`), then a module by path (`shapes/custom.ts`). Installed names have no dots or slashes, so they can't be mistaken for paths. A custom shape module's default export is a `Shape`; the shape name is persisted per-repo in the config (see [`config`](./config.md)), so all peers of a repo agree on its layout.
 
 `examples/shapes/slay.js` is one: a [slaygrounds](https://github.com/chee/slaygrounds) project keeps its files inline, as strings and bytes in nested objects under `src`, with no doc per file.

@@ -5,6 +5,9 @@ import * as path from "path";
 import {
 	clone,
 	merge,
+	shapeInstall,
+	listShapes,
+	removeShape,
 	ACCESS_LEVELS,
 	keyhiveInfo,
 	setKeyhiveServer,
@@ -150,7 +153,7 @@ program
 	)
 	.option(
 		"--shape <shape>",
-		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
+		"Document shape: vfs, patchwork-folder, an installed shape's name, or a path to a shape module",
 		"vfs",
 	)
 	.option(
@@ -328,6 +331,38 @@ keyhive
 	.action(async (server, card) => {
 		await setKeyhiveServer(server, card);
 		out.log(`keyhive server set to ${server}`);
+	});
+
+const shape = program.command("shape").description("Manage installed document shapes");
+
+shape
+	.command("install")
+	.description("Install a shape so `--shape <name>` can use it")
+	.argument("<source>", "A shape module: a file, an http(s) url, or an automerge: url of a file doc")
+	.option("--name <name>", "Name to install it as (default: the source's file name)")
+	.option("--sync-server <url>", "Sync server to fetch an automerge: url from")
+	.action(async (source, opts) => {
+		const { name, path: file } = await shapeInstall(process.cwd(), source, {
+			name: opts.name,
+			syncServer: opts.syncServer,
+		});
+		out.log(`installed shape ${name} (${file})`);
+	});
+
+shape
+	.command("list")
+	.description("List installed shapes")
+	.action(async () => {
+		for (const name of await listShapes()) out.log(name);
+	});
+
+shape
+	.command("remove")
+	.description("Remove an installed shape")
+	.argument("<name>")
+	.action(async (name) => {
+		await removeShape(name);
+		out.log(`removed shape ${name}`);
 	});
 
 program

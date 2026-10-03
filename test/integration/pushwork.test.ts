@@ -195,6 +195,57 @@ describe("pushwork", () => {
 		});
 	});
 
+	describe("installed shapes", () => {
+		const slay = path.join(__dirname, "..", "..", "examples", "shapes", "slay.js");
+		let env: { HOME: string };
+		beforeEach(async () => {
+			env = { HOME: await dir("home") };
+		});
+
+		it("installs from a file, and init / clone use it by name", async () => {
+			await pushwork(["shape", "install", slay], work, env);
+			expect((await pushwork(["shape", "list"], work, env)).stdout.trim()).toBe("slay");
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "entry.tsx"), "hi");
+			await pushwork(["init", "--sync-server", server, "--shape", "slay"], a, env);
+			expect(JSON.parse(await readText(path.join(a, ".pushwork", "config.json"))).shape).toBe("slay");
+			const b = path.join(work, "b");
+			await pushwork(["clone", "--sync-server", server, "--shape", "slay", await urlOf(a), b], work, env);
+			expect(await userFiles(b)).toEqual(await userFiles(a));
+
+			await pushwork(["shape", "remove", "slay"], work, env);
+			await expect(pushwork(["status"], a, env)).rejects.toThrow("no shape named slay");
+		});
+
+		it("installs from an http url and from a file doc, under a chosen name", async () => {
+			const code = await readText(slay);
+			const http = await import("http");
+			const site = http.createServer((_, res) => res.end(code)).listen(0, "127.0.0.1");
+			await new Promise(r => site.once("listening", r));
+			try {
+				const { port } = site.address() as { port: number };
+				await pushwork(["shape", "install", `http://127.0.0.1:${port}/shapes/slay.js`], work, env);
+			} finally {
+				site.close();
+			}
+
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "shape.js"), code);
+			await init(a);
+			const fileDoc = (await pushwork(["--porcelain", "heads", "shape.js"], a)).stdout.split("\t")[1];
+			await pushwork(["shape", "install", "--sync-server", server, "--name", "slay2", fileDoc], work, env);
+			expect((await pushwork(["shape", "list"], work, env)).stdout.trim().split("\n")).toEqual(["slay", "slay2"]);
+		});
+
+		it("refuses modules that aren't shapes", async () => {
+			const bad = path.join(await dir("bad"), "bad.js");
+			await fs.writeFile(bad, "export default {}");
+			await expect(pushwork(["shape", "install", bad], work, env)).rejects.toThrow("not a shape");
+			await expect(pushwork(["shape", "install", "--name", "vfs", slay], work, env)).rejects.toThrow("built-in");
+			expect((await pushwork(["shape", "list"], work, env)).stdout.trim()).toBe("");
+		});
+	});
+
 	describe("slay shape", () => {
 		const slay = path.join(__dirname, "..", "..", "examples", "shapes", "slay.js");
 
