@@ -180,6 +180,8 @@ program
 				keyhive: opts.keyhive
 					? { publicAccess: opts.publicAccess, serverAccess: opts.serverAccess }
 					: undefined,
+				keyhiveServer: opts.keyhiveServer,
+				keyhiveCard: opts.keyhiveCard,
 			},
 			report,
 			warn,
