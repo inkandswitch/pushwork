@@ -1,636 +1,305 @@
-/**
- * Integration tests for pushwork.
- *
- * Black-box: drive the CLI as a subprocess, observe filesystem and stdout.
- * No imports from src/ — these tests are the spec for what pushwork does,
- * not how it does it.
- *
- * Run against both supported sync backends:
- *   - "subduction"  → default (no flag)
- *   - "legacy"      → --legacy flag on init/clone (persisted in config;
- *                     used automatically by subsequent sync runs)
- *
- * Tests hit the public sync servers, so each test allows generous time
- * for network roundtrips.
- */
-
+// Black-box: drive the built CLI against the hermetic test server.
 import * as fs from "fs/promises";
 import * as path from "path";
-import * as crypto from "crypto";
 import * as tmp from "tmp";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { inject } from "vitest";
+import { exists, pushwork, readText, userFiles } from "../cli";
 
-const execFileP = promisify(execFile);
-const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
+const server = inject("server");
 
-const TEST_TIMEOUT = 120_000;
+const init = (dir: string) => pushwork(["init", "--server", server], dir);
+const clone = (url: string, dir: string) => pushwork(["clone", "--server", server, url, dir]);
+const urlOf = async (dir: string) => (await pushwork(["url"], dir)).stdout.trim();
 
-type Backend = { name: string; flags: string[] };
-const BACKENDS: Backend[] = [
-	{ name: "subduction", flags: [] },
-	{ name: "legacy", flags: ["--legacy"] },
-];
-
-async function pushwork(
-	args: string[],
-	cwd?: string,
-): Promise<{ stdout: string; stderr: string }> {
-	try {
-		return await execFileP("node", [CLI, ...args], {
-			cwd,
-			env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
-			timeout: 90_000,
-			maxBuffer: 16 * 1024 * 1024,
-		});
-	} catch (err: any) {
-		const detail = [
-			`pushwork ${args.join(" ")} failed (cwd=${cwd ?? process.cwd()})`,
-			err.message,
-			err.stdout ? `stdout: ${err.stdout}` : "",
-			err.stderr ? `stderr: ${err.stderr}` : "",
-		]
-			.filter(Boolean)
-			.join("\n");
-		throw new Error(detail);
-	}
-}
-
-async function pathExists(p: string): Promise<boolean> {
-	try {
-		await fs.access(p);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function readText(p: string): Promise<string> {
-	return fs.readFile(p, "utf8");
-}
-
-async function listUserFiles(dir: string): Promise<string[]> {
-	const out: string[] = [];
-	async function walk(current: string) {
-		const entries = await fs.readdir(current, { withFileTypes: true });
-		for (const entry of entries) {
-			if (entry.name === ".pushwork") continue;
-			const full = path.join(current, entry.name);
-			if (entry.isDirectory()) {
-				await walk(full);
-			} else if (entry.isFile()) {
-				out.push(path.relative(dir, full));
-			}
-		}
-	}
-	await walk(dir);
-	return out.sort();
-}
-
-async function hashUserContent(dir: string): Promise<string> {
-	const files = await listUserFiles(dir);
-	const h = crypto.createHash("sha256");
-	for (const f of files) {
-		h.update(f);
-		h.update("\0");
-		h.update(await fs.readFile(path.join(dir, f)));
-		h.update("\0");
-	}
-	return h.digest("hex");
-}
-
-async function syncOnce(repos: string[]): Promise<void> {
+// Sync each repo once, in order.
+async function sync(...repos: string[]) {
 	for (const r of repos) await pushwork(["sync"], r);
 }
 
-async function syncUntilConverged(
-	repos: string[],
-	maxRounds = 6,
-): Promise<number> {
-	for (let round = 1; round <= maxRounds; round++) {
-		await syncOnce(repos);
-		const hashes = await Promise.all(repos.map(hashUserContent));
-		if (hashes.every((h) => h === hashes[0])) return round;
-	}
-	const hashes = await Promise.all(repos.map(hashUserContent));
-	const debug = await Promise.all(
-		repos.map(async (r, i) => `${i}: ${(await listUserFiles(r)).join(",")}`),
-	);
-	throw new Error(
-		`failed to converge after ${maxRounds} rounds:\n  hashes: ${hashes
-			.map((h) => h.slice(0, 12))
-			.join(" / ")}\n  files:\n    ${debug.join("\n    ")}`,
-	);
-}
-
-// dist/ is built once by test/global-setup.ts.
-
-describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
-	let workRoot: string;
+describe("pushwork", () => {
+	let work: string;
 	let cleanup: () => void;
 
 	beforeEach(() => {
 		const t = tmp.dirSync({ unsafeCleanup: true });
-		workRoot = t.name;
+		work = t.name;
 		cleanup = t.removeCallback;
 	});
 
 	afterEach(() => cleanup());
 
+	async function dir(name: string) {
+		const d = path.join(work, name);
+		await fs.mkdir(d, { recursive: true });
+		return d;
+	}
+
+	async function pair() {
+		const a = await dir("a");
+		await init(a);
+		const b = path.join(work, "b");
+		await clone(await urlOf(a), b);
+		return { a, b };
+	}
+
 	describe("init", () => {
-		it(
-			"succeeds on an empty directory",
-			async () => {
-				await pushwork(["init", ...flags, workRoot]);
-				expect(await listUserFiles(workRoot)).toEqual([]);
-			},
-			TEST_TIMEOUT,
-		);
+		it("succeeds on an empty directory", async () => {
+			const a = await dir("a");
+			const { stdout } = await init(a);
+			expect(stdout).toContain("SYNCED");
+			expect([...(await userFiles(a)).keys()]).toEqual([]);
+		});
 
-		it(
-			"succeeds on a directory containing files",
-			async () => {
-				await fs.writeFile(path.join(workRoot, "a.txt"), "hello");
-				await fs.writeFile(path.join(workRoot, "b.md"), "# B");
-				await pushwork(["init", ...flags, workRoot]);
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"does not destroy or alter pre-existing user files",
-			async () => {
-				await fs.writeFile(path.join(workRoot, "keep.txt"), "do not touch");
-				await fs.mkdir(path.join(workRoot, "subdir"));
-				await fs.writeFile(
-					path.join(workRoot, "subdir", "nested.txt"),
-					"nested",
-				);
-
-				await pushwork(["init", ...flags, workRoot]);
-
-				expect(await readText(path.join(workRoot, "keep.txt"))).toBe(
-					"do not touch",
-				);
-				expect(
-					await readText(path.join(workRoot, "subdir", "nested.txt")),
-				).toBe("nested");
-			},
-			TEST_TIMEOUT,
-		);
+		it("does not alter pre-existing files", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "keep.txt"), "do not touch");
+			await fs.mkdir(path.join(a, "subdir"));
+			await fs.writeFile(path.join(a, "subdir", "nested.txt"), "nested");
+			await init(a);
+			expect(await readText(path.join(a, "keep.txt"))).toBe("do not touch");
+			expect(await readText(path.join(a, "subdir", "nested.txt"))).toBe("nested");
+		});
 	});
 
 	describe("url", () => {
-		it(
-			"prints an automerge: URL after init",
-			async () => {
-				await pushwork(["init", ...flags, workRoot]);
-				const { stdout } = await pushwork(["url"], workRoot);
-				expect(stdout.trim()).toMatch(/^automerge:[A-Za-z0-9]+/);
-			},
-			TEST_TIMEOUT,
-		);
+		it("prints a stable automerge: URL", async () => {
+			const a = await dir("a");
+			await init(a);
+			const url = await urlOf(a);
+			expect(url).toMatch(/^automerge:[1-9A-HJ-NP-Za-km-z]+$/);
+			expect(await urlOf(a)).toBe(url);
+		});
 
-		it(
-			"is stable across calls within one repo",
-			async () => {
-				await pushwork(["init", ...flags, workRoot]);
-				const a = (await pushwork(["url"], workRoot)).stdout.trim();
-				const b = (await pushwork(["url"], workRoot)).stdout.trim();
-				expect(a).toBe(b);
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"differs between two independently initialized repos",
-			async () => {
-				const r1 = path.join(workRoot, "r1");
-				const r2 = path.join(workRoot, "r2");
-				await fs.mkdir(r1);
-				await fs.mkdir(r2);
-				await pushwork(["init", ...flags], r1);
-				await pushwork(["init", ...flags], r2);
-				const u1 = (await pushwork(["url"], r1)).stdout.trim();
-				const u2 = (await pushwork(["url"], r2)).stdout.trim();
-				expect(u1).not.toBe(u2);
-			},
-			TEST_TIMEOUT,
-		);
+		it("differs between two repos", async () => {
+			const a = await dir("a");
+			const b = await dir("b");
+			await init(a);
+			await init(b);
+			expect(await urlOf(a)).not.toBe(await urlOf(b));
+		});
 	});
 
 	describe("clone", () => {
-		it(
-			"reproduces a single text file",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
+		it("reproduces a nested tree with binary content", async () => {
+			const a = await dir("a");
+			await fs.mkdir(path.join(a, "src", "components"), { recursive: true });
+			await fs.writeFile(path.join(a, "package.json"), '{"name":"x"}');
+			await fs.writeFile(path.join(a, "src", "index.ts"), "export {}");
+			await fs.writeFile(path.join(a, "src", "components", "Button.tsx"), "export const Button = () => null");
+			await fs.writeFile(path.join(a, "image.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0xff, 0xfe]));
+			await init(a);
+			const b = path.join(work, "b");
+			await clone(await urlOf(a), b);
+			expect(await userFiles(b)).toEqual(await userFiles(a));
+			expect(await urlOf(b)).toBe(await urlOf(a));
+		});
 
-				await fs.writeFile(path.join(a, "hello.txt"), "Hello, World!");
-				await pushwork(["init", ...flags], a);
+		it("does not sync .git or node_modules", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "ok.txt"), "ok");
+			await fs.mkdir(path.join(a, "node_modules"));
+			await fs.writeFile(path.join(a, "node_modules", "lib.js"), "lib");
+			await fs.mkdir(path.join(a, ".git"));
+			await fs.writeFile(path.join(a, ".git", "HEAD"), "ref");
+			await init(a);
+			const b = path.join(work, "b");
+			await clone(await urlOf(a), b);
+			expect(await exists(path.join(b, "ok.txt"))).toBe(true);
+			expect(await exists(path.join(b, "node_modules"))).toBe(false);
+			expect(await exists(path.join(b, ".git"))).toBe(false);
+		});
 
-				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
-
-				expect(await readText(path.join(b, "hello.txt"))).toBe("Hello, World!");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"reproduces a nested directory tree",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-				await fs.mkdir(path.join(a, "src", "components"), {
-					recursive: true,
-				});
-				await fs.writeFile(path.join(a, "package.json"), '{"name":"x"}');
-				await fs.writeFile(path.join(a, "src", "index.ts"), "export {}");
-				await fs.writeFile(
-					path.join(a, "src", "components", "Button.tsx"),
-					"export const Button = () => null",
-				);
-
-				await pushwork(["init", ...flags], a);
-				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
-
-				expect(await readText(path.join(b, "package.json"))).toBe(
-					'{"name":"x"}',
-				);
-				expect(await readText(path.join(b, "src", "index.ts"))).toBe(
-					"export {}",
-				);
-				expect(
-					await readText(path.join(b, "src", "components", "Button.tsx")),
-				).toBe("export const Button = () => null");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"reproduces binary file content byte-for-byte",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-
-				const bytes = Buffer.from([
-					0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02,
-					0xff, 0xfe, 0x10, 0x42,
-				]);
-				await fs.writeFile(path.join(a, "image.png"), bytes);
-
-				await pushwork(["init", ...flags], a);
-				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
-
-				const out = await fs.readFile(path.join(b, "image.png"));
-				expect(out.equals(bytes)).toBe(true);
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"a fresh clone reports the same URL as the source",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-				await fs.writeFile(path.join(a, "x.txt"), "x");
-
-				await pushwork(["init", ...flags], a);
-				const urlA = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, urlA, b]);
-
-				const urlB = (await pushwork(["url"], b)).stdout.trim();
-				expect(urlB).toBe(urlA);
-			},
-			TEST_TIMEOUT,
-		);
+		it("fails when the server is unreachable", async () => {
+			const a = await dir("a");
+			await init(a);
+			await expect(
+				pushwork(["clone", "--server", "ws://127.0.0.1:1", await urlOf(a), path.join(work, "b")]),
+			).rejects.toThrow(/could not connect/);
+		});
 	});
 
-	describe("sync — propagation between two repos", () => {
-		async function setupPair() {
-			const a = path.join(workRoot, "a");
-			const b = path.join(workRoot, "b");
-			await fs.mkdir(a);
-			await pushwork(["init", ...flags], a);
-			const url = (await pushwork(["url"], a)).stdout.trim();
-			await pushwork(["clone", ...flags, url, b]);
-			return { a, b };
-		}
+	describe("sync", () => {
+		it("propagates a new file from A to B", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(a, "added.txt"), "new in A");
+			await sync(a, b);
+			expect(await readText(path.join(b, "added.txt"))).toBe("new in A");
+		});
 
-		it(
-			"propagates a new file from A to B",
-			async () => {
-				const { a, b } = await setupPair();
+		it("propagates a new file from B to A", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(b, "from-b.txt"), "new in B");
+			await sync(b, a);
+			expect(await readText(path.join(a, "from-b.txt"))).toBe("new in B");
+		});
 
-				await fs.writeFile(path.join(a, "added.txt"), "new in A");
-				await syncUntilConverged([a, b]);
+		it("propagates modifications and deletions", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(a, "x.txt"), "v1");
+			await fs.writeFile(path.join(a, "doomed.txt"), "doomed");
+			await sync(a, b);
+			expect(await readText(path.join(b, "x.txt"))).toBe("v1");
+			expect(await exists(path.join(b, "doomed.txt"))).toBe(true);
 
-				expect(await readText(path.join(b, "added.txt"))).toBe("new in A");
-			},
-			TEST_TIMEOUT,
-		);
+			await fs.writeFile(path.join(a, "x.txt"), "v2");
+			await fs.unlink(path.join(a, "doomed.txt"));
+			await sync(a, b);
+			expect(await readText(path.join(b, "x.txt"))).toBe("v2");
+			expect(await exists(path.join(b, "doomed.txt"))).toBe(false);
+		});
 
-		it(
-			"propagates a new file from B to A",
-			async () => {
-				const { a, b } = await setupPair();
+		it("propagates changes inside a nested directory", async () => {
+			const { a, b } = await pair();
+			await fs.mkdir(path.join(a, "deep", "deeper"), { recursive: true });
+			await fs.writeFile(path.join(a, "deep", "deeper", "leaf.txt"), "leaf v1");
+			await sync(a, b);
+			expect(await readText(path.join(b, "deep", "deeper", "leaf.txt"))).toBe("leaf v1");
 
-				await fs.writeFile(path.join(b, "from-b.txt"), "new in B");
-				await syncUntilConverged([a, b]);
+			await fs.writeFile(path.join(a, "deep", "deeper", "leaf.txt"), "leaf v2");
+			await sync(a, b);
+			expect(await readText(path.join(b, "deep", "deeper", "leaf.txt"))).toBe("leaf v2");
+		});
 
-				expect(await readText(path.join(a, "from-b.txt"))).toBe("new in B");
-			},
-			TEST_TIMEOUT,
-		);
+		it("converges concurrent disjoint edits", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(a, "from-a.txt"), "A");
+			await fs.writeFile(path.join(b, "from-b.txt"), "B");
+			await sync(a, b, a);
+			expect(await userFiles(a)).toEqual(await userFiles(b));
+			expect(await readText(path.join(a, "from-b.txt"))).toBe("B");
+			expect(await readText(path.join(b, "from-a.txt"))).toBe("A");
+		});
 
-		it(
-			"propagates a modification",
-			async () => {
-				const { a, b } = await setupPair();
+		it("converges patchwork-folder repos with artifacts", async () => {
+			const a = await dir("a");
+			await fs.mkdir(path.join(a, "dist"));
+			await fs.writeFile(path.join(a, "dist", "main.js"), "v1");
+			await fs.writeFile(path.join(a, "README"), "hi");
+			await pushwork(["init", "--server", server, "--shape", "patchwork-folder"], a);
+			const b = path.join(work, "b");
+			await clone(await urlOf(a), b);
+			expect(await userFiles(b)).toEqual(await userFiles(a));
 
-				await fs.writeFile(path.join(a, "x.txt"), "v1");
-				await syncUntilConverged([a, b]);
-				expect(await readText(path.join(b, "x.txt"))).toBe("v1");
+			await fs.writeFile(path.join(b, "dist", "main.js"), "v2");
+			await fs.mkdir(path.join(b, "src"));
+			await fs.writeFile(path.join(b, "src", "app.ts"), "app");
+			await sync(b, a);
+			expect(await userFiles(a)).toEqual(await userFiles(b));
+		});
 
-				await fs.writeFile(path.join(a, "x.txt"), "v2");
-				await syncUntilConverged([a, b]);
-				expect(await readText(path.join(b, "x.txt"))).toBe("v2");
-			},
-			TEST_TIMEOUT,
-		);
+		it("reports SYNCED in porcelain output", async () => {
+			const { a } = await pair();
+			const { stdout } = await pushwork(["--porcelain", "sync"], a);
+			expect(stdout).toContain("sync\tsynced");
+			expect(stdout).toMatch(new RegExp(`^root\t${await urlOf(a)}\t\\S+`, "m"));
+			expect(stdout).not.toContain("unsynced");
+		});
 
-		it(
-			"propagates a deletion",
-			async () => {
-				const { a, b } = await setupPair();
+		it("a third clone catches up", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(a, "shared.txt"), "shared");
+			await sync(a);
+			const c = path.join(work, "c");
+			await clone(await urlOf(b), c);
+			expect(await readText(path.join(c, "shared.txt"))).toBe("shared");
+		});
 
-				await fs.writeFile(path.join(a, "doomed.txt"), "doomed");
-				await fs.writeFile(path.join(a, "kept.txt"), "kept");
-				await syncUntilConverged([a, b]);
-				expect(await pathExists(path.join(b, "doomed.txt"))).toBe(true);
-
-				await fs.unlink(path.join(a, "doomed.txt"));
-				await syncUntilConverged([a, b]);
-
-				expect(await pathExists(path.join(b, "doomed.txt"))).toBe(false);
-				expect(await readText(path.join(b, "kept.txt"))).toBe("kept");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"propagates changes inside a nested directory",
-			async () => {
-				const { a, b } = await setupPair();
-
-				await fs.mkdir(path.join(a, "deep", "deeper"), { recursive: true });
-				await fs.writeFile(
-					path.join(a, "deep", "deeper", "leaf.txt"),
-					"leaf v1",
-				);
-				await syncUntilConverged([a, b]);
-
-				expect(
-					await readText(path.join(b, "deep", "deeper", "leaf.txt")),
-				).toBe("leaf v1");
-
-				await fs.writeFile(
-					path.join(a, "deep", "deeper", "leaf.txt"),
-					"leaf v2",
-				);
-				await syncUntilConverged([a, b]);
-
-				expect(
-					await readText(path.join(b, "deep", "deeper", "leaf.txt")),
-				).toBe("leaf v2");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"converges concurrent disjoint edits",
-			async () => {
-				const { a, b } = await setupPair();
-
-				await fs.writeFile(path.join(a, "from-a.txt"), "A");
-				await fs.writeFile(path.join(b, "from-b.txt"), "B");
-
-				await syncUntilConverged([a, b]);
-
-				expect(await readText(path.join(a, "from-a.txt"))).toBe("A");
-				expect(await readText(path.join(a, "from-b.txt"))).toBe("B");
-				expect(await readText(path.join(b, "from-a.txt"))).toBe("A");
-				expect(await readText(path.join(b, "from-b.txt"))).toBe("B");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"a third clone catches up to the current state",
-			async () => {
-				const { a, b } = await setupPair();
-
-				await fs.writeFile(path.join(a, "shared.txt"), "shared content");
-				await syncUntilConverged([a, b]);
-
-				const c = path.join(workRoot, "c");
-				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, c]);
-
-				expect(await readText(path.join(c, "shared.txt"))).toBe(
-					"shared content",
-				);
-			},
-			TEST_TIMEOUT,
-		);
+		it("--nuclear keeps the root url and the peer follows", async () => {
+			const { a, b } = await pair();
+			await fs.writeFile(path.join(a, "n.txt"), "one");
+			await sync(a, b);
+			await pushwork(["sync", "--nuclear"], a);
+			await fs.writeFile(path.join(a, "n.txt"), "two");
+			await sync(a, b);
+			expect(await urlOf(a)).toBe(await urlOf(b));
+			expect(await readText(path.join(b, "n.txt"))).toBe("two");
+		});
 	});
 
-	describe("yoink / yeet — single file doc by URL", () => {
-		async function fileDocUrl(repo: string, posixPath: string): Promise<string> {
-			const { stdout } = await pushwork(["heads", posixPath], repo);
-			const line = stdout
-				.split("\n")
-				.find((l) => l.startsWith(posixPath + "\t"));
-			if (!line) throw new Error(`no heads entry for ${posixPath}:\n${stdout}`);
+	describe("yoink / yeet", () => {
+		async function fileUrl(repo: string, file: string): Promise<string> {
+			const { stdout } = await pushwork(["heads", file], repo);
+			const line = stdout.split("\n").find(l => l.startsWith(file + "\t"));
+			if (!line) throw new Error(`no heads entry for ${file}:\n${stdout}`);
 			return line.split("\t")[1];
 		}
 
-		async function waitForText(
-			repo: string,
-			file: string,
-			expected: string,
-			rounds = 6,
-		): Promise<string> {
-			let last = "";
-			for (let i = 0; i < rounds; i++) {
-				await pushwork(["sync"], repo);
-				last = await readText(path.join(repo, file));
-				if (last === expected) return last;
-			}
-			return last;
-		}
+		it("yoinks a file doc into another repo", async () => {
+			const a = await dir("a");
+			const b = await dir("b");
+			await fs.writeFile(path.join(a, "note.md"), "hello");
+			await init(a);
+			await init(b);
+			const url = await fileUrl(a, "note.md");
+			await pushwork(["yoink", url, "grabbed.md"], b);
+			await pushwork(["yoink", url], b);
+			expect(await readText(path.join(b, "grabbed.md"))).toBe("hello");
+			expect(await readText(path.join(b, "note.md"))).toBe("hello");
+		});
 
-		it(
-			"yoinks a file doc into a detached path",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-				await fs.mkdir(b);
-				await fs.writeFile(path.join(a, "note.md"), "hello");
-				await pushwork(["init", ...flags], a);
-				await pushwork(["init", ...flags], b);
+		it("yoinks outside a repo", async () => {
+			const a = await dir("a");
+			const out = await dir("out");
+			await fs.writeFile(path.join(a, "note.md"), "loose");
+			await init(a);
+			await pushwork(["yoink", "--server", server, await fileUrl(a, "note.md")], out);
+			expect(await readText(path.join(out, "note.md"))).toBe("loose");
+		});
 
-				const url = await fileDocUrl(a, "note.md");
-				await pushwork(["yoink", url, "grabbed.md"], b);
+		it("yoinking a tracked doc doesn't undo the next sync's pull", async () => {
+			const a = await dir("a");
+			await fs.writeFile(path.join(a, "note.md"), "v1");
+			await init(a);
+			const b = path.join(work, "b");
+			await clone(await urlOf(a), b);
+			await fs.writeFile(path.join(b, "note.md"), "v2");
+			await sync(b);
+			await pushwork(["yoink", await fileUrl(a, "note.md"), "copy.md"], a);
+			expect(await readText(path.join(a, "copy.md"))).toBe("v2");
+			await sync(a);
+			expect(await readText(path.join(a, "note.md"))).toBe("v2");
+		});
 
-				expect(await readText(path.join(b, "grabbed.md"))).toBe("hello");
-			},
-			TEST_TIMEOUT,
-		);
+		it("yeets a local file into a doc and the owner sees it", async () => {
+			const a = await dir("a");
+			const b = await dir("b");
+			await fs.writeFile(path.join(a, "note.md"), "v1");
+			await init(a);
+			await init(b);
+			await fs.writeFile(path.join(b, "out.md"), "v2 from b");
+			await pushwork(["yeet", "out.md", await fileUrl(a, "note.md")], b);
+			await sync(a);
+			expect(await readText(path.join(a, "note.md"))).toBe("v2 from b");
+		});
 
-		it(
-			"yoinks to the doc's own name when no path is given",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-				await fs.mkdir(b);
-				await fs.writeFile(path.join(a, "note.md"), "from name");
-				await pushwork(["init", ...flags], a);
-				await pushwork(["init", ...flags], b);
-
-				const url = await fileDocUrl(a, "note.md");
-				await pushwork(["yoink", url], b);
-
-				expect(await readText(path.join(b, "note.md"))).toBe("from name");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"yeets a local file into a doc and peers see it",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
-				await fs.mkdir(b);
-				await fs.writeFile(path.join(a, "note.md"), "v1");
-				await pushwork(["init", ...flags], a);
-				await pushwork(["init", ...flags], b);
-
-				const url = await fileDocUrl(a, "note.md");
-				await fs.writeFile(path.join(b, "out.md"), "v2 from b");
-				await pushwork(["yeet", "out.md", url], b);
-
-				expect(await waitForText(a, "note.md", "v2 from b")).toBe("v2 from b");
-			},
-			TEST_TIMEOUT,
-		);
-
-		it(
-			"rejects an invalid URL",
-			async () => {
-				const a = path.join(workRoot, "a");
-				await fs.mkdir(a);
-				await pushwork(["init", ...flags], a);
-				await expect(pushwork(["yoink", "not-a-url"], a)).rejects.toThrow();
-			},
-			TEST_TIMEOUT,
-		);
+		it("rejects an invalid URL", async () => {
+			const a = await dir("a");
+			await init(a);
+			await expect(pushwork(["yoink", "not-a-url"], a)).rejects.toThrow(/invalid automerge URL/);
+		});
 	});
 
-	describe("default exclusions", () => {
-		it(
-			"does not sync .git or node_modules to a clone",
-			async () => {
-				const a = path.join(workRoot, "a");
-				const b = path.join(workRoot, "b");
-				await fs.mkdir(a);
+	it("supports a two-user session", async () => {
+		const alice = await dir("alice");
+		await fs.writeFile(path.join(alice, "README"), "# Project");
+		await fs.mkdir(path.join(alice, "src"));
+		await fs.writeFile(path.join(alice, "src", "main.ts"), "// v1");
+		await init(alice);
+		const bob = path.join(work, "bob");
+		await clone(await urlOf(alice), bob);
+		expect(await userFiles(bob)).toEqual(await userFiles(alice));
 
-				await fs.writeFile(path.join(a, "ok.txt"), "ok");
+		await fs.writeFile(path.join(bob, "src", "main.ts"), "// v2 (bob)");
+		await fs.writeFile(path.join(bob, "src", "util.ts"), "export const x = 1");
+		await fs.writeFile(path.join(alice, "README"), "# Project\n\nNotes");
+		await sync(alice, bob, alice);
+		expect(await readText(path.join(alice, "src", "main.ts"))).toBe("// v2 (bob)");
+		expect(await readText(path.join(alice, "src", "util.ts"))).toBe("export const x = 1");
+		expect(await readText(path.join(bob, "README"))).toBe("# Project\n\nNotes");
 
-				await fs.mkdir(path.join(a, "node_modules"));
-				await fs.writeFile(path.join(a, "node_modules", "lib.js"), "lib");
-
-				await fs.mkdir(path.join(a, ".git"));
-				await fs.writeFile(path.join(a, ".git", "HEAD"), "ref");
-
-				await pushwork(["init", ...flags], a);
-				const url = (await pushwork(["url"], a)).stdout.trim();
-				await pushwork(["clone", ...flags, url, b]);
-
-				expect(await pathExists(path.join(b, "ok.txt"))).toBe(true);
-				expect(await pathExists(path.join(b, "node_modules"))).toBe(false);
-				expect(await pathExists(path.join(b, ".git"))).toBe(false);
-			},
-			TEST_TIMEOUT,
-		);
-	});
-
-	describe("end-to-end session", () => {
-		it(
-			"supports a realistic two-user collaboration session",
-			async () => {
-				// Alice initializes a project with several files.
-				const alice = path.join(workRoot, "alice");
-				await fs.mkdir(alice);
-				await fs.writeFile(path.join(alice, "README"), "# Project");
-				await fs.mkdir(path.join(alice, "src"));
-				await fs.writeFile(path.join(alice, "src", "main.ts"), "// v1");
-				await pushwork(["init", ...flags], alice);
-
-				// Bob clones Alice's project.
-				const bob = path.join(workRoot, "bob");
-				const url = (await pushwork(["url"], alice)).stdout.trim();
-				await pushwork(["clone", ...flags, url, bob]);
-
-				expect(await readText(path.join(bob, "README"))).toBe("# Project");
-				expect(await readText(path.join(bob, "src", "main.ts"))).toBe("// v1");
-
-				// Bob edits a file and adds a new one. Alice edits a different file.
-				await fs.writeFile(path.join(bob, "src", "main.ts"), "// v2 (bob)");
-				await fs.writeFile(
-					path.join(bob, "src", "util.ts"),
-					"export const x = 1",
-				);
-				await fs.writeFile(path.join(alice, "README"), "# Project\n\nNotes");
-
-				await syncUntilConverged([alice, bob]);
-
-				// Both should see all changes.
-				expect(await readText(path.join(alice, "src", "main.ts"))).toBe(
-					"// v2 (bob)",
-				);
-				expect(await readText(path.join(alice, "src", "util.ts"))).toBe(
-					"export const x = 1",
-				);
-				expect(await readText(path.join(bob, "README"))).toBe(
-					"# Project\n\nNotes",
-				);
-
-				// Bob deletes the util file.
-				await fs.unlink(path.join(bob, "src", "util.ts"));
-				await syncUntilConverged([alice, bob]);
-
-				expect(await pathExists(path.join(alice, "src", "util.ts"))).toBe(
-					false,
-				);
-				expect(await pathExists(path.join(bob, "src", "util.ts"))).toBe(false);
-
-				// Final state must be byte-for-byte identical.
-				expect(await hashUserContent(alice)).toBe(
-					await hashUserContent(bob),
-				);
-			},
-			TEST_TIMEOUT * 2,
-		);
+		await fs.unlink(path.join(bob, "src", "util.ts"));
+		await sync(bob, alice);
+		expect(await exists(path.join(alice, "src", "util.ts"))).toBe(false);
+		expect(await userFiles(alice)).toEqual(await userFiles(bob));
 	});
 });

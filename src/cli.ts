@@ -1,20 +1,15 @@
 #!/usr/bin/env node
 import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
 import { Command } from "@commander-js/extra-typings";
-import * as fs from "fs/promises";
 import * as path from "path";
-import type { AutomergeUrl } from "@automerge/automerge-repo";
 import {
 	clone,
 	cutWorkdir,
 	diff,
 	heads,
 	init,
-	keyhiveGrant,
-	keyhiveList,
-	keyhiveStatus,
-	keyhiveUse,
 	pasteSnarf,
+	plural,
 	save,
 	showSnarfs,
 	status,
@@ -23,152 +18,23 @@ import {
 	yeet,
 	yoink,
 	type RepoSummary,
+	type SyncSummary,
 } from "./pushwork.js";
-import {
-	ACCESS_LEVELS,
-	INSTRUCTIONS as KEYHIVE_INSTRUCTIONS,
-	hasIdentity,
-	type Member,
-} from "./keyhive.js";
-import type { Backend } from "./config.js";
+import type { SyncReport } from "./docs.js";
+import type { AutomergeUrl } from "./url.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
-import {
-	endpointOf,
-	isClosedStorageError,
-	isTransportError,
-	setAmrepoErrorSink,
-	type SyncSnapshot,
-} from "./repo.js";
 import { formatVersions } from "./version.js";
-import { migrate, versionLabel } from "./migrations.js";
 
 const dlog = log("cli");
-
-const priorWarn = process.listeners("warning");
-process.removeAllListeners("warning");
-process.on("warning", (w) => {
-	if (w.name === "TimeoutNegativeWarning") return;
-	if (priorWarn.length > 0) for (const l of priorWarn) l.call(process, w);
-	else process.stderr.write(`(node:${process.pid}) ${w.name}: ${w.message}\n`);
-});
-
-// A dropped connection can surface as an async error with no local listener;
-// suppress those transport blips (Node would otherwise dump a stack trace or
-// exit), and let genuine faults through.
-process.on("uncaughtException", (err) => {
-	if (isTransportError(err) || isClosedStorageError(err)) {
-		dlog("suppressed uncaught teardown error: %s", err.message);
-		return;
-	}
-	out.error(err);
-	out.exit(1);
-});
-process.on("unhandledRejection", (reason) => {
-	if (isTransportError(reason) || isClosedStorageError(reason)) {
-		dlog(
-			"suppressed teardown rejection: %s",
-			reason instanceof Error ? reason.message : String(reason),
-		);
-		return;
-	}
-	out.error(reason instanceof Error ? reason : String(reason));
-	out.exit(1);
-});
-
-// am-repo logs are silent by default (see openRepo); surface genuine `error`s in
-// the UI. Main process only — workers keep logs out of the parent's output.
-setAmrepoErrorSink((namespace, message, ...args) => {
-	const tag = namespace.replace(/^automerge-repo:/, "");
-	const detail = args
-		.map((a) => (a instanceof Error ? a.message : String(a)))
-		.join(" ");
-	const full = `${tag}: ${message}${detail ? ` ${detail}` : ""}`;
-	// The dispatch-after-shutdown race also arrives here as a Rust-side ERROR
-	// log; keep it out of the UI like the rejection handlers do.
-	if (isClosedStorageError(full)) {
-		dlog("suppressed teardown storage error log: %s", full);
-		return;
-	}
-	out.warn(full);
-});
 
 const collect = (value: string, prev: string[] | undefined) =>
 	(prev ?? []).concat(value);
 
-const backendOf = (opts: { sub?: boolean; legacy?: boolean }) =>
-	opts.legacy || opts.sub === false ? "legacy" : "subduction";
-
-// Like `backendOf` but returns undefined when no flag is given, so callers can
-// fall back to the repo's config (or their own default) instead of forcing
-// subduction.
-const backendOverrideOf = (opts: { sub?: boolean; legacy?: boolean }) =>
-	opts.legacy || opts.sub === false ? ("legacy" as const) : undefined;
-
-// `init` protects the new repo with keyhive whenever an identity is in use,
-// unless the legacy backend is picked or --no-keyhive opts out.
-async function initKeyhiveOf(
-	backend: Backend,
-	opts: { keyhive?: boolean },
-): Promise<boolean> {
-	if (backend === "legacy" || opts.keyhive === false) return false;
-	return hasIdentity();
-}
-
-const shortId = (hex: string) => hex.slice(0, 8);
-
-function summaryRows(
-	root: string,
-	info: RepoSummary,
-	filesLabel: string,
-): Record<string, unknown> {
-	return {
-		Path: root,
-		Files: `${info.files} ${filesLabel}`,
-		Backend: info.backend,
-		Sync: endpointOf(info.backend, info.keyhive),
-		Keyhive: info.identity && `identity ${info.identity}`,
-		Access: info.access,
-	};
-}
-
-function reportMembers(members: Member[]): void {
-	if (out.isPorcelain) {
-		for (const m of members) {
-			const tag = m.self ? "self" : m.public ? "public" : m.server ? "server" : "";
-			out.log(`${m.access}\t${m.id}\t${tag}`);
-		}
-		return;
-	}
-	if (members.length === 0) {
-		out.log("(no members)");
-		return;
-	}
-	out.arr(
-		members.map((m) => {
-			const who = m.public
-				? "everyone (public)"
-				: m.server
-					? `sync server ${shortId(m.id)}`
-					: m.self
-						? `you ${shortId(m.id)}`
-						: m.id;
-			return `${m.access.padEnd(5)} ${who}`;
-		}),
-	);
-}
-
-async function readStdin(): Promise<string> {
-	const chunks: Buffer[] = [];
-	for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-	return Buffer.concat(chunks).toString("utf8");
-}
-
 const report = (phase: string) => out.step(phase);
 
-// Warnings raised mid-operation are buffered and flushed *after* the result
-// line: emitting one immediately clears the active spinner, which would
-// otherwise swallow the command's completion ("saved", the summary, etc.).
+// Warnings raised mid-operation are flushed after the result line, because
+// printing one clears the active spinner and would swallow the result.
 const warnings: string[] = [];
 const warn = (message: string) => {
 	warnings.push(message);
@@ -178,59 +44,35 @@ const flushWarnings = () => {
 	warnings.length = 0;
 };
 
-const plural = (n: number, one: string, many = one + "s") =>
-	`${n} ${n === 1 ? one : many}`;
-
 const fmtHeads = (heads: string[]) => (heads.length ? heads.join(" ") : "(none)");
 
-/**
- * Render where the root doc stands relative to the sync server: our own
- * Automerge heads and the heads the server last advertised. When synced, we
- * hold every commit the server has (see waitForServerSync) — the two sets are
- * the same history even though the server's Subduction sedimentree heads need
- * not be string-identical to our Automerge frontier.
- */
-function reportSync(sync: SyncSnapshot | undefined): void {
-	if (!sync) return;
-	if (out.isPorcelain) {
-		out.log(
-			`sync\t${sync.synced ? "synced" : sync.pending ? "pending" : sync.connected ? "behind" : "offline"}`,
-		);
-		out.log(`connect\t${sync.connectMs ?? ""}`);
-		out.log(`root\t${sync.url}\t${sync.localHeads.join(" ")}`);
-		out.log(`server\t${sync.serverPeerId ?? ""}\t${sync.serverHeads.join(" ")}`);
-		return;
-	}
-	out.block(
-		sync.synced
-			? "SYNCED"
-			: sync.pending
-				? "PENDING"
-				: sync.connected
-					? "NOT SYNCED"
-					: "OFFLINE",
-	);
-	out.obj({
-		"root doc": sync.url,
-		"sync server": sync.serverPeerId ?? "(not connected)",
-		"root heads": fmtHeads(sync.localHeads),
-		"server heads": fmtHeads(sync.serverHeads),
-	});
+function verdict(sync: SyncReport): { state: string; detail: string } {
+	if (!sync.online) return { state: "OFFLINE", detail: sync.error ?? "" };
+	if (sync.unsynced.length === 0) return { state: "SYNCED", detail: "" };
+	return {
+		state: "PENDING",
+		detail: `${plural(sync.unsynced.length, "document")} not confirmed by the server`,
+	};
 }
 
-async function pickBranchInteractively(info: {
-	title?: string;
-	branches: { name: string; url: AutomergeUrl }[];
-}): Promise<AutomergeUrl> {
-	const titlePart = info.title ? ` (${info.title})` : "";
-	out.info(
-		`This URL is a legacy "branches" doc${titlePart}; branches aren't supported. Pick one to clone its folder directly.`,
-	);
-	return out.select(
-		"Branch to clone",
-		info.branches.map((b) => ({ value: b.url, label: b.name })),
-	);
+function reportSync(sync: SyncSummary): void {
+	const { state, detail } = verdict(sync);
+	if (out.isPorcelain) {
+		out.log(`sync\t${state.toLowerCase()}`);
+		if (sync.error) out.log(`error\t${sync.error}`);
+		out.log(`connect\t${sync.connectMs ?? ""}`);
+		out.log(`root\t${sync.url}\t${sync.heads.join(" ")}`);
+		for (const u of sync.unsynced) out.log(`unsynced\t${u}`);
+		return;
+	}
+	out.block(state, detail);
+	out.obj({ "root doc": sync.url, "root heads": fmtHeads(sync.heads) });
 }
+
+const summaryRows = (root: string, info: RepoSummary, filesLabel: string) => ({
+	Path: root,
+	Files: `${info.files} ${filesLabel}`,
+});
 
 async function pickStrategyInteractively(info: {
 	url: AutomergeUrl;
@@ -287,10 +129,9 @@ program
 	.command("init")
 	.description("Initialize pushwork in a directory")
 	.argument("[dir]", "Directory to initialize", ".")
-	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
-	.option("--legacy", "Alias for --no-sub")
-	.option("--no-keyhive", "Create a plain repo even though a keyhive identity is in use")
-	.option("--no-world-read", "Keyhive: don't grant everyone read access to the new repo")
+	.option("--offline", "Don't contact the sync server")
+	.option("--server <url>", "Sync server to use for this repo")
+	.option("--publish", "Publish with keyhive: anyone can read and clone, only you can write")
 	.option(
 		"--shape <shape>",
 		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
@@ -304,26 +145,17 @@ program
 	)
 	.action(async (dir, opts) => {
 		dlog("init dir=%s opts=%o", dir, opts);
-		const backend = backendOf(opts);
-		const keyhive = await initKeyhiveOf(backend, opts);
 		const root = path.resolve(dir);
 		out.intro("pushwork init");
-		if (keyhive) {
-			out.info(
-				`keyhive identity in use: this repo will be end-to-end encrypted${
-					opts.worldRead ? " and readable by everyone" : " and private until you grant access"
-				}`,
-			);
-		}
-		out.task("Connecting to sync server");
+		out.task(opts.offline ? "Initializing" : "Connecting to sync server");
 		const info = await init(
 			{
 				dir: root,
-				backend,
-				keyhive,
 				shape: opts.shape,
 				artifactDirectories: opts.artifactDir,
-				worldRead: opts.worldRead,
+				online: !opts.offline,
+				server: opts.server,
+				publish: opts.publish,
 			},
 			report,
 			warn,
@@ -341,8 +173,7 @@ program
 	.description("Clone an automerge URL into a directory")
 	.argument("<url>", "automerge: URL")
 	.argument("<dir>", "Target directory")
-	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
-	.option("--legacy", "Alias for --no-sub")
+	.option("--server <url>", "Sync server to use for this repo")
 	.option(
 		"--shape <shape>",
 		"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
@@ -356,7 +187,6 @@ program
 	)
 	.action(async (u, dir, opts) => {
 		dlog("clone url=%s dir=%s opts=%o", u, dir, opts);
-		const backend = backendOf(opts);
 		const root = path.resolve(dir);
 		out.intro("pushwork clone");
 		out.task("Connecting to sync server");
@@ -364,137 +194,24 @@ program
 			{
 				url: u,
 				dir: root,
-				backend,
 				shape: opts.shape,
 				artifactDirectories: opts.artifactDir,
-				onBranchesDoc: pickBranchInteractively,
+				server: opts.server,
 				onStrategyDoc: pickStrategyInteractively,
 			},
 			report,
-			warn,
 		);
 		out.done(); // complete the final phase line before the summary
 		out.obj(summaryRows(root, info, "downloaded"));
 		out.block("CLONED", info.url);
 		reportSync(info.sync);
 		out.outro("Done");
-		flushWarnings();
-	});
-
-const keyhive = program
-	.command("keyhive")
-	.description("Use a Patchwork keyhive identity: encrypted repos with access control")
-	.addHelpText("after", `\n${KEYHIVE_INSTRUCTIONS}`)
-	.action(() => {
-		out.log(KEYHIVE_INSTRUCTIONS);
-	});
-
-keyhive
-	.command("use")
-	.description("Adopt an identity exported from a Patchwork site (prompts if omitted)")
-	.argument("[identity]", "The exported JSON, or a path to a file holding it")
-	.action(async (identity) => {
-		let text = identity;
-		if (text && !text.trim().startsWith("{")) {
-			text = await fs.readFile(path.resolve(text), "utf8");
-		}
-		if (!text) {
-			text = process.stdin.isTTY
-				? await out.text("Paste the identity copied from your browser console")
-				: await readStdin();
-		}
-		out.task("Importing identity");
-		const id = await keyhiveUse(text);
-		out.done("identity imported");
-		out.obj({ Identity: id.id, "Peer id": id.peerId, Stored: id.path });
-		out.block("KEYHIVE", `identity ${shortId(id.id)} in use`);
-	});
-
-keyhive
-	.command("status")
-	.description("Show the identity in use and, inside a repo, your access to it")
-	.action(async () => {
-		const s = await keyhiveStatus(process.cwd());
-		if (out.isPorcelain) {
-			out.log(`identity\t${s.identity.id}`);
-			out.log(`peer\t${s.identity.peerId}`);
-			out.log(`contact-card\t${s.identity.contactCard}`);
-			if (s.repo) {
-				out.log(`repo\t${s.repo.url}`);
-				out.log(`access\t${s.repo.access ?? "none"}`);
-				out.log(`members\t${s.repo.members.length}`);
-			}
-			return;
-		}
-		out.obj({
-			Identity: s.identity.id,
-			"Peer id": s.identity.peerId,
-			Stored: s.identity.path,
-		});
-		out.log(
-			`\nContact card (give this to someone who should grant you access):\n${s.identity.contactCard}\n`,
-		);
-		if (s.repo) {
-			out.obj({
-				Repo: s.repo.url,
-				Access: s.repo.access ?? "none",
-				Members: s.repo.members.length,
-			});
-		} else {
-			out.info("not inside a keyhive-protected repo");
-		}
-	});
-
-keyhive
-	.command("list")
-	.description("List who has access to this repo")
-	.action(async () => {
-		reportMembers(await keyhiveList(process.cwd()));
-	});
-
-keyhive
-	.command("grant")
-	.description('Grant access to this repo: to a contact card, or to everyone with "public" (or "world")')
-	.argument("<access>", `One of ${ACCESS_LEVELS.join(", ")}`)
-	.argument("[grantee]", 'A contact card (JSON), or "public" / "world" for everyone; prompts if omitted')
-	.action(async (access, grantee) => {
-		const who =
-			grantee ?? (await out.text('Contact card to grant to (or "public" for everyone)'));
-		out.intro("pushwork keyhive grant");
-		out.task("Connecting to sync server");
-		const result = await keyhiveGrant(process.cwd(), access, who, report);
-		out.done();
-		out.block(
-			"GRANTED",
-			`${result.access} to ${result.grantee === "public" ? "everyone" : result.grantee} on ${plural(result.docs, "document")}`,
-		);
-		reportSync(result.sync);
-		out.outro("Done");
-	});
-
-program
-	.command("migrate")
-	.description(
-		"Upgrade an old .pushwork/config.json (including an original pushwork \"main\" repo) to the current format",
-	)
-	.argument("[dir]", "Directory to migrate", ".")
-	.action(async (dir) => {
-		const root = path.resolve(dir);
-		dlog("migrate root=%s", root);
-		const result = await migrate(root);
-		if (result.steps.length === 0) {
-			out.success(`already up to date (version ${result.to})`);
-			return;
-		}
-		out.success(`migrated ${versionLabel(result.from)} → ${result.to}`);
-		out.arr(result.steps);
 	});
 
 program
 	.command("url")
 	.description("Print the automerge URL of this pushwork repo")
 	.action(async () => {
-		dlog("url cwd=%s", process.cwd());
 		out.log(await url(process.cwd()));
 	});
 
@@ -503,11 +220,11 @@ program
 	.description("Pull a single file doc by URL and write it to disk")
 	.argument("<url>", "automerge: URL of a UnixFileEntry doc")
 	.argument("[path]", "Where to write it (defaults to the doc's own name)")
-	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.option("--server <url>", "Sync server to fetch from")
 	.action(async (u, dest, opts) => {
 		dlog("yoink url=%s dest=%s", u, dest);
 		out.task("Yoinking");
-		const result = await yoink(process.cwd(), u, dest, backendOverrideOf(opts));
+		const result = await yoink(process.cwd(), u, dest, opts.server);
 		out.done(`yoinked ${result.path} (${plural(result.bytes, "byte")})`);
 	});
 
@@ -516,12 +233,14 @@ program
 	.description("Push a single file from disk into a file doc by URL")
 	.argument("<path>", "File to read")
 	.argument("<url>", "automerge: URL of the UnixFileEntry doc to overwrite")
-	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.option("--server <url>", "Sync server to push to")
 	.action(async (src, u, opts) => {
 		dlog("yeet src=%s url=%s", src, u);
 		out.task("Yeeting");
-		const result = await yeet(process.cwd(), src, u, backendOverrideOf(opts));
+		const result = await yeet(process.cwd(), src, u, opts.server);
 		out.done(`yeeted ${result.path} → ${result.url} (${plural(result.bytes, "byte")})`);
+		const { state, detail } = verdict(result.sync);
+		if (state !== "SYNCED") out.warn(`${state}${detail ? `: ${detail}` : ""}`);
 	});
 
 program
@@ -535,10 +254,10 @@ program
 		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
 		out.intro(opts.nuclear ? "pushwork sync --nuclear" : "pushwork sync");
 		out.task("Connecting to sync server");
-		const snapshot = await sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
+		const summary = await sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
 		out.done(); // complete the final phase line before the summary
-		reportSync(snapshot);
-		out.outro(opts.nuclear ? "nuclear synced" : "synced");
+		reportSync(summary);
+		out.outro("Done");
 		flushWarnings();
 	});
 

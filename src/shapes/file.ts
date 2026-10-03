@@ -1,15 +1,6 @@
 import * as path from "path";
 import mime from "mime-types";
-import * as Automerge from "@automerge/automerge";
-import {
-	ImmutableString,
-	isImmutableString,
-	parseAutomergeUrl,
-	stringifyAutomergeUrl,
-	type AutomergeUrl,
-	type DocHandle,
-	type Repo,
-} from "@automerge/automerge-repo";
+import { ImmutableString, isImmutableString, updateText } from "@automerge/automerge";
 import type { UnixFileEntry } from "./types.js";
 
 export type Content = string | Uint8Array | ImmutableString;
@@ -33,12 +24,11 @@ export function bytesToContent(
 	return isArtifact ? new ImmutableString(text) : text;
 }
 
-export function contentToBytes(content: Content): Uint8Array {
+// a linked doc that isn't a file (a tldraw board, say) has no content and becomes an empty file
+export function contentToBytes(content: Content | undefined): Uint8Array {
 	if (typeof content === "string") return new TextEncoder().encode(content);
-	if (isImmutableString(content)) {
-		return new TextEncoder().encode(String(content));
-	}
-	return content instanceof Uint8Array ? content : new Uint8Array(content);
+	if (isImmutableString(content)) return new TextEncoder().encode(String(content));
+	return content ?? new Uint8Array();
 }
 
 export function contentEquals(a: Content, b: Content): boolean {
@@ -65,62 +55,30 @@ export function makeFileEntry(
 	};
 }
 
-/**
- * Mutate an existing file doc in place to match `fresh`. Text content is
- * merged with Automerge.updateText so concurrent character edits converge;
- * bytes and ImmutableString are atomic (last writer wins). Metadata fields
- * (extension, mimeType, name) are overwritten when they differ, and the
- * @patchwork tag is added if missing. The handle's heads advance only if
- * something actually changed.
- */
-export function applyFileEntry(
-	handle: DocHandle<UnixFileEntry>,
-	fresh: UnixFileEntry,
-): void {
-	handle.change((d: UnixFileEntry) => {
-		if (!contentEquals(d.content, fresh.content)) {
-			if (typeof d.content === "string" && typeof fresh.content === "string") {
-				Automerge.updateText(d, ["content"], fresh.content);
-			} else {
-				d.content = fresh.content;
-			}
+// pass to docs.change: text is merged with updateText, bytes and ImmutableString are replaced
+export function applyFileEntry(d: UnixFileEntry, fresh: UnixFileEntry): void {
+	if (!contentEquals(d.content, fresh.content)) {
+		if (typeof d.content === "string" && typeof fresh.content === "string") {
+			updateText(d, ["content"], fresh.content);
+		} else {
+			d.content = fresh.content;
 		}
-		if (d.extension !== fresh.extension) d.extension = fresh.extension;
-		if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
-		if (d.name !== fresh.name) d.name = fresh.name;
-		if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
-	});
+	}
+	if (d.extension !== fresh.extension) d.extension = fresh.extension;
+	if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
+	if (d.name !== fresh.name) d.name = fresh.name;
+	if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
 }
 
-export function readFileEntry(handle: DocHandle<unknown>): {
+export function readFileEntry(doc: unknown): {
 	bytes: Uint8Array;
 	entry: UnixFileEntry;
 } {
-	const doc = handle.doc() as Partial<UnixFileEntry> | undefined;
 	if (!doc || typeof doc !== "object" || !("content" in doc)) {
-		throw new Error(`document ${handle.url} is not a UnixFileEntry`);
+		throw new Error("document is not a UnixFileEntry");
 	}
 	const entry = doc as UnixFileEntry;
 	return { bytes: contentToBytes(entry.content), entry };
-}
-
-export async function findFileEntry(
-	repo: Repo,
-	url: AutomergeUrl,
-): Promise<{ handle: DocHandle<UnixFileEntry>; bytes: Uint8Array }> {
-	const handle = await repo.find<UnixFileEntry>(url);
-	const { bytes } = readFileEntry(handle as DocHandle<unknown>);
-	return { handle, bytes };
-}
-
-export function stripHeads(url: AutomergeUrl): AutomergeUrl {
-	const { documentId } = parseAutomergeUrl(url);
-	return stringifyAutomergeUrl({ documentId });
-}
-
-export function pinUrl(handle: DocHandle<unknown>): AutomergeUrl {
-	const { documentId } = parseAutomergeUrl(handle.url);
-	return stringifyAutomergeUrl({ documentId, heads: handle.heads() });
 }
 
 export function normalizeArtifactDir(dir: string): string {

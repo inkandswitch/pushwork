@@ -1,53 +1,41 @@
-# Config & Migrations
+# Config
 
-Per-repo configuration lives at `.pushwork/config.json`; CRDT storage lives at `.pushwork/storage/`.
+Per-repo configuration lives at `.pushwork/config.json`; document storage lives at `.pushwork/storage/`.
 
-## Current Format (version 4)
+## Format (version 6)
 
 ```json
 {
-	"version": 4,
+	"version": 6,
 	"rootUrl": "automerge:...",
-	"backend": "subduction",
-	"shape": "patchwork-folder",
-	"artifactDirectories": ["dist"]
+	"shape": "vfs",
+	"artifactDirectories": ["dist"],
+	"server": "ws://localhost:8080"
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `version` | Config schema version (`CONFIG_VERSION`) |
-| `rootUrl` | The repo's identity — the root folder doc URL |
-| `backend` | `"subduction"` (default) or `"legacy"` WebSocket relay |
-| `shape` | Document layout: `"patchwork-folder"`, `"vfs"`, or a custom module path (see [`shapes`](./shapes.md)) |
+| `rootUrl` | The repo's identity: the root doc URL |
+| `shape` | Document layout: `"vfs"`, `"patchwork-folder"`, or a custom module path (see [`shapes`](./shapes.md)) |
 | `artifactDirectories` | Frozen subtrees (see [`artifacts`](./artifacts.md)) |
+| `server` | Optional. The sync server, when it isn't the default |
+| `publishGroup` | Optional. The keyhive group of a tree made with `init --publish` |
 
-## Strict Versioning
+Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16.
 
-`readConfig` **hard-errors** on any version mismatch and directs the user to `pushwork migrate`. There is no duck-typing and no in-memory tolerance of old shapes — downstream code only ever sees the current format.
+`readConfig` strips heads from `rootUrl`, because the root is always opened live so sync can change it.
 
-One normalization does happen on every load: `rootUrl` is heads-stripped. Older migrated configs sometimes stored a pinned root URL; carrying the heads forward would yield a view-only handle that throws on edit. The documentId (the repo's identity) is preserved.
+## Older versions
 
-## Migration Chain
+There is no migration. A config with any other version throws with instructions:
 
-`pushwork migrate` walks any older config forward one version at a time:
+- Repos on the retired sync3 server are told to `rm -rf .pushwork && pushwork init`, which republishes the directory as a new repo.
+- Everything else is told to run `npx pushwork@2 sync` to publish local edits, then `pushwork clone <rootUrl> <newdir> --shape <shape>`, with the URL and shape filled in.
 
-```
-"-"  ──►  1  ──►  2  ──►  3  ──►  4
-```
+Re-cloning instead of converting in place means a stale working tree can never overwrite newer data on the server.
 
-| Version | Shape |
-| --- | --- |
-| `"-"` | Original (pre-v2) pushwork: `DirectoryConfig` `{sync_server, sync_enabled, root_directory_url, subduction, artifact_directories, ...}`; storage in `.pushwork/automerge/` + `snapshot.json` |
-| 1 | First pushwork@2 layout, no `version` field: `{rootUrl, backend}`; storage in `.pushwork/storage/` |
-| 2 | Adds `version: 2`, `shape`, `artifactDirectories` |
-| 3 | Adds `branches: boolean` |
-| 4 | Drops `branches` (current) |
+## Changing the format
 
-Each step is a small, pure-ish transform. Only the `"-"` → 1 step touches the filesystem (it relocates the storage directory); the rest reshape JSON.
-
-## Adding a Version
-
-1. Bump `CONFIG_VERSION` in `config.ts` and adjust `PushworkConfig`.
-2. Add one `Migration` step (`from: N, to: N+1`) in `migrations.ts`.
-3. Never edit existing steps — old configs must still walk the full chain.
+Bump `CONFIG_VERSION`, change `PushworkConfig`, and decide what `readConfig` tells users of the previous version.

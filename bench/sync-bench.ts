@@ -1,48 +1,35 @@
-/**
- * Offline CPU bench for pushwork's ingest / clone paths.
- *
- * Generates a synthetic tree and runs `init` (or `clone`) against a fully
- * offline Repo (`online:false` ⇒ no sync endpoints), so the measured cost
- * is *pure local work*: change detection, Automerge document creation, text
- * splicing, and snapshot (de)serialization. Network time is deliberately
- * excluded — the timeout/reentrancy behaviour is a separate, server-backed
- * concern. The drift probe in ./profile records how long the event loop is
- * blocked in one unbroken synchronous stretch.
- *
- * Run with tsx (no build step needed):
- *
- *   npx tsx bench/sync-bench.ts --files 2000 --size 512 --text 1 --fanout 20
- *   npx tsx bench/sync-bench.ts --files 5000 --size 256 --text 0   # binary
- *   npx tsx bench/sync-bench.ts --clone-local --files 3000         # pull path
- *   npx tsx bench/sync-bench.ts --clone automerge:... --online      # remote pull
- *
- * Flags:
- *   --files   N    number of files to generate            (default 1000)
- *   --size    N    bytes per file                          (default 512)
- *   --text    R    fraction [0..1] of files that are text  (default 1)
- *   --fanout  N    files per leaf directory                (default 20)
- *   --shape   S    shape to ingest with                    (default vfs)
- *   --backend B    "subduction" | "legacy"                 (default subduction)
- *   --online       sync against the real sync server (default: offline)
- *   --clone   URL  pull an existing remote root into a fresh dir (online)
- *   --clone-local  fully offline clone: ingest a tree in a source dir
- *                  (untimed), copy its storage, then measure the offline pull
- *   --keep         don't delete the temp dir(s) afterwards
- *
- * The profile (event-loop drift, peak RSS) goes to stderr; a one-line JSON
- * summary goes to stdout.
- */
+// CPU bench for pushwork's ingest and clone paths.
+//
+//   pnpm bench:build
+//   node dist-bench/bench/sync-bench.js --files 2000 --size 512 --text 1 --fanout 20
+//   node dist-bench/bench/sync-bench.js --files 5000 --size 256 --text 0   # binary
+//   node dist-bench/bench/sync-bench.js --clone-local --files 3000         # pull path
+//   node dist-bench/bench/sync-bench.js --clone automerge:...              # remote pull
+//
+// Flags:
+//   --files   N    number of files to generate            (default 1000)
+//   --size    N    bytes per file                          (default 512)
+//   --text    R    fraction [0..1] of files that are text  (default 1)
+//   --fanout  N    files per leaf directory                (default 20)
+//   --shape   S    shape to ingest with                    (default vfs)
+//   --online       init against the default sync server    (default: offline)
+//   --clone   URL  clone an existing root from the default sync server
+//   --clone-local  init a tree elsewhere (untimed), copy its storage, then time
+//                  a clone that finds every doc on disk (via a local server)
+//   --keep         don't delete the temp dirs afterwards
+//
+// The profile goes to stderr; one JSON summary line goes to stdout.
+
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import { performance } from "perf_hooks";
 
-import { clone, heads, init, url, type Backend } from "../src/index.js";
+import { clone, heads, init, url } from "../src/index.js";
+import { startServer } from "../test/server.js";
 import {
 	getProfileReport,
 	printProfileReport,
-	resetProfile,
-	setProfilingEnabled,
 	startDriftProbe,
 	stopDriftProbe,
 } from "./profile.js";
@@ -53,7 +40,6 @@ interface Args {
 	text: number;
 	fanout: number;
 	shape: string;
-	backend: Backend;
 	keep: boolean;
 	online: boolean;
 	clone: string;
@@ -72,18 +58,9 @@ function parseArgs(): Args {
 		text: parseFloat(get("--text", "1")),
 		fanout: parseInt(get("--fanout", "20"), 10),
 		shape: get("--shape", "vfs"),
-		backend: get("--backend", "subduction") === "legacy" ? "legacy" : "subduction",
 		keep: a.includes("--keep"),
-		// --online ⇒ sync against the real sync server (prod). Default is
-		// fully offline for a deterministic CPU bench.
 		online: a.includes("--online"),
-		// --clone <url> ⇒ pull the given root URL into a fresh dir (online),
-		// measuring the pull path instead of generating + uploading a tree.
 		clone: get("--clone", ""),
-		// --clone-local ⇒ fully offline clone: generate + ingest a tree in a
-		// source dir (untimed), copy its storage into a fresh dir, then
-		// measure the pull-everything clone from local storage. Isolates the
-		// clone path's CPU (doc materialization) deterministically.
 		cloneLocal: a.includes("--clone-local"),
 	};
 }
@@ -148,25 +125,20 @@ async function main(): Promise<void> {
 			genMs = Math.round(performance.now() - genStart);
 		}
 
-		// --clone-local setup (untimed): ingest the tree in a SOURCE dir, then
-		// copy its automerge storage into `root` so the measured clone pulls
-		// everything from local storage.
 		let localCloneUrl: string | undefined;
+		let server: Awaited<ReturnType<typeof startServer>> | undefined;
 		if (args.cloneLocal) {
 			const srcRoot = await mkTmpRoot("pushwork-bench-src-");
 			cleanup.push(srcRoot);
 			await generateTree(srcRoot, args);
-			localCloneUrl = (await init({
-				dir: srcRoot,
-				backend: args.backend,
-				shape: args.shape,
-				online: false,
-			})).url;
-			await fs.mkdir(path.join(root, ".pushwork"), { recursive: true });
-			await fs.copyFile(
-				path.join(srcRoot, ".pushwork", "storage.lmdb"),
-				path.join(root, ".pushwork", "storage.lmdb"),
+			localCloneUrl = (await init({ dir: srcRoot, shape: args.shape, online: false })).url;
+			await fs.cp(
+				path.join(srcRoot, ".pushwork", "storage"),
+				path.join(root, ".pushwork", "storage"),
+				{ recursive: true },
 			);
+			// clone needs a connection, but every doc it finds is already on disk
+			server = await startServer();
 		}
 
 		// Print the target URL up front for clone modes so it's grabbable even
@@ -174,38 +146,20 @@ async function main(): Promise<void> {
 		if (cloneMode) process.stderr.write(`ROOT_URL ${args.clone}\n`);
 		else if (localCloneUrl) process.stderr.write(`ROOT_URL ${localCloneUrl}\n`);
 
-		setProfilingEnabled(true);
-		resetProfile();
 		startDriftProbe();
 		const syncStart = performance.now();
 
 		if (cloneMode) {
-			await clone({
-				url: args.clone,
-				dir: root,
-				backend: args.backend,
-				shape: args.shape,
-				online: true,
-			});
+			await clone({ url: args.clone, dir: root, shape: args.shape });
 		} else if (args.cloneLocal) {
-			await clone({
-				url: localCloneUrl!,
-				dir: root,
-				backend: args.backend,
-				shape: args.shape,
-				online: false,
-			});
+			await clone({ url: localCloneUrl!, dir: root, shape: args.shape, server: server!.url });
 		} else {
-			await init({
-				dir: root,
-				backend: args.backend,
-				shape: args.shape,
-				online: args.online,
-			});
+			await init({ dir: root, shape: args.shape, online: args.online });
 		}
 
 		const syncMs = Math.round(performance.now() - syncStart);
 		stopDriftProbe();
+		await server?.close();
 
 		const rootUrl = await url(root);
 		const filesChanged = await countLeaves(root);

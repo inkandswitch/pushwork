@@ -1,22 +1,16 @@
 import * as fs from "fs/promises";
 import * as path from "path";
-import type { AutomergeUrl } from "@automerge/automerge-repo";
-import { stripHeads } from "./shapes/file.js";
+import { stripHeads, type AutomergeUrl } from "./url.js";
 
-export type Backend = "legacy" | "subduction";
-
-export const BACKENDS: readonly Backend[] = ["legacy", "subduction"];
-
-export const CONFIG_VERSION = 5;
+export const CONFIG_VERSION = 6;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;
 	rootUrl: AutomergeUrl;
-	backend: Backend;
-	/** Documents are keyhive-protected: encrypted, with a member list. */
-	keyhive: boolean;
 	shape: string;
 	artifactDirectories: string[];
+	server?: string;
+	publishGroup?: string;
 }
 
 const DIR = ".pushwork";
@@ -26,34 +20,44 @@ const STORAGE = "storage";
 export const pushworkDir = (root: string) => path.join(root, DIR);
 export const storageDir = (root: string) => path.join(root, DIR, STORAGE);
 
+// fields of the configs written by pushwork 1 and 2
+type OldConfig = {
+	version?: number;
+	rootUrl?: string;
+	root_directory_url?: string;
+	shape?: string;
+	backend?: string;
+	subduction?: boolean;
+};
+
+function oldVersionError(old: OldConfig): Error {
+	const original = old.version === undefined && old.rootUrl === undefined;
+	if (old.backend === "legacy" || (original && !old.subduction)) {
+		return new Error(
+			"this repo's data is on the retired sync3 server; `rm -rf .pushwork && pushwork init` republishes it as a new repo",
+		);
+	}
+	const url = old.rootUrl ?? old.root_directory_url ?? "<rootUrl>";
+	const shape = old.shape ?? (original ? "patchwork-folder" : "vfs");
+	return new Error(
+		`pushwork 3 uses a new storage format. Run \`npx pushwork@2 sync\` to publish any local edits, then \`pushwork clone ${url} <newdir> --shape ${shape}\``,
+	);
+}
+
 export async function readConfig(root: string): Promise<PushworkConfig> {
 	const text = await fs.readFile(path.join(root, DIR, CONFIG), "utf8");
-	const parsed = JSON.parse(text) as Partial<PushworkConfig>;
-	if (parsed.version !== CONFIG_VERSION) {
-		throw new Error(
-			`pushwork config version mismatch: expected ${CONFIG_VERSION}, got ${parsed.version ?? "(missing)"} — run \`pushwork migrate\` to upgrade it`,
-		);
-	}
+	const parsed = JSON.parse(text);
+	if (parsed.version !== CONFIG_VERSION) throw oldVersionError(parsed);
 	if (!parsed.rootUrl) throw new Error("pushwork config missing rootUrl");
-	if (!parsed.backend) throw new Error("pushwork config missing backend");
-	if (!BACKENDS.includes(parsed.backend)) {
-		throw new Error(
-			`pushwork config has unknown backend "${parsed.backend}" — upgrade pushwork`,
-		);
-	}
 	if (!parsed.shape) throw new Error("pushwork config missing shape");
 	return {
 		version: CONFIG_VERSION,
-		// The root folder doc must always be opened live so sync can mutate it.
-		// Older configs (e.g. migrated from the original pushwork) sometimes
-		// stored a heads-pinned `root_directory_url`; carrying those heads
-		// forward would yield a view-only handle that throws on edit. Strip
-		// them here — the documentId (the repo's identity) is preserved.
+		// the root is always opened live so sync can change it
 		rootUrl: stripHeads(parsed.rootUrl),
-		backend: parsed.backend,
-		keyhive: parsed.keyhive === true,
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],
+		server: parsed.server,
+		publishGroup: parsed.publishGroup,
 	};
 }
 
@@ -62,10 +66,9 @@ export async function writeConfig(
 	config: PushworkConfig,
 ): Promise<void> {
 	await fs.mkdir(path.join(root, DIR), { recursive: true });
-	const { keyhive, ...rest } = config;
 	await fs.writeFile(
 		path.join(root, DIR, CONFIG),
-		JSON.stringify(keyhive ? config : rest, null, 2) + "\n",
+		JSON.stringify(config, null, 2) + "\n",
 	);
 }
 

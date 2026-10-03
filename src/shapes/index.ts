@@ -5,9 +5,6 @@ import type { Shape } from "./types.js";
 
 export type ShapeName = "vfs" | "patchwork-folder" | string;
 
-export const isBuiltinShape = (name: string): boolean =>
-	name === "vfs" || name === "patchwork-folder";
-
 export async function resolveShape(name: ShapeName): Promise<Shape> {
 	if (name === "vfs") return vfsShape;
 	if (name === "patchwork-folder") return patchworkFolderShape;

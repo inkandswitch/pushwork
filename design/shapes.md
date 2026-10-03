@@ -14,18 +14,20 @@ A _shape_ is a strategy for laying a directory tree out as Automerge documents. 
 ```ts
 interface Shape {
 	encode(args: {
-		repo: Repo
+		docs: Docs
 		tree: VfsNode
-		previousRoot?: DocHandle<unknown> // mutate in place vs. create fresh
+		previousRoot?: AutomergeUrl // change this root in place instead of creating one
 		title?: string
 		isArtifactDir?: (posixPath: string) => boolean // see artifacts.md
 	}): Promise<AutomergeUrl>
 
-	decode(args: {repo: Repo; root: DocHandle<unknown>}): Promise<VfsNode>
+	decode(args: {docs: Docs; root: AutomergeUrl}): Promise<VfsNode>
 }
 ```
 
-- `encode` with `previousRoot` mutates the existing root doc in place — the root URL is the repo's identity and must be preserved.
+`Docs` (`src/docs.ts`) is the whole document API a shape needs: `find`, `create`, `change`, `heads` and `pin`.
+
+- `encode` with `previousRoot` changes the existing root doc in place, because the root URL is the repo's identity. Values that haven't changed aren't rewritten, so an unchanged tree leaves the root's heads alone.
 - `isArtifactDir` classifies repo-relative posix _directory_ paths; shapes that represent directories as their own docs pin those folder links with heads so the whole subtree reads as frozen (see [`artifacts`](./artifacts.md)).
 
 ## File Documents
@@ -50,11 +52,11 @@ Content classification (`bytesToContent`):
 | Valid UTF-8, artifact        | `ImmutableString` (atomic, LWW)     |
 | Contains NUL / invalid UTF-8 | `Uint8Array` (atomic, LWW)          |
 
-Text updates go through `Automerge.updateText` so concurrent character-level edits converge; bytes and `ImmutableString` are last-writer-wins.
+Leaves are updated with `docs.change(url, d => applyFileEntry(d, fresh))`. Text goes through `Automerge.updateText` so concurrent character-level edits converge; bytes and `ImmutableString` are last-writer-wins.
 
 ## Builtin Shapes
 
-### `patchwork-folder` (default)
+### `patchwork-folder`
 
 One folder doc per directory, interoperable with Patchwork:
 
@@ -63,14 +65,13 @@ One folder doc per directory, interoperable with Patchwork:
   "@patchwork": { type: "folder" },
   title: string,
   docs: [{ name, type, url, icon? }, ...],
-  lastSyncAt?: number,
 }
 ```
 
 - Subfolders are linked by URL — plain for normal dirs, heads-pinned for artifact dirs.
 - `type` is the file extension (or `"folder"`), used by Patchwork for icons.
 
-### `vfs`
+### `vfs` (default)
 
 A single directory doc mapping slash-separated relative paths directly to file-doc URLs:
 
@@ -82,7 +83,7 @@ A single directory doc mapping slash-separated relative paths directly to file-d
 }
 ```
 
-Flat and cheap — one doc for the whole tree structure — at the cost of folder-level granularity and Patchwork folder interop.
+Flat and cheap — one doc for the whole tree structure — at the cost of folder-level granularity and Patchwork folder interop. `lastSyncAt` is reserved: older pushwork wrote it, and it is never decoded as a file.
 
 ## Custom Shapes
 

@@ -1,9 +1,6 @@
-import type {
-	AutomergeUrl,
-	DocHandle,
-	ImmutableString,
-	Repo,
-} from "@automerge/automerge-repo";
+import type { ImmutableString } from "@automerge/automerge";
+import type { Docs } from "../docs.js";
+import type { AutomergeUrl } from "../url.js";
 
 export type VfsNode =
 	| { kind: "dir"; entries: Map<string, VfsNode> }
@@ -19,22 +16,14 @@ export type UnixFileEntry = {
 
 export interface Shape {
 	encode(args: {
-		repo: Repo;
+		docs: Docs;
 		tree: VfsNode;
-		previousRoot?: DocHandle<unknown>;
+		previousRoot?: AutomergeUrl;
 		title?: string;
-		/**
-		 * Classifies a repo-relative posix *directory* path as an artifact
-		 * directory (immutable, heads-pinned). Shapes that represent directories
-		 * as their own docs (e.g. patchwork-folder) pin those folder links so
-		 * the whole subtree reads as frozen. Omitted ⇒ no folder is pinned.
-		 */
+		// shapes with a doc per directory pin links to artifact dirs
 		isArtifactDir?: (posixPath: string) => boolean;
 	}): Promise<AutomergeUrl>;
-	decode(args: {
-		repo: Repo;
-		root: DocHandle<unknown>;
-	}): Promise<VfsNode>;
+	decode(args: { docs: Docs; root: AutomergeUrl }): Promise<VfsNode>;
 }
 
 export const newDir = (): VfsNode => ({ kind: "dir", entries: new Map() });

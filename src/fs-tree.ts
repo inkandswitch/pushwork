@@ -59,7 +59,7 @@ export function byteEq(a: Uint8Array | undefined, b: Uint8Array): boolean {
 	return true;
 }
 
-export async function writeFileAtomic(
+export async function writeFileMkdir(
 	target: string,
 	bytes: Uint8Array,
 ): Promise<void> {
