@@ -391,10 +391,10 @@ export class Docs {
 			const r = await node.syncWithPeer(peer, sid, false, TIMEOUT_MS);
 			if (!r.success) throw new Error(r.transportErrors[0]?.message ?? "not authorized / not found");
 			const [commits, fragments] = await Promise.all([storage.loadAllCommits(sid), storage.loadAllFragments(sid)]);
-			await this.node.storeBuiltBatch(
+			await this.options.storage.saveBatchAll(
 				sid,
-				commits.map(c => new CommitInput(c.signed.payload, c.blob)),
-				fragments.map(f => new FragmentInput(f.signed.payload, f.blob)),
+				commits.map(c => ({ commitId: c.signed.payload.commitId, signedCommit: c.signed, blob: c.blob })),
+				fragments.map(f => ({ fragmentHead: f.signed.payload.head, signedFragment: f.signed, blob: f.blob })),
 			);
 		} finally {
 			await node.disconnectAll();

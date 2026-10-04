@@ -3,7 +3,7 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as A from "@automerge/automerge";
-import { MemorySigner, MemoryStorage, type Policy } from "@automerge/automerge-subduction";
+import { CommitId, MemorySigner, MemoryStorage, type Policy, type SedimentreeStorage } from "@automerge/automerge-subduction";
 import { Docs, type DocsOptions } from "../../src/docs.js";
 import { FsStorage } from "../../src/storage.js";
 import { newDocumentId, parseAutomergeUrl, stringifyAutomergeUrl, toSedimentreeId, type AutomergeUrl } from "../../src/url.js";
@@ -231,28 +231,42 @@ describe("Docs online", () => {
 		await b.close();
 	});
 
-	it("converges concurrent edits after a shared head closes a fragment", async () => {
+	it.each([1, 3])("converges concurrent edits after shared heads close fragments (%i docs)", async count => {
 		const server = inject("server");
-		const a = await open({ server });
-		const url = await a.create<Counter>({ n: 0 });
-		while (!(await a.heads(url))[0].startsWith("00")) {
-			await bump(a, url, 1);
+		const aStorage: SedimentreeStorage = new MemoryStorage();
+		const bStorage: SedimentreeStorage = new MemoryStorage();
+		const a = await open({ server, storage: aStorage });
+		const urls: AutomergeUrl[] = [];
+		for (let i = 0; i < count; i++) {
+			const url = await a.create<Counter>({ n: 0 });
+			while (!(await a.heads(url))[0].startsWith("00")) {
+				await bump(a, url, 1);
+			}
+			urls.push(url);
 		}
 		await a.sync();
-		const b = await open({ server });
-		await b.find(url);
-
-		await a.change<Counter & { a: string }>(url, d => {
-			d.a = "A";
-		});
-		await b.change<Counter & { b: string }>(url, d => {
-			d.b = "B";
-		});
+		const b = await open({ server, storage: bStorage });
+		for (const url of urls) {
+			await b.find(url);
+			await a.change<Counter & { a: string }>(url, d => {
+				d.a = "A";
+			});
+			await b.change<Counter & { b: string }>(url, d => {
+				d.b = "B";
+			});
+		}
+		const bHeads = await Promise.all(urls.map(async url => CommitId.fromHexString((await b.heads(url))[0])));
 		expect((await a.sync()).unsynced).toEqual([]);
 		expect((await b.sync()).unsynced).toEqual([]);
 		expect((await a.sync()).unsynced).toEqual([]);
-		expect(await a.find(url)).toEqual(await b.find(url));
-		expect(await a.find(url)).toMatchObject({ a: "A", b: "B" });
+		for (const [i, url] of urls.entries()) {
+			expect(await a.find(url)).toEqual(await b.find(url));
+			expect(await a.find(url)).toMatchObject({ a: "A", b: "B" });
+			const sid = toSedimentreeId(parseAutomergeUrl(url).documentId);
+			const original = await bStorage.loadCommit(sid, bHeads[i]);
+			expect(original).not.toBeNull();
+			expect((await aStorage.loadCommit(sid, bHeads[i]))?.signed.encode()).toEqual(original!.signed.encode());
+		}
 		await a.close();
 		await b.close();
 	});
