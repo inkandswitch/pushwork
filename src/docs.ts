@@ -6,6 +6,7 @@ import {
 	Fragment,
 	FragmentInput,
 	LooseCommit,
+	MemoryStorage,
 	Subduction,
 	SubductionWebSocket,
 	setSubductionLogLevel,
@@ -333,6 +334,7 @@ export class Docs {
 			const sid = toSedimentreeId(id);
 			let result: Result = { ok: false, received: false };
 			let wait = SEND_SETTLE_MS;
+			let pulled = false;
 			for (let round = 0; round < SYNC_ROUNDS; round++) {
 				const r = await this.node.syncWithPeer(this.peer!, sid, false, TIMEOUT_MS);
 				if (!r.success) {
@@ -341,6 +343,23 @@ export class Docs {
 				}
 				result.received ||= r.stats.totalReceived > 0;
 				if (r.stats.totalSent === 0 && r.stats.totalReceived === 0) {
+					const heads = r.stats.remoteHeads.map(h => h.toHexString());
+					const doc = await this.read(id);
+					if (heads.length && (!doc || !A.hasHeads(doc, heads))) {
+						if (pulled) {
+							result.error = "remote heads not found";
+							break;
+						}
+						try {
+							await this.pull(id);
+						} catch (e) {
+							result.error = message(e);
+							break;
+						}
+						pulled = true;
+						result.received = true;
+						continue;
+					}
 					result.ok = true;
 					break;
 				}
@@ -358,6 +377,29 @@ export class Docs {
 			this.results.set(id, result);
 			return result;
 		});
+	}
+
+	// A shared fragment can hide remote children in Subduction's diff. An empty
+	// summary avoids that pruning; import its blobs without losing local changes.
+	private async pull(id: DocumentId): Promise<void> {
+		const storage: SedimentreeStorage = new MemoryStorage();
+		const node = new Subduction({ signer: this.options.signer, storage });
+		try {
+			const { peer, error } = await connect(node, this.options.signer, this.options.server!);
+			if (!peer) throw new Error(error ?? "could not connect");
+			const sid = toSedimentreeId(id);
+			const r = await node.syncWithPeer(peer, sid, false, TIMEOUT_MS);
+			if (!r.success) throw new Error(r.transportErrors[0]?.message ?? "not authorized / not found");
+			const [commits, fragments] = await Promise.all([storage.loadAllCommits(sid), storage.loadAllFragments(sid)]);
+			await this.node.storeBuiltBatch(
+				sid,
+				commits.map(c => new CommitInput(c.signed.payload, c.blob)),
+				fragments.map(f => new FragmentInput(f.signed.payload, f.blob)),
+			);
+		} finally {
+			await node.disconnectAll();
+			node.free();
+		}
 	}
 
 	private async compact(id: DocumentId, doc: A.Doc<unknown>) {

@@ -231,6 +231,32 @@ describe("Docs online", () => {
 		await b.close();
 	});
 
+	it("converges concurrent edits after a shared head closes a fragment", async () => {
+		const server = inject("server");
+		const a = await open({ server });
+		const url = await a.create<Counter>({ n: 0 });
+		while (!(await a.heads(url))[0].startsWith("00")) {
+			await bump(a, url, 1);
+		}
+		await a.sync();
+		const b = await open({ server });
+		await b.find(url);
+
+		await a.change<Counter & { a: string }>(url, d => {
+			d.a = "A";
+		});
+		await b.change<Counter & { b: string }>(url, d => {
+			d.b = "B";
+		});
+		expect((await a.sync()).unsynced).toEqual([]);
+		expect((await b.sync()).unsynced).toEqual([]);
+		expect((await a.sync()).unsynced).toEqual([]);
+		expect(await a.find(url)).toEqual(await b.find(url));
+		expect(await a.find(url)).toMatchObject({ a: "A", b: "B" });
+		await a.close();
+		await b.close();
+	});
+
 	it("compacts a synced doc and keeps syncing it", async () => {
 		const server = inject("server");
 		const dir = await tmp();
@@ -289,5 +315,23 @@ describe("Docs online", () => {
 		expect(report).toMatchObject({ online: true, synced: 0, unsynced: [url] });
 		await docs.close();
 		await server.close();
+	});
+
+	it("reports pending when remote heads cannot be decoded", async () => {
+		const server = inject("server");
+		const a = await open({ server });
+		const url = await a.create<Counter>({ n: 1 });
+		await a.sync();
+		await a.close();
+
+		const b = await open({
+			server,
+			codec: {
+				encode: async (_id, _head, _parents, bytes) => bytes,
+				decode: async () => null,
+			},
+		});
+		expect(await b.sync([url])).toMatchObject({ online: true, synced: 0, unsynced: [url] });
+		await b.close();
 	});
 });
