@@ -47,6 +47,12 @@ export function resolveWith(servers: Servers, settings: Settings): { url: string
 
 export type AccessLevel = "relay" | "read" | "edit" | "admin";
 
+/** Who a membership change is for: anyone with the URL, or the holder of a contact card (its JSON). */
+export type Grantee = { public: true } | { card: string };
+
+/** A direct member of a repo's group: its keyhive id (base64), or the public, and its access. */
+export type Member = { id: string; public: boolean; access: string };
+
 export type Hive = {
 	server: string;
 	id: string;
@@ -58,6 +64,12 @@ export type Hive = {
 	groupOf(id: DocumentId): Promise<string | undefined>;
 	newId(group: string): () => Promise<DocumentId>;
 	canWrite(id: DocumentId): Promise<boolean>;
+	/** Give `who` `level` on `group` (hex), replacing any access it had; "none" revokes it. */
+	setAccess(group: string, who: Grantee, level: AccessLevel | "none"): Promise<void>;
+	/** The direct members of `group` (hex). */
+	members(group: string): Promise<Member[]>;
+	/** The documents `group` (hex) is a member of. */
+	groupDocs(group: string): Promise<DocumentId[]>;
 	sync(docs: Docs): Promise<void>;
 	close(): Promise<void>;
 };

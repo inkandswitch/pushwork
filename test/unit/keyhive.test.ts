@@ -6,7 +6,7 @@ import * as path from "path";
 import { MemorySigner, MemoryStorage } from "@automerge/automerge-subduction";
 import { Docs } from "../../src/docs";
 import { SERVERS, archiveFile, cardPeerId, openHive, resolveSettings } from "../../src/keyhive";
-import { keyhiveInfo, setKeyhiveServer } from "../../src/pushwork";
+import { addContact, keyhiveInfo, listContacts, removeContact, setKeyhiveServer } from "../../src/pushwork";
 import { isProtected, parseAutomergeUrl } from "../../src/url";
 
 // Offline: keyhive docs round-trip through keyhive encryption and the saved archive.
@@ -76,6 +76,55 @@ describe("keyhive", () => {
 		expect(await reopened.groupOf(id)).toBe(group);
 		await reopened.close();
 	});
+
+	it("keeps contacts by name", async () => {
+		const prev = process.env.HOME;
+		process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-contacts-"));
+		try {
+			const card = SERVERS.subduction.card;
+			const added = await addContact("server", card);
+			expect(added.id).toBe(cardPeerId(card));
+			const file = path.join(os.tmpdir(), `card-${process.pid}.json`);
+			fs.writeFileSync(file, SERVERS.keyhive.card + "\n");
+			await addContact("other", file);
+			expect((await listContacts()).map(c => c.name)).toEqual(["other", "server"]);
+			await expect(addContact("bad", "{}")).rejects.toThrow(/not a keyhive contact card/);
+			await removeContact("other");
+			expect((await listContacts()).map(c => c.name)).toEqual(["server"]);
+			await expect(removeContact("nobody")).rejects.toThrow(/no contact named/);
+		} finally {
+			process.env.HOME = prev;
+		}
+	});
+
+	for (const version of ["0.5", "0.6"] as const) {
+		it(`sets and revokes access on a group with keyhive ${version}`, async () => {
+			const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-hive-")), "archive");
+			const hive = await openHive(file, crypto.getRandomValues(new Uint8Array(32)), {}, false, version);
+			const other = await openHive(
+				path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-hive-")), "archive"),
+				crypto.getRandomValues(new Uint8Array(32)),
+				{},
+				false,
+				version,
+			);
+			const group = await hive.createGroup({ server: "relay" });
+			const id = await hive.newId(group)();
+			expect(await hive.groupDocs(group)).toEqual([id]);
+			const card = await other.contactCard();
+			const access = async (who: string) => (await hive.members(group)).find(m => m.id === who)?.access;
+			await hive.setAccess(group, { card }, "read");
+			expect(await access(other.id)).toBe("read");
+			await hive.setAccess(group, { card }, "edit");
+			expect(await access(other.id)).toBe("edit");
+			await hive.setAccess(group, { card }, "none");
+			expect(await access(other.id)).toBeUndefined();
+			await hive.setAccess(group, { public: true }, "read");
+			expect((await hive.members(group)).find(m => m.public)?.access).toBe("read");
+			await hive.close();
+			await other.close();
+		});
+	}
 
 	it("is held by one process at a time", async () => {
 		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-hive-")), "keyhive");

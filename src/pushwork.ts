@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { Docs, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
+import type { Grantee, Member } from "./keyhive/common.js";
 import { DEFAULT_KEYHIVE_VERSION, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
@@ -26,6 +27,7 @@ import {
 	isProtected,
 	isValidAutomergeUrl,
 	parseAutomergeUrl,
+	stringifyAutomergeUrl,
 	stripHeads,
 	type AutomergeUrl,
 } from "./url.js";
@@ -276,6 +278,125 @@ async function readCard(card: string): Promise<string> {
 		return (await res.text()).trim();
 	}
 	return (await fs.readFile(card, "utf8")).trim();
+}
+
+// ---- contacts: keyhive contact cards by name, shared by every repo on the machine
+
+const contactsFile = () => path.join(pushworkHome(), "contacts.json");
+
+async function readContacts(): Promise<Record<string, string>> {
+	try {
+		return JSON.parse(await fs.readFile(contactsFile(), "utf8"));
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw e;
+	}
+}
+
+async function writeContacts(contacts: Record<string, string>): Promise<void> {
+	await fs.mkdir(pushworkHome(), { recursive: true });
+	await fs.writeFile(contactsFile(), JSON.stringify(contacts, null, 2) + "\n");
+}
+
+export type Contact = { name: string; id: string; card: string };
+
+/** Save a contact card under `name`: the card as JSON, an http(s) url or a file. */
+export async function addContact(name: string, card: string): Promise<Contact> {
+	const { cardPeerId } = await import("./keyhive.js");
+	const json = await readCard(card);
+	let id: string;
+	try {
+		id = cardPeerId(json);
+	} catch {
+		throw new Error(`${card} is not a keyhive contact card`);
+	}
+	const contacts = await readContacts();
+	contacts[name] = json;
+	await writeContacts(contacts);
+	return { name, id, card: json };
+}
+
+export async function listContacts(): Promise<Contact[]> {
+	const { cardPeerId } = await import("./keyhive.js");
+	return Object.entries(await readContacts())
+		.map(([name, card]) => ({ name, id: cardPeerId(card), card }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function removeContact(name: string): Promise<void> {
+	const contacts = await readContacts();
+	if (!(name in contacts)) throw new Error(`no contact named ${name}`);
+	delete contacts[name];
+	await writeContacts(contacts);
+}
+
+// ---- access to a keyhive repo
+
+/** Open this keyhive repo online with its group, for changing or reading who can access it. */
+async function openKeyhiveRepo(cwd: string) {
+	const repo = await openRepo(cwd, { online: true });
+	if (!repo.hive) {
+		await repo.docs.close();
+		throw new Error("not a keyhive repo");
+	}
+	if (!repo.group) {
+		await repo.docs.close();
+		await repo.hive.close();
+		throw new Error("this machine's keyhive doesn't know this repo's group");
+	}
+	return repo as typeof repo & { hive: Hive; group: string };
+}
+
+// change one membership, then publish it to the keyhive server
+async function setRepoAccess(cwd: string, who: Grantee, level: AccessLevel | "none"): Promise<void> {
+	const { docs, hive, group } = await openKeyhiveRepo(cwd);
+	try {
+		if (!docs.online) throw new Error(`could not connect to ${hive.server}: ${docs.report().error}`);
+		await hive.setAccess(group, who, level);
+		// A new member can only open what's encrypted after they joined, back through the
+		// keys each change carries for its predecessors. Give every document a change under
+		// the new keys, so they can read the whole history.
+		if (level === "read" || level === "edit" || level === "admin") {
+			for (const id of await hive.groupDocs(group)) await docs.touch(stringifyAutomergeUrl(id));
+		}
+		await syncAll(docs, hive);
+	} finally {
+		await docs.close();
+		await hive.close();
+	}
+}
+
+/** What anyone with this keyhive repo's URL may do; "none" takes public access away. */
+export const setPublicAccess = (cwd: string, level: AccessLevel | "none") => setRepoAccess(cwd, { public: true }, level);
+
+/** What the contact named `name` may do in this keyhive repo; "none" revokes their access. */
+export async function setContactAccess(cwd: string, name: string, level: AccessLevel | "none"): Promise<void> {
+	const card = (await readContacts())[name];
+	if (!card) throw new Error(`no contact named ${name}; add one with \`pushwork keyhive contacts add ${name} <card>\``);
+	await setRepoAccess(cwd, { card }, level);
+}
+
+export type AccessEntry = Member & { name?: string; you: boolean; server: boolean };
+
+/** Who has access to this keyhive repo, named from contacts where possible. */
+export async function repoAccess(cwd: string): Promise<AccessEntry[]> {
+	const { config, docs, hive, group } = await openKeyhiveRepo(cwd);
+	try {
+		// pick up membership changes made elsewhere first
+		if (docs.online) await hive.sync(docs);
+		const { resolveSettings, cardPeerId } = await import("./keyhive.js");
+		const server = cardPeerId(resolveSettings(await recordedKeyhive(config)).card);
+		const names = new Map((await listContacts()).map(c => [c.id, c.name]));
+		return (await hive.members(group)).map(m => ({
+			...m,
+			name: names.get(m.id),
+			you: m.id === hive.id,
+			server: m.id === server,
+		}));
+	} finally {
+		await docs.close();
+		await hive.close();
+	}
 }
 
 async function writeKeyhiveSettings(settings: Settings): Promise<void> {

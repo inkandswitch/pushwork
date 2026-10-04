@@ -24,7 +24,17 @@ import {
 import { PromiseQueue } from "automerge-repo-keyhive-0.6/dist/network-adapter/pending.js";
 import type { Docs } from "../docs.js";
 import type { DocumentId } from "../url.js";
-import { type Hive, type Servers, type Settings, lock, noStorage, resolveWith, serverTable } from "./common.js";
+import {
+	type AccessLevel,
+	type Grantee,
+	type Hive,
+	type Servers,
+	type Settings,
+	lock,
+	noStorage,
+	resolveWith,
+	serverTable,
+} from "./common.js";
 
 // the built-in servers, with the cards automerge-repo-keyhive 0.6 ships
 export const SERVERS: Servers = serverTable({
@@ -121,6 +131,32 @@ export async function openHive(
 				return false;
 			}),
 
+		setAccess: (group, who, level) =>
+			queue.run(async () => {
+				const membered = MemberedId.group(new GroupId(Buffer.from(group, "hex")));
+				const id = await identify(kh, who);
+				const current = await accessOf(kh, group, id);
+				if (current && current !== level) await kh.revokeMember(id, true, membered);
+				if (level !== "none" && current !== level) {
+					// the group's documents, so the new member gets their keys, not just the delegation
+					await kh.addMember(id, membered, Access.fromString(level), await groupDocs(kh, group));
+				}
+			}),
+
+		members: group =>
+			queue.run(async () => {
+				const g = await kh.getGroup(new GroupId(Buffer.from(group, "hex")));
+				if (!g) throw new Error(`keyhive doesn't know group ${group}`);
+				const anyone = b64(Identifier.publicId().toBytes());
+				return (await g.members()).map(m => {
+					const id = b64(m.who.id.toBytes());
+					return { id, public: id === anyone, access: m.can.toString().toLowerCase() };
+				});
+			}),
+
+		groupDocs: group =>
+			queue.run(async () => (await groupDocs(kh, group)).map(d => bs58check.encode(d.toBytes()) as DocumentId)),
+
 		async sync(docs) {
 			const peer = Buffer.from(card.id.toBytes()).toString("base64");
 			const connected = (await docs.node.getConnectedPeerIds()).map(p => Buffer.from(p.toBytes()).toString("base64"));
@@ -140,6 +176,33 @@ export async function openHive(
 			await unlock();
 		},
 	};
+}
+
+const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+
+// the identifier a grant is for, receiving the contact card first if keyhive hasn't seen it
+async function identify(kh: Keyhive, who: Grantee): Promise<Identifier> {
+	if ("public" in who) return Identifier.publicId();
+	const card = ContactCard.fromJson(who.card);
+	if (!(await kh.hasIndividual(card.individualId))) await kh.receiveContactCard(card);
+	return card.id;
+}
+
+// the documents `group` (hex) is a direct member of
+async function groupDocs(kh: Keyhive, group: string): Promise<KeyhiveDocumentId[]> {
+	const out: KeyhiveDocumentId[] = [];
+	for (const { doc } of await kh.reachableDocs()) {
+		if ((await doc.members()).some(m => Buffer.from(m.who.id.toBytes()).toString("hex") === group)) out.push(doc.docId);
+	}
+	return out;
+}
+
+// `id`'s current direct access to `group`, if it has any
+async function accessOf(kh: Keyhive, group: string, id: Identifier): Promise<AccessLevel | undefined> {
+	const g = await kh.getGroup(new GroupId(Buffer.from(group, "hex")));
+	const want = b64(id.toBytes());
+	const member = (await g?.members())?.find(m => b64(m.who.id.toBytes()) === want);
+	return member?.can.toString().toLowerCase() as AccessLevel | undefined;
 }
 
 type Peer = { syncpoint: number | null; lastKeyhiveRequestSent: number };

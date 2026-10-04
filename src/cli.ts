@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
-import { Command, Option } from "@commander-js/extra-typings";
+import { Argument, Command, Option } from "@commander-js/extra-typings";
 import * as path from "path";
 import {
 	clone,
@@ -11,6 +11,12 @@ import {
 	ACCESS_LEVELS,
 	keyhiveInfo,
 	setKeyhiveServer,
+	setPublicAccess,
+	setContactAccess,
+	repoAccess,
+	addContact,
+	listContacts,
+	removeContact,
 	migrate,
 	track,
 	cutWorkdir,
@@ -324,6 +330,16 @@ program
 const keyhive = program
 	.command("keyhive")
 	.description("Show the keyhive server keyhive repos sync through, and your contact card")
+	.addHelpText(
+		"after",
+		`
+To get your contact card from patchwork (with keyhive on), run this in its devtools console;
+it copies the card's JSON to the clipboard:
+
+  copy((await (hive.keyhive.getExistingContactCard ?? hive.keyhive.contactCard).call(hive.keyhive)).toJson())
+
+Then, here: pushwork keyhive contacts add <name> '<card json>'`,
+	)
 	.addOption(
 		new Option("--keyhive-version <version>", "Which keyhive identity's card to show (default 0.6)").choices(KEYHIVE_VERSIONS),
 	)
@@ -351,6 +367,79 @@ keyhive
 	.action(async (server, card) => {
 		await setKeyhiveServer(server, card);
 		out.log(`keyhive server set to ${server}`);
+	});
+
+const GRANT_LEVELS = ["relay", "read", "edit", "admin", "none"] as const;
+
+keyhive
+	.command("public")
+	.description("Set what anyone with this keyhive repo's URL may do")
+	.addArgument(
+		new Argument("<level>", "relay (store and forward), read, edit, admin, or none to take public access away").choices(
+			GRANT_LEVELS,
+		),
+	)
+	.action(async level => {
+		await setPublicAccess(process.cwd(), level);
+		out.log(level === "none" ? "public access removed" : `anyone with the URL can now ${level}`);
+	});
+
+keyhive
+	.command("access")
+	.description("Show who can access this keyhive repo, or set a contact's access")
+	.argument("[contact]", "A contact's name (see `pushwork keyhive contacts`)")
+	.addArgument(
+		new Argument("[level]", "relay, read, edit, admin, or none to revoke their access").choices(GRANT_LEVELS),
+	)
+	.action(async (contact, level) => {
+		if (contact && !level) throw new Error("give a level: relay, read, edit, admin or none");
+		if (contact && level) {
+			await setContactAccess(process.cwd(), contact, level);
+			out.log(level === "none" ? `${contact}'s access revoked` : `${contact} can now ${level}`);
+			return;
+		}
+		const members = await repoAccess(process.cwd());
+		out.obj(
+			Object.fromEntries(
+				members.map(m => [
+					m.public ? "anyone" : m.you ? "you" : m.server ? "keyhive server" : (m.name ?? m.id),
+					m.access,
+				]),
+			),
+		);
+	});
+
+const contacts = keyhive.command("contacts").description("Keyhive contact cards, by name, for granting access");
+
+contacts
+	.command("add")
+	.description("Save someone's contact card under a name")
+	.argument("<name>", "What to call them")
+	.argument("<card>", "Their contact card: JSON, an http(s) url or a file")
+	.action(async (name, card) => {
+		const contact = await addContact(name, card);
+		out.log(`saved ${contact.name} (${contact.id})`);
+	});
+
+contacts
+	.command("ls")
+	.description("List saved contacts")
+	.action(async () => {
+		const all = await listContacts();
+		if (!all.length) {
+			out.log("no contacts; add one with `pushwork keyhive contacts add <name> <card>`");
+			return;
+		}
+		out.obj(Object.fromEntries(all.map(c => [c.name, c.id])));
+	});
+
+contacts
+	.command("rm")
+	.description("Forget a saved contact (their access to repos is unchanged)")
+	.argument("<name>", "The contact's name")
+	.action(async name => {
+		await removeContact(name);
+		out.log(`removed ${name}`);
 	});
 
 const shape = program.command("shape").description("Manage installed document shapes");

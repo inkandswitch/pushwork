@@ -159,6 +159,13 @@ export class Docs {
 		return bare(id);
 	}
 
+	/** Add an empty change to a document, so it has one encrypted under the current keys. */
+	async touch(url: AutomergeUrl): Promise<void> {
+		const entry = await this.entry(parseAutomergeUrl(url).documentId);
+		entry.doc = A.emptyChange(entry.doc);
+		entry.dirty = true;
+	}
+
 	async change<T>(url: AutomergeUrl, fn: A.ChangeFn<T>): Promise<void> {
 		const { documentId, heads } = parseAutomergeUrl(url);
 		if (heads) throw new Error(`cannot change a pinned url: ${url}`);
@@ -260,7 +267,17 @@ export class Docs {
 			...fragments.map(f => [f.signed.payload.head.toHexString(), f.blob] as const),
 		];
 		if (!codec) return items.map(([, blob]) => blob);
-		const decoded = await Promise.all(items.map(([head, blob]) => codec.decode(id, head, blob)));
+		// Decrypting a blob can reveal its predecessors' keys, and some blobs only open with
+		// those (anything encrypted before this reader was given access), so retry the ones
+		// that failed for as long as each pass opens more.
+		const decoded: (Uint8Array | null)[] = items.map(() => null);
+		let pending = items.map((_, i) => i);
+		while (pending.length) {
+			const results = await Promise.all(pending.map(i => codec.decode(id, items[i][0], items[i][1])));
+			const failed = pending.filter((i, k) => (decoded[i] = results[k]) === null);
+			if (failed.length === pending.length) break;
+			pending = failed;
+		}
 		return decoded.filter(blob => blob !== null);
 	}
 

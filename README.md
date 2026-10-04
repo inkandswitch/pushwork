@@ -158,6 +158,11 @@ Keyhive membership then syncs through the keyhive server and documents through t
 | Command | Description |
 | --- | --- |
 | `pushwork keyhive` | Show the keyhive server, its peer id, your keyhive id and a contact card for you. |
+| `pushwork keyhive public <level>` | In a keyhive repo: what anyone with the URL may do, `relay`, `read`, `edit` or `admin`; `none` takes public access away. |
+| `pushwork keyhive access` | In a keyhive repo: who has access, named from your contacts. |
+| `pushwork keyhive access <contact> <level>` | Give a contact `relay`, `read`, `edit` or `admin`, or `none` to revoke it. New readers can read the whole history: every document gets a change under the new keys. |
+| `pushwork keyhive contacts add <name> <card>` | Save someone's contact card (JSON, an `http(s)://` url or a file) under a name, in `~/.pushwork/contacts.json`. `pushwork keyhive --help` shows how to get yours out of patchwork. |
+| `pushwork keyhive contacts ls` / `rm <name>` | List or forget saved contacts. Forgetting one doesn't change their access. |
 | `pushwork keyhive server <name>` | Make a built-in server, `keyhive` or `subduction`, with its contact card, the default for new keyhive repos. |
 | `pushwork keyhive server <url> <card>` | Make any `ws(s)://` server the default. The card is the server's contact card: a built-in name, its JSON, an `http(s)://` url serving it, or a file. pushwork checks that the server it connects to is the one in the card. |
 
