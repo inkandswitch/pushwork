@@ -343,9 +343,7 @@ export class Docs {
 				}
 				result.received ||= r.stats.totalReceived > 0;
 				if (r.stats.totalSent === 0 && r.stats.totalReceived === 0) {
-					const heads = r.stats.remoteHeads.map(h => h.toHexString());
-					const doc = await this.read(id);
-					if (heads.length && (!doc || !A.hasHeads(doc, heads))) {
+					if (!(await this.hasHeads(id, r.stats.remoteHeads))) {
 						if (pulled) {
 							result.error = "remote heads not found";
 							break;
@@ -377,6 +375,15 @@ export class Docs {
 			this.results.set(id, result);
 			return result;
 		});
+	}
+
+	// Stored ids answer without decoding; a head inside a fragment needs the doc.
+	private async hasHeads(id: DocumentId, heads: CommitId[]): Promise<boolean> {
+		const { commitIds, fragmentIds } = await this.onDisk(toSedimentreeId(id));
+		const hex = heads.map(h => h.toHexString());
+		if (hex.every(h => commitIds.has(h) || fragmentIds.has(h))) return true;
+		const doc = await this.read(id);
+		return !!doc && A.hasHeads(doc, hex);
 	}
 
 	// A shared fragment can hide remote children in Subduction's diff. An empty

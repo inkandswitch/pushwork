@@ -331,7 +331,7 @@ describe("Docs online", () => {
 		await server.close();
 	});
 
-	it("reports pending when remote heads cannot be decoded", async () => {
+	it("counts a doc synced when its stored blobs cannot be decoded", async () => {
 		const server = inject("server");
 		const a = await open({ server });
 		const url = await a.create<Counter>({ n: 1 });
@@ -345,7 +345,7 @@ describe("Docs online", () => {
 				decode: async () => null,
 			},
 		});
-		expect(await b.sync([url])).toMatchObject({ online: true, synced: 0, unsynced: [url] });
+		expect(await b.sync([url])).toMatchObject({ online: true, synced: 1, unsynced: [] });
 		await b.close();
 	});
 });
