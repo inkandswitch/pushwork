@@ -145,7 +145,7 @@ program
 	.option("--keyhive-server <server>", "Keyhive server for this repo: a built-in name (keyhive, subduction) or a ws(s):// url")
 	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
 	.addOption(
-		new Option("--keyhive-version <version>", "automerge-repo-keyhive version for this keyhive repo (default 0.5)").choices(
+		new Option("--keyhive-version <version>", "automerge-repo-keyhive version for this keyhive repo (default 0.6)").choices(
 			KEYHIVE_VERSIONS,
 		),
 	)
@@ -222,7 +222,7 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 		.option("--keyhive-server <server>", "For a keyhive repo: its keyhive server, a built-in name (keyhive, subduction) or a ws(s):// url")
 		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
 		.addOption(
-			new Option("--keyhive-version <version>", "For a keyhive repo: its automerge-repo-keyhive version (default 0.5)").choices(
+			new Option("--keyhive-version <version>", "For a keyhive repo: its automerge-repo-keyhive version (default 0.6)").choices(
 				KEYHIVE_VERSIONS,
 			),
 		);
@@ -325,7 +325,7 @@ const keyhive = program
 	.command("keyhive")
 	.description("Show the keyhive server keyhive repos sync through, and your contact card")
 	.addOption(
-		new Option("--keyhive-version <version>", "Which keyhive identity's card to show (default 0.5)").choices(KEYHIVE_VERSIONS),
+		new Option("--keyhive-version <version>", "Which keyhive identity's card to show (default 0.6)").choices(KEYHIVE_VERSIONS),
 	)
 	.action(async opts => {
 		const info = await keyhiveInfo(opts.keyhiveVersion);

@@ -13,15 +13,19 @@ import type { DocumentId } from "../url.js";
  */
 export const KEYHIVE_VERSIONS = ["0.5", "0.6"] as const;
 export type KeyhiveVersion = (typeof KEYHIVE_VERSIONS)[number];
-/** What a repo without a recorded version was made with, and what new repos use. */
-export const DEFAULT_KEYHIVE_VERSION: KeyhiveVersion = "0.5";
+/** What new keyhive repos use. */
+export const DEFAULT_KEYHIVE_VERSION: KeyhiveVersion = "0.6";
+/** What a repo without a recorded version was made with: before versions there was only 0.5. */
+export const LEGACY_KEYHIVE_VERSION: KeyhiveVersion = "0.5";
 
 export const isKeyhiveVersion = (v: unknown): v is KeyhiveVersion => KEYHIVE_VERSIONS.includes(v as KeyhiveVersion);
 
 /** What `pushwork keyhive server` stores: a built-in name, or a url and card (a name or JSON). */
 export type Settings = { server?: string; card?: string };
 
-export const DEFAULT_SERVER_NAME = "keyhive";
+export const DEFAULT_SERVER_NAME = "subduction";
+/** The keyhive server of repos from before configs recorded one. */
+export const LEGACY_SERVER_NAME = "keyhive";
 
 export type Servers = Record<string, { url: string; card: string }>;
 

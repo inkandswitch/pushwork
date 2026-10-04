@@ -14,7 +14,7 @@ import {
 } from "./config.js";
 import { Docs, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
-import { DEFAULT_KEYHIVE_VERSION } from "./keyhive/common.js";
+import { DEFAULT_KEYHIVE_VERSION, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
@@ -95,7 +95,7 @@ export type InitOpts = {
 
 /**
  * A keyhive server (built-in name or url) and its contact card, unset meaning this machine's
- * default; and the automerge-repo-keyhive version to use, unset meaning 0.5.
+ * default; and the automerge-repo-keyhive version to use, unset meaning the default (0.6).
  */
 export type KeyhiveServerOpts = { keyhiveServer?: string; keyhiveCard?: string; keyhiveVersion?: KeyhiveVersion };
 
@@ -183,10 +183,12 @@ async function keyhiveSettingsFor(opts: KeyhiveServerOpts): Promise<KeyhiveSetti
 	return { ...(await readKeyhiveSettings()), version };
 }
 
-// An existing repo's keyhive server, as recorded at init or clone.
+// An existing repo's keyhive server and version, as recorded at init or clone. Repos from
+// before those were recorded used keyhive.sync.automerge.org and keyhive 0.5.
 const recordedKeyhive = async (config: PushworkConfig): Promise<KeyhiveSettings> => ({
-	...(config.keyhiveServer ? { server: config.keyhiveServer, card: config.keyhiveCard } : await readKeyhiveSettings()),
-	version: config.keyhiveVersion ?? DEFAULT_KEYHIVE_VERSION,
+	server: config.keyhiveServer ?? LEGACY_SERVER_NAME,
+	card: config.keyhiveServer ? config.keyhiveCard : undefined,
+	version: config.keyhiveVersion ?? LEGACY_KEYHIVE_VERSION,
 });
 
 const keyhiveConfig = async (settings: KeyhiveSettings) => {

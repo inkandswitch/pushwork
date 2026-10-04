@@ -102,8 +102,8 @@ describe("keyhive", () => {
 		});
 		const saved = () => JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pushwork", "keyhive.json"), "utf8"));
 
-		it("defaults to the keyhive server and its card", () => {
-			expect(resolveSettings({})).toEqual(SERVERS.keyhive);
+		it("defaults to the subduction server and its card", () => {
+			expect(resolveSettings({})).toEqual(SERVERS.subduction);
 		});
 
 		it("takes a built-in server by name or url, with its card", async () => {
@@ -151,8 +151,9 @@ describe("keyhive", () => {
 
 		it("shows the server's peer id and this machine's contact card", async () => {
 			const first = await keyhiveInfo();
-			expect(first.server).toBe(SERVERS.keyhive.url);
-			expect(first.serverPeer).toBe(cardPeerId(SERVERS.keyhive.card));
+			expect(first.server).toBe(SERVERS.subduction.url);
+			expect(first.serverPeer).toBe(cardPeerId(SERVERS.subduction.card));
+			expect(first.version).toBe("0.6");
 			expect(cardPeerId(first.me)).toBe(first.id);
 			expect((await keyhiveInfo()).id).toBe(first.id);
 		});
