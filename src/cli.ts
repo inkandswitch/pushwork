@@ -30,6 +30,7 @@ import {
 	type SyncSummary,
 } from "./pushwork.js";
 import type { SyncReport } from "./docs.js";
+import { KEYHIVE_VERSIONS } from "./keyhive/common.js";
 import type { AutomergeUrl } from "./url.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
@@ -144,6 +145,11 @@ program
 	.option("--keyhive-server <server>", "Keyhive server for this repo: a built-in name (keyhive, subduction) or a ws(s):// url")
 	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
 	.addOption(
+		new Option("--keyhive-version <version>", "automerge-repo-keyhive version for this keyhive repo (default 0.5)").choices(
+			KEYHIVE_VERSIONS,
+		),
+	)
+	.addOption(
 		new Option("--public-access <level>", "With --keyhive: what anyone may do with the repo").choices(ACCESS_LEVELS),
 	)
 	.addOption(
@@ -182,6 +188,7 @@ program
 					: undefined,
 				keyhiveServer: opts.keyhiveServer,
 				keyhiveCard: opts.keyhiveCard,
+				keyhiveVersion: opts.keyhiveVersion,
 			},
 			report,
 			warn,
@@ -213,7 +220,12 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 			undefined as string[] | undefined,
 		)
 		.option("--keyhive-server <server>", "For a keyhive repo: its keyhive server, a built-in name (keyhive, subduction) or a ws(s):// url")
-		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file");
+		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
+		.addOption(
+			new Option("--keyhive-version <version>", "For a keyhive repo: its automerge-repo-keyhive version (default 0.5)").choices(
+				KEYHIVE_VERSIONS,
+			),
+		);
 
 const attachOpts = (
 	u: string,
@@ -224,6 +236,7 @@ const attachOpts = (
 		syncServer?: string;
 		keyhiveServer?: string;
 		keyhiveCard?: string;
+		keyhiveVersion?: (typeof KEYHIVE_VERSIONS)[number];
 	},
 ) => ({
 	url: u,
@@ -233,6 +246,7 @@ const attachOpts = (
 	syncServer: opts.syncServer,
 	keyhiveServer: opts.keyhiveServer,
 	keyhiveCard: opts.keyhiveCard,
+	keyhiveVersion: opts.keyhiveVersion,
 	onStrategyDoc: pickStrategyInteractively,
 });
 
@@ -310,9 +324,13 @@ program
 const keyhive = program
 	.command("keyhive")
 	.description("Show the keyhive server keyhive repos sync through, and your contact card")
-	.action(async () => {
-		const info = await keyhiveInfo();
+	.addOption(
+		new Option("--keyhive-version <version>", "Which keyhive identity's card to show (default 0.5)").choices(KEYHIVE_VERSIONS),
+	)
+	.action(async opts => {
+		const info = await keyhiveInfo(opts.keyhiveVersion);
 		out.obj({
+			Keyhive: `automerge-repo-keyhive ${info.version}`,
 			Server: info.serverName ? `${info.server} (${info.serverName})` : info.server,
 			"Server card": info.cardName ? `${info.cardName} (built in)` : "custom",
 			"Server peer": info.serverPeer,

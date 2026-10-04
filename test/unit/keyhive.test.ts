@@ -5,7 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { MemorySigner, MemoryStorage } from "@automerge/automerge-subduction";
 import { Docs } from "../../src/docs";
-import { SERVERS, cardPeerId, openHive, resolveSettings } from "../../src/keyhive";
+import { SERVERS, archiveFile, cardPeerId, openHive, resolveSettings } from "../../src/keyhive";
 import { keyhiveInfo, setKeyhiveServer } from "../../src/pushwork";
 import { isProtected, parseAutomergeUrl } from "../../src/url";
 
@@ -40,6 +40,40 @@ describe("keyhive", () => {
 		expect(doc.text).toBe("published");
 		expect(A.getHeads(doc)).toEqual(heads);
 		await again.close();
+		await reopened.close();
+	});
+
+	it("keeps each keyhive version's archive apart, moving the old single file into 0.5", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-home-"));
+		const dir = path.join(home, "keyhive");
+		fs.writeFileSync(dir, "old archive");
+		expect(await archiveFile(dir, "0.6")).toBe(path.join(dir, "0.6", "archive"));
+		expect(fs.readFileSync(path.join(dir, "0.5", "archive"), "utf8")).toBe("old archive");
+		expect(await archiveFile(dir, "0.5")).toBe(path.join(dir, "0.5", "archive"));
+		// a move that stopped between its two renames is finished
+		const other = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-home-")), "keyhive");
+		fs.writeFileSync(`${other}.moving`, "half moved");
+		await archiveFile(other, "0.5");
+		expect(fs.readFileSync(path.join(other, "0.5", "archive"), "utf8")).toBe("half moved");
+		// the old archive isn't moved out from under a running pushwork
+		const busy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-home-")), "keyhive");
+		fs.writeFileSync(busy, "in use");
+		fs.writeFileSync(`${busy}.lock`, String(process.pid));
+		await expect(archiveFile(busy, "0.5")).rejects.toThrow(/in use/);
+		expect(fs.readFileSync(busy, "utf8")).toBe("in use");
+	});
+
+	it("opens a 0.6 archive with automerge-repo-keyhive 0.6", async () => {
+		const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-hive-")), "archive");
+		const seed = crypto.getRandomValues(new Uint8Array(32));
+		const hive = await openHive(file, seed, {}, false, "0.6");
+		const group = await hive.createGroup({ public: "read", server: "relay" });
+		const id = await hive.newId(group)();
+		expect(await hive.groupOf(id)).toBe(group);
+		expect(await hive.canWrite(id)).toBe(true);
+		await hive.close();
+		const reopened = await openHive(file, seed, {}, false, "0.6");
+		expect(await reopened.groupOf(id)).toBe(group);
 		await reopened.close();
 	});
 

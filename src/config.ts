@@ -1,5 +1,6 @@
 import * as fs from "fs/promises";
 import * as path from "path";
+import { type KeyhiveVersion, isKeyhiveVersion } from "./keyhive/common.js";
 import { stripHeads, type AutomergeUrl } from "./url.js";
 
 export const CONFIG_VERSION = 6;
@@ -14,6 +15,8 @@ export interface PushworkConfig {
 	/** A keyhive repo's keyhive server (a built-in name or url) and its contact card (a name or JSON). */
 	keyhiveServer?: string;
 	keyhiveCard?: string;
+	/** A keyhive repo's automerge-repo-keyhive version; unset means 0.5, the only one there was. */
+	keyhiveVersion?: KeyhiveVersion;
 }
 
 const DIR = ".pushwork";
@@ -76,6 +79,9 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 	}
 	if (!parsed.rootUrl) throw new Error("pushwork config missing rootUrl");
 	if (!parsed.shape) throw new Error("pushwork config missing shape");
+	if (parsed.keyhiveVersion !== undefined && !isKeyhiveVersion(parsed.keyhiveVersion)) {
+		throw new Error(`pushwork config has an unknown keyhiveVersion: ${parsed.keyhiveVersion}`);
+	}
 	return {
 		version: CONFIG_VERSION,
 		// the root is always opened live so sync can change it
@@ -85,6 +91,7 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		syncServer: parsed.syncServer,
 		keyhiveServer: parsed.keyhiveServer,
 		keyhiveCard: parsed.keyhiveCard,
+		keyhiveVersion: parsed.keyhiveVersion,
 	};
 }
 

@@ -23,6 +23,7 @@ Per-repo configuration lives at `.pushwork/config.json`; document storage lives 
 | `syncServer` | Optional. Where document data syncs, when it isn't the default (for keyhive repos, the keyhive server) |
 | `keyhiveServer` | Keyhive repos. The keyhive server, a built-in name or url, recorded at init or clone |
 | `keyhiveCard` | Keyhive repos with a custom server. Its contact card |
+| `keyhiveVersion` | Keyhive repos. The automerge-repo-keyhive version, `0.5` or `0.6`; unset means `0.5`. The two can't read each other's archives or talk to each other's servers |
 
 Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16. Its keyhive group isn't stored either; it's read from the root document's members in the local keyhive state.
 

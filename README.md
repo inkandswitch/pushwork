@@ -141,7 +141,9 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 
 On a clone without edit access, `sync` only pulls, and refuses to run while you have local edits (`pushwork cut` them first). Cloning a repo you can't read fails with an error saying so.
 
-Your signing key is `~/.pushwork/key` and your keyhive state is `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it.
+Your signing key is `~/.pushwork/key` and your keyhive state is in `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it.
+
+pushwork carries two versions of keyhive (automerge-repo-keyhive 0.5 and 0.6), which can't read each other's state or talk to each other's servers. Each keyhive repo records which one it uses; `--keyhive-version` picks it at `init` or `clone`, and the default is `0.5`, the version the built-in servers speak. Each version keeps its own state, in `~/.pushwork/keyhive/0.5/archive` and `~/.pushwork/keyhive/0.6/archive`, under the same identity. (State from before versions, a single `~/.pushwork/keyhive` file, is moved to `0.5/archive` the first time it's opened.)
 
 Each keyhive repo records its keyhive server in its config when it's created or cloned, because that's the server holding relay access on its group. `--keyhive-server` picks it; otherwise it's this machine's default, kept in `~/.pushwork/keyhive.json`, which starts as `wss://keyhive.sync.automerge.org` (`keyhive`). `subduction.sync.inkandswitch.com` (`subduction`) is built in too, but it doesn't answer keyhive sync at the moment.
 

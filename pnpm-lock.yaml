@@ -14,9 +14,6 @@ importers:
       '@automerge/automerge':
         specifier: 3.3.2
         version: 3.3.2
-      '@automerge/automerge-repo-keyhive':
-        specifier: 0.5.0-alpha.7
-        version: 0.5.0-alpha.7(ws@8.21.0)
       '@automerge/automerge-subduction':
         specifier: 0.16.1
         version: 0.16.1
@@ -29,6 +26,12 @@ importers:
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.4.0
+      automerge-repo-keyhive-0.5:
+        specifier: npm:@automerge/automerge-repo-keyhive@0.5.0-alpha.7
+        version: '@automerge/automerge-repo-keyhive@0.5.0-alpha.7(ws@8.21.0)'
+      automerge-repo-keyhive-0.6:
+        specifier: npm:@automerge/automerge-repo-keyhive@0.6.0-alpha.1
+        version: '@automerge/automerge-repo-keyhive@0.6.0-alpha.1(ws@8.21.0)'
       bs58check:
         specifier: ^4.0.0
         version: 4.0.0
@@ -96,6 +99,10 @@ packages:
 
   '@automerge/automerge-repo-keyhive@0.5.0-alpha.7':
     resolution: {integrity: sha512-9eGgbRwcEDPVdhEySi49YJfh5bn1uPx1OJI9YtoUIMVe+sxWByn58OEwIt6Jzd4dXcZAVjSqucwIXpmB6fOJQw==}
+    engines: {node: '>=22.13'}
+
+  '@automerge/automerge-repo-keyhive@0.6.0-alpha.1':
+    resolution: {integrity: sha512-U/KVwRlKevLfqsZ37uSZgOXfQsR1pwQ0soRgq+BnERf7nhKN+LrdpK7xHDXv8Z4xTa1bAmnmCSAnvARjVZ3+Iw==}
     engines: {node: '>=22.13'}
 
   '@automerge/automerge-repo-network-websocket@2.6.0-subduction.48':
@@ -404,6 +411,9 @@ packages:
 
   '@keyhive/keyhive@0.1.0-alpha.8':
     resolution: {integrity: sha512-juyDs15N3xyKl9mtGHoghdxiCGiXVReS4GufjUMATE3TsgASA/fznISCic+sKc9mMg+aAOXWFAbNELfBe3GyvA==}
+
+  '@keyhive/keyhive@0.3.0-alpha.1':
+    resolution: {integrity: sha512-2MsnK989GTGR+j+2LwyiekeaXYAWcBUY5Em4b6nVOLRmLJn/rtdgaB9EfOi52gkxW0TqAi3njrHXX0eJBdoxXA==}
 
   '@manypkg/find-root@1.1.0':
     resolution: {integrity: sha512-mki5uBvhHzO8kYYix/WRy2WX8S3B5wdVSc9D6KcU5lQNglP2yt58/VfLuAK49glRXChosY8ap2oJ1qgma3GUVA==}
@@ -1355,6 +1365,22 @@ snapshots:
       - utf-8-validate
       - ws
 
+  '@automerge/automerge-repo-keyhive@0.6.0-alpha.1(ws@8.21.0)':
+    dependencies:
+      '@automerge/automerge-repo': 2.6.0-subduction.48
+      '@automerge/automerge-repo-network-websocket': 2.6.0-subduction.48
+      '@automerge/automerge-subduction': 0.16.1
+      '@keyhive/keyhive': 0.3.0-alpha.1
+      '@noble/hashes': 2.4.0
+      cbor-x: 1.6.4
+      eventemitter3: 5.0.4
+      isomorphic-ws: 5.0.0(ws@8.21.0)
+    transitivePeerDependencies:
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+      - ws
+
   '@automerge/automerge-repo-network-websocket@2.6.0-subduction.48':
     dependencies:
       '@automerge/automerge-repo': 2.6.0-subduction.48
@@ -1685,6 +1711,8 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@keyhive/keyhive@0.1.0-alpha.8': {}
+
+  '@keyhive/keyhive@0.3.0-alpha.1': {}
 
   '@manypkg/find-root@1.1.0':
     dependencies:
