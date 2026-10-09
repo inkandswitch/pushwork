@@ -8,6 +8,7 @@ import { Docs } from "../../src/docs";
 import { SERVERS, archiveFile, cardPeerId, openHive, resolveSettings } from "../../src/keyhive";
 import { addContact, keyhiveInfo, listContacts, removeContact, setKeyhiveServer } from "../../src/pushwork";
 import { isProtected, parseAutomergeUrl } from "../../src/url";
+import { setHome } from "../home";
 
 // Offline: keyhive docs round-trip through keyhive encryption and the saved archive.
 describe("keyhive", () => {
@@ -78,8 +79,7 @@ describe("keyhive", () => {
 	});
 
 	it("keeps contacts by name", async () => {
-		const prev = process.env.HOME;
-		process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-contacts-"));
+		const restoreHome = setHome(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-contacts-")));
 		try {
 			const card = SERVERS.subduction.card;
 			const added = await addContact("server", card);
@@ -93,7 +93,7 @@ describe("keyhive", () => {
 			expect((await listContacts()).map(c => c.name)).toEqual(["server"]);
 			await expect(removeContact("nobody")).rejects.toThrow(/no contact named/);
 		} finally {
-			process.env.HOME = prev;
+			restoreHome();
 		}
 	});
 
@@ -142,13 +142,11 @@ describe("keyhive", () => {
 	});
 
 	describe("settings", () => {
-		const home = process.env.HOME;
+		let restoreHome: () => void;
 		beforeEach(() => {
-			process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-home-"));
+			restoreHome = setHome(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-home-")));
 		});
-		afterEach(() => {
-			process.env.HOME = home;
-		});
+		afterEach(() => restoreHome());
 		const saved = () => JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pushwork", "keyhive.json"), "utf8"));
 
 		it("defaults to the subduction server and its card", () => {

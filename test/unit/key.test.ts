@@ -3,18 +3,19 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import { loadSeed, signerFrom } from "../../src/key.js";
+import { setHome } from "../home";
 
 let home: string;
-const saved = process.env.HOME;
+let restoreHome: () => void;
 const keyFile = () => path.join(home, ".pushwork", "key");
 
 beforeEach(async () => {
 	home = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-key-"));
-	process.env.HOME = home;
+	restoreHome = setHome(home);
 });
 
 afterEach(async () => {
-	process.env.HOME = saved;
+	restoreHome();
 	await fs.rm(home, { recursive: true, force: true });
 });
 
@@ -24,7 +25,8 @@ describe("loadSeed", () => {
 		expect(seed.length).toBe(32);
 		const text = await fs.readFile(keyFile(), "utf8");
 		expect(text.trim()).toBe(Buffer.from(seed).toString("hex"));
-		expect((await fs.stat(keyFile())).mode & 0o777).toBe(0o600);
+		// Windows has no permission bits to speak of
+		if (process.platform !== "win32") expect((await fs.stat(keyFile())).mode & 0o777).toBe(0o600);
 		expect(await loadSeed()).toEqual(seed);
 		expect(await fs.readdir(path.dirname(keyFile()))).toEqual(["key"]);
 	});

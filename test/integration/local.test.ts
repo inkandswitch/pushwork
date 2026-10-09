@@ -3,13 +3,14 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
-import { getAttributeSync, setAttributeSync } from "@napi-rs/xattr";
 import { CONFIG_VERSION } from "../../src/config.js";
 import { URL_XATTR } from "../../src/xattr.js";
 import { exists, pushwork, readText } from "../cli";
 import { startSilentServer } from "../server";
 
 const server = inject("server");
+// no xattrs on Windows, nor a native binding to ask for them
+const xattr = process.platform === "win32" ? undefined : await import("@napi-rs/xattr");
 
 describe("pushwork local-only commands", () => {
 	let work: string;
@@ -99,10 +100,10 @@ describe("pushwork local-only commands", () => {
 		await silent.close();
 	});
 
-	describe("url xattrs", () => {
+	describe.skipIf(!xattr)("url xattrs", () => {
 		const urlOf = async (file: string) =>
 			(await pushwork(["--porcelain", "heads", file], work)).stdout.split("\t")[1];
-		const attr = (file: string) => getAttributeSync(path.join(work, file), URL_XATTR)?.toString();
+		const attr = (file: string) => xattr!.getAttributeSync(path.join(work, file), URL_XATTR)?.toString();
 
 		it("labels every file with its doc's url", async () => {
 			await fs.mkdir(path.join(work, "sub"));
@@ -179,7 +180,7 @@ describe("pushwork local-only commands", () => {
 			await initRepo();
 			const url = await urlOf("a.txt");
 			await fs.writeFile(path.join(work, "copy.txt"), "hello\n");
-			setAttributeSync(path.join(work, "copy.txt"), URL_XATTR, url);
+			xattr!.setAttributeSync(path.join(work, "copy.txt"), URL_XATTR, url);
 			await pushwork(["save"], work);
 			expect(await urlOf("a.txt")).toBe(url);
 			const copy = await urlOf("copy.txt");

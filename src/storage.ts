@@ -44,8 +44,10 @@ async function size(file: string): Promise<number> {
 	);
 }
 
-async function fsync(file: string) {
-	const handle = await fs.open(file, "r");
+// Windows can't open a directory to sync it, and NTFS journals the renames anyway
+async function fsyncDir(dir: string) {
+	if (process.platform === "win32") return;
+	const handle = await fs.open(dir, "r");
 	await handle.sync().finally(() => handle.close());
 }
 
@@ -121,8 +123,8 @@ export class FsStorage implements SedimentreeStorage {
 		await writeSynced(`${tmp}.meta.tmp`, meta);
 		await fs.rename(`${tmp}.blob.tmp`, `${file}.blob`);
 		await fs.rename(`${tmp}.meta.tmp`, `${file}.meta`);
-		await fsync(dir);
-		await fsync(path.dirname(dir));
+		await fsyncDir(dir);
+		await fsyncDir(path.dirname(dir));
 	}
 
 	private async read<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T): Promise<[T, Uint8Array] | null> {
