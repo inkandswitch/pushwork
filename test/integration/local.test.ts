@@ -1,10 +1,12 @@
-// The offline commands: save, status, diff, heads, cut, paste.
+// The offline commands: save, status, diff, heads, cut, paste; and the url xattrs they leave.
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
+import { getAttributeSync, setAttributeSync } from "@napi-rs/xattr";
 import { CONFIG_VERSION } from "../../src/config.js";
-import { pushwork, readText } from "../cli";
+import { URL_XATTR } from "../../src/xattr.js";
+import { exists, pushwork, readText } from "../cli";
 import { startSilentServer } from "../server";
 
 const server = inject("server");
@@ -95,6 +97,95 @@ describe("pushwork local-only commands", () => {
 		expect(await readText(path.join(work, "a.txt"))).toBe("edited\n");
 		expect(silent.connections()).toBe(0);
 		await silent.close();
+	});
+
+	describe("url xattrs", () => {
+		const urlOf = async (file: string) =>
+			(await pushwork(["--porcelain", "heads", file], work)).stdout.split("\t")[1];
+		const attr = (file: string) => getAttributeSync(path.join(work, file), URL_XATTR)?.toString();
+
+		it("labels every file with its doc's url", async () => {
+			await fs.mkdir(path.join(work, "sub"));
+			await fs.writeFile(path.join(work, "sub", "b.txt"), "b\n");
+			await initRepo();
+			expect(attr("a.txt")).toBe(await urlOf("a.txt"));
+			await fs.writeFile(path.join(work, "c.txt"), "c\n");
+			await pushwork(["save"], work);
+			expect(attr("sub/b.txt")).toBe(await urlOf("sub/b.txt"));
+			expect(attr("c.txt")).toBe(await urlOf("c.txt"));
+		});
+
+		it("a moved file keeps its doc", async () => {
+			await initRepo();
+			const url = await urlOf("a.txt");
+			await fs.mkdir(path.join(work, "sub"));
+			await fs.rename(path.join(work, "a.txt"), path.join(work, "sub", "moved.txt"));
+			await pushwork(["save"], work);
+			expect(await urlOf("sub/moved.txt")).toBe(url);
+			expect(await urlOf("a.txt")).toBeUndefined();
+		});
+
+		it("a moved and edited file keeps its doc", async () => {
+			await initRepo();
+			const url = await urlOf("a.txt");
+			await fs.rename(path.join(work, "a.txt"), path.join(work, "b.txt"));
+			await fs.writeFile(path.join(work, "b.txt"), "hello again\n");
+			await pushwork(["save"], work);
+			expect(await urlOf("b.txt")).toBe(url);
+			expect((await pushwork(["status"], work)).stdout).toContain("nothing to save");
+		});
+
+		it("status shows a moved file as renamed", async () => {
+			await initRepo();
+			await fs.mkdir(path.join(work, "sub"));
+			await fs.rename(path.join(work, "a.txt"), path.join(work, "sub", "moved.txt"));
+			const { stdout } = await pushwork(["status"], work);
+			expect(stdout).toContain("renamed:    a.txt -> sub/moved.txt");
+			expect(stdout).not.toContain("added:");
+			expect(stdout).not.toContain("deleted:");
+			const porcelain = await pushwork(["--porcelain", "status"], work);
+			expect(porcelain.stdout.trim()).toBe("renamed\ta.txt\tsub/moved.txt");
+		});
+
+		it("diff shows a rename with its edits, by either path", async () => {
+			await initRepo();
+			await fs.rename(path.join(work, "a.txt"), path.join(work, "b.txt"));
+			await fs.writeFile(path.join(work, "b.txt"), "hello again\n");
+			for (const args of [[], ["a.txt"], ["b.txt"]]) {
+				const { stdout } = await pushwork(["diff", ...args], work);
+				expect(stdout).toContain("*** a.txt -> b.txt");
+				expect(stdout).toContain("--- a.txt");
+				expect(stdout).toContain("+++ b.txt");
+				expect(stdout).toContain("-hello\n");
+				expect(stdout).toContain("+hello again");
+			}
+		});
+
+		it("cut and paste keep a rename", async () => {
+			await initRepo();
+			const url = await urlOf("a.txt");
+			await fs.rename(path.join(work, "a.txt"), path.join(work, "b.txt"));
+			await pushwork(["cut"], work);
+			expect(await readText(path.join(work, "a.txt"))).toBe("hello\n");
+			expect(await exists(path.join(work, "b.txt"))).toBe(false);
+			await pushwork(["paste"], work);
+			expect(await exists(path.join(work, "a.txt"))).toBe(false);
+			expect((await pushwork(["status"], work)).stdout).toContain("renamed:    a.txt -> b.txt");
+			await pushwork(["save"], work);
+			expect(await urlOf("b.txt")).toBe(url);
+		});
+
+		it("a copy gets a doc of its own", async () => {
+			await initRepo();
+			const url = await urlOf("a.txt");
+			await fs.writeFile(path.join(work, "copy.txt"), "hello\n");
+			setAttributeSync(path.join(work, "copy.txt"), URL_XATTR, url);
+			await pushwork(["save"], work);
+			expect(await urlOf("a.txt")).toBe(url);
+			const copy = await urlOf("copy.txt");
+			expect(copy).not.toBe(url);
+			expect(attr("copy.txt")).toBe(copy);
+		});
 	});
 
 	describe("config", () => {

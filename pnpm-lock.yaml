@@ -23,6 +23,9 @@ importers:
       '@commander-js/extra-typings':
         specifier: ^14.0.0
         version: 14.0.0(commander@14.0.3)
+      '@napi-rs/xattr':
+        specifier: ^1.0.3
+        version: 1.0.3
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.4.0
@@ -420,6 +423,74 @@ packages:
 
   '@manypkg/get-packages@1.1.3':
     resolution: {integrity: sha512-fo+QhuU3qE/2TQMQmbVMqaQ6EWbMhi4ABWP+O4AM1NqPBuy0OrApV5LO6BrrgnhtAHS2NH6RrVk9OL181tTi8A==}
+
+  '@napi-rs/xattr-android-arm-eabi@1.0.3':
+    resolution: {integrity: sha512-/4gaxfD4q7HkMxdI85f1SKTh/lkE+Q07VGwtXULJul5pM7ktTQUs1KmPLA1+rv73x3BN40AwSsPFTcmLIzfVuQ==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [android]
+
+  '@napi-rs/xattr-android-arm64@1.0.3':
+    resolution: {integrity: sha512-68brDQpvl5294CzR4Y9EGl1v1oMQaUgJ/fb7B3bKW/ygvm6SBd5imY/XDef3YIxRcoKikDQPhMlK/QMOj9y96g==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [android]
+
+  '@napi-rs/xattr-darwin-arm64@1.0.3':
+    resolution: {integrity: sha512-OnInLRl0/IM9NZimPY77cB0lnJwmvDG2xcCrzX3Xp07yxGIyRNHwkfR4Nn2eU42aHRMRT63pTJitrlu+aTEG/g==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@napi-rs/xattr-darwin-x64@1.0.3':
+    resolution: {integrity: sha512-eH/KKoclwxvIHXVhLWSFhqRdO/omNp4WuQ9JnhOVDa0Oas/w7seSRfUFeKhpPHx9TPkvszuaKDeoGoORAkuj8Q==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@napi-rs/xattr-freebsd-x64@1.0.3':
+    resolution: {integrity: sha512-ZoqRwwiMMX0CO8UUOI9JPBaFbHa5MJ7sd+Gzs3tq5/NSF4qV38fzK8G7oZWAUh//N6BY56VEOsZw/EmTQsb7Qg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [freebsd]
+
+  '@napi-rs/xattr-linux-arm-gnueabihf@1.0.3':
+    resolution: {integrity: sha512-TeN2PalO2T7g3BBxkmBgJbCHtT5Ym4DVs9MiBWmPJew8s+JjpLuLsIRYX+s0C7xfpTJ19FHALS1g/hbo4i9IHw==}
+    engines: {node: '>= 10'}
+    cpu: [arm]
+    os: [linux]
+
+  '@napi-rs/xattr-linux-arm64-gnu@1.0.3':
+    resolution: {integrity: sha512-ISuFQJPRUgOTzkewbM9UvVb04s6j598uq/I2Y+jdNhm2h66kSO6c2EK667n2Wo69L9W+YaAstEt7+RdY2Pehhg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@napi-rs/xattr-linux-arm64-musl@1.0.3':
+    resolution: {integrity: sha512-faoomizijfZtp4iqLGDCoii9uUkh/lh6wSddTykPi/f3ZvgteOHYeZ23226Ie9L7gB2rOnQEvsKU3jsqcn8S1A==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@napi-rs/xattr-linux-x64-gnu@1.0.3':
+    resolution: {integrity: sha512-/8s6iPDfBs3pmNEW8yTDt7dUMgV0urYlSIDoutLD1ckGWQI1uD1KYOEeRPyomJU9NjZ53FiA+yoQqFoKl2i7TA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@napi-rs/xattr-linux-x64-musl@1.0.3':
+    resolution: {integrity: sha512-YUoUsZUpcMyjgo9gjARRSrxz96jmwExtexEFMtNR9XlVyBGzYgiqBL2HXxmIOBlU5/gQUJ6MPcqlUrlP4kj+eg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@napi-rs/xattr@1.0.3':
+    resolution: {integrity: sha512-mpeKU2WnFIgzGxk7FRnEYMfvHgdIj1Pib+gNUyGyeHivE17Sm1OqAsrPrGWlK0YUuyav1kef1Y+EELB5Vl/miA==}
+    engines: {node: '>= 10'}
 
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
@@ -1729,6 +1800,49 @@ snapshots:
       fs-extra: 8.1.0
       globby: 11.1.0
       read-yaml-file: 1.1.0
+
+  '@napi-rs/xattr-android-arm-eabi@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-android-arm64@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-darwin-arm64@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-darwin-x64@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-freebsd-x64@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-linux-arm-gnueabihf@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-linux-arm64-gnu@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-linux-arm64-musl@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-linux-x64-gnu@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr-linux-x64-musl@1.0.3':
+    optional: true
+
+  '@napi-rs/xattr@1.0.3':
+    optionalDependencies:
+      '@napi-rs/xattr-android-arm-eabi': 1.0.3
+      '@napi-rs/xattr-android-arm64': 1.0.3
+      '@napi-rs/xattr-darwin-arm64': 1.0.3
+      '@napi-rs/xattr-darwin-x64': 1.0.3
+      '@napi-rs/xattr-freebsd-x64': 1.0.3
+      '@napi-rs/xattr-linux-arm-gnueabihf': 1.0.3
+      '@napi-rs/xattr-linux-arm64-gnu': 1.0.3
+      '@napi-rs/xattr-linux-arm64-musl': 1.0.3
+      '@napi-rs/xattr-linux-x64-gnu': 1.0.3
+      '@napi-rs/xattr-linux-x64-musl': 1.0.3
 
   '@noble/hashes@1.8.0': {}
 

@@ -293,6 +293,8 @@ sequenceDiagram
 
 `save` (alias `commit`) runs the same pipeline _offline_ — it commits to local storage and never contacts a server.
 
+Every file on disk is labelled with its file doc's URL in the `user.automerge.url` extended attribute (`xattr -p user.automerge.url <file>` on macOS, `getfattr -n user.automerge.url <file>` on Linux). Moving a file with `mv` keeps the attribute, so pushwork sees a rename rather than a deletion and a new file: `status` and `diff` show it as renamed, and the file keeps its doc and URL. Tools that drop extended attributes (`git checkout`, `tar`, `zip`, editors that save by replacing the file) make a rename look like a deletion and an addition, as it always did. On Windows there are no labels.
+
 Each document is stored as a sedimentree: loose commits plus fragments that bundle runs of history. At the end of every command pushwork compacts the documents it changed, so old loose commits on disk are replaced by the fragments that cover them.
 
 ## Upgrading from pushwork 2

@@ -318,7 +318,7 @@ program
 		out.done();
 		out.obj(summaryRows(root, info, "tracked"));
 		const { diff: d } = await status(root);
-		const total = d.added.length + d.modified.length + d.deleted.length;
+		const total = d.added.length + d.modified.length + d.deleted.length + d.renamed.length;
 		if (total) {
 			out.warn(
 				`${plural(total, "file")} here differ from the server; the next sync pushes them. Check \`pushwork status\` first.`,
@@ -544,11 +544,12 @@ program
 	.description("Show changes against the saved state")
 	.action(async () => {
 		const { diff: d } = await status(process.cwd());
-		const total = d.added.length + d.modified.length + d.deleted.length;
+		const total = d.added.length + d.modified.length + d.deleted.length + d.renamed.length;
 		if (out.isPorcelain) {
 			for (const p of d.modified) out.log(`modified\t${p}`);
 			for (const p of d.added) out.log(`added\t${p}`);
 			for (const p of d.deleted) out.log(`deleted\t${p}`);
+			for (const r of d.renamed) out.log(`renamed\t${r.from}\t${r.to}`);
 			return;
 		}
 		if (total === 0) {
@@ -559,6 +560,7 @@ program
 		for (const p of d.modified) lines.push(`  modified:   ${p}`);
 		for (const p of d.added) lines.push(`  added:      ${p}`);
 		for (const p of d.deleted) lines.push(`  deleted:    ${p}`);
+		for (const r of d.renamed) lines.push(`  renamed:    ${r.from} -> ${r.to}`);
 		out.log(lines.join("\n"));
 	});
 
@@ -572,12 +574,17 @@ program
 			out.log("(no changes)");
 			return;
 		}
-		const { createPatch } = await import("diff");
+		const { createPatch, createTwoFilesPatch } = await import("diff");
 		const td = new TextDecoder("utf-8", { fatal: false });
 		const chunks: string[] = [];
 		for (const e of entries) {
 			const before = e.before ? td.decode(e.before) : "";
 			const after = e.after ? td.decode(e.after) : "";
+			if (e.kind === "renamed") {
+				chunks.push(`*** ${e.from} -> ${e.path}`);
+				chunks.push(createTwoFilesPatch(e.from!, e.path, before, after, "", ""));
+				continue;
+			}
 			const header =
 				e.kind === "added"
 					? `+++ ${e.path}`

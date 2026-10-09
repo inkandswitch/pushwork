@@ -43,9 +43,9 @@ const childPath = (dirPath: string, name: string) =>
 	dirPath ? `${dirPath}/${name}` : name;
 
 export const patchworkFolderShape: Shape = {
-	async encode({ docs, files, previousRoot, isArtifact = () => false, fresh }) {
+	async encode({ docs, files, previousRoot, isArtifact = () => false, fresh, moved }) {
 		const previous = previousRoot && !fresh ? await patchworkFolderShape.decode({ docs, root: previousRoot }) : undefined;
-		const tree = await writeFileDocs(docs, files, previous, isArtifact);
+		const tree = await writeFileDocs(docs, files, previous, isArtifact, moved);
 		if (previousRoot) {
 			dlog("encode reusing root=%s", previousRoot);
 			await syncFolder(docs, previousRoot, tree, "", isArtifact);

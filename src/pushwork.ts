@@ -22,6 +22,7 @@ import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
 import { loadSeed, signerFrom } from "./key.js";
 import { log } from "./log.js";
 import { FsStorage } from "./storage.js";
+import { readUrlAttr, writeUrlAttrs } from "./xattr.js";
 import {
 	encodeHeads,
 	isProtected,
@@ -124,11 +125,14 @@ export type Diff = {
 	added: string[];
 	modified: string[];
 	deleted: string[];
+	renamed: { from: string; to: string }[];
 };
 
 export type Change = {
 	path: string;
-	kind: "added" | "modified" | "deleted";
+	kind: "added" | "modified" | "deleted" | "renamed";
+	/** A renamed file's old path. */
+	from?: string;
 	before?: Uint8Array;
 	after?: Uint8Array;
 };
@@ -526,6 +530,7 @@ export async function init(
 			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
 			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
+		await writeUrlAttrs(root, await readSaved(docs, shape, url));
 		return { url, files: fsFiles.size, sync: await summarize(docs, url) };
 	} finally {
 		await docs.close();
@@ -889,7 +894,8 @@ async function commitWorkdir(
 		const writable = await canWrite(config, hive, group);
 		if (writable) {
 			report(online ? "Committing local changes" : "Writing documents");
-			await writeFiles(docs, shape, fsFiles, prevFiles, isArtifact, { previousRoot: rootUrl });
+			const moved = await findMoves(root, prevFiles, fsFiles);
+			await writeFiles(docs, shape, fsFiles, prevFiles, isArtifact, { previousRoot: rootUrl, moved });
 		} else if (changes(prevFiles, fsFiles).length) {
 			throw new Error("read-only repo; `pushwork cut` your changes first");
 		}
@@ -949,7 +955,9 @@ function matchesPathspec(p: string, spec?: string): boolean {
 async function workdirChanges(cwd: string) {
 	const saved = await loadSavedTree(cwd);
 	try {
-		return { ...saved, changes: changes(saved.files, await walk(saved.root)) };
+		const current = await walk(saved.root);
+		const moved = await findMoves(saved.root, saved.files, current);
+		return { ...saved, changes: changes(saved.files, current, moved) };
 	} catch (e) {
 		await saved.close();
 		throw e;
@@ -959,14 +967,22 @@ async function workdirChanges(cwd: string) {
 export async function status(cwd: string): Promise<{ diff: Diff }> {
 	const { changes, close } = await workdirChanges(cwd);
 	await close();
-	const of = (kind: Change["kind"]) => changes.filter((c) => c.kind === kind).map((c) => c.path);
-	return { diff: { added: of("added"), modified: of("modified"), deleted: of("deleted") } };
+	const of = (kind: Change["kind"]) => changes.filter((c) => c.kind === kind);
+	const paths = (kind: Change["kind"]) => of(kind).map((c) => c.path);
+	return {
+		diff: {
+			added: paths("added"),
+			modified: paths("modified"),
+			deleted: paths("deleted"),
+			renamed: of("renamed").map((c) => ({ from: c.from!, to: c.path })),
+		},
+	};
 }
 
 export async function diff(cwd: string, limitToPath?: string): Promise<Change[]> {
 	const { changes, close } = await workdirChanges(cwd);
 	await close();
-	return limitToPath ? changes.filter((c) => c.path === limitToPath) : changes;
+	return limitToPath ? changes.filter((c) => c.path === limitToPath || c.from === limitToPath) : changes;
 }
 
 /**
@@ -985,6 +1001,7 @@ export async function cutWorkdir(
 			entries: changes.map((c) => ({
 				path: c.path,
 				kind: c.kind,
+				...(c.from ? { from: c.from } : {}),
 				...(c.after ? { contentBase64: encodeBytes(c.after) } : {}),
 			})),
 		});
@@ -1019,7 +1036,16 @@ export async function pasteSnarf(
 		if (entry.kind === "deleted") {
 			await fs.rm(path.join(root, rel), { force: true });
 			await pruneEmptyDirs(root, path.dirname(rel));
-		} else if (entry.contentBase64 != null) {
+			continue;
+		}
+		// a rename is replayed with one, so the file takes its url xattr along
+		if (entry.kind === "renamed" && entry.from) {
+			const from = fromPosix(entry.from);
+			await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+			await fs.rename(path.join(root, from), path.join(root, rel)).catch(() => {});
+			await pruneEmptyDirs(root, path.dirname(from));
+		}
+		if (entry.contentBase64 != null) {
 			await writeFileMkdir(path.join(root, rel), decodeBytes(entry.contentBase64));
 		}
 	}
@@ -1036,20 +1062,43 @@ const normalizeDirs = (dirs: readonly string[]) => [
 
 const walk = async (root: string) => walkDir(root, await loadIgnore(root));
 
-function changes(saved: Files, current: FileTree): Change[] {
+// `moved` (new path to old, from findMoves) turns an added and a deleted file into a rename.
+function changes(saved: Files, current: FileTree, moved = new Map<string, string>()): Change[] {
+	const movedFrom = new Set(moved.values());
 	const out: Change[] = [];
 	for (const [p, after] of current) {
-		const before = saved.get(p)?.bytes;
-		if (!before) out.push({ path: p, kind: "added", after });
+		const from = moved.get(p);
+		const before = saved.get(from ?? p)?.bytes;
+		if (from) out.push({ path: p, kind: "renamed", from, before, after });
+		else if (!before) out.push({ path: p, kind: "added", after });
 		else if (!byteEq(before, after)) out.push({ path: p, kind: "modified", before, after });
 	}
 	for (const [p, { bytes }] of saved) {
-		if (!current.has(p)) out.push({ path: p, kind: "deleted", before: bytes });
+		if (!current.has(p) && !movedFrom.has(p)) out.push({ path: p, kind: "deleted", before: bytes });
 	}
 	return out.sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
 // Edited files change their doc in place, so file URLs stay stable.
+
+// An added file carrying the url of a file that's gone (`mv` keeps xattrs) was moved
+// there, and keeps its doc. A copy, whose original is still in place, gets a new one.
+async function findMoves(root: string, saved: Files, current: FileTree): Promise<Map<string, string>> {
+	const gone = new Map<string, string>();
+	for (const [p, { url }] of saved) if (url && !current.has(p)) gone.set(stripHeads(url), p);
+	const moved = new Map<string, string>();
+	if (gone.size === 0) return moved;
+	for (const p of [...current.keys()].sort()) {
+		if (saved.has(p)) continue;
+		const url = await readUrlAttr(root, p);
+		const from = url && gone.get(stripHeads(url));
+		if (!from) continue;
+		dlog("moved %s -> %s", from, p);
+		moved.set(p, from);
+		gone.delete(stripHeads(url));
+	}
+	return moved;
+}
 
 // Re-pin artifact leaves to their docs' current (post-merge) heads. Returns the docs that moved.
 // Encode the saved files again so artifacts pin to the heads sync brought in;
@@ -1081,14 +1130,14 @@ async function writeFiles(
 	fsFiles: FileTree,
 	saved: Files | undefined,
 	isArtifact: IsArtifact,
-	{ previousRoot, title }: { previousRoot?: AutomergeUrl; title?: string },
+	{ previousRoot, title, moved }: { previousRoot?: AutomergeUrl; title?: string; moved?: Map<string, string> },
 ): Promise<AutomergeUrl> {
 	if (previousRoot && saved && changes(saved, fsFiles).length === 0) return previousRoot;
-	return shape.encode({ docs, files: fsFiles, previousRoot, title, isArtifact });
+	return shape.encode({ docs, files: fsFiles, previousRoot, title, isArtifact, moved });
 }
 
 // Make the working tree match `tree`: write what differs, delete what's not in it.
-// Make the working tree hold exactly `files`.
+// Make the working tree hold exactly `files`, each labelled with its doc's url.
 async function materialize(root: string, files: Files): Promise<void> {
 	const present = await walk(root);
 	for (const [posixPath, { bytes }] of files) {
@@ -1100,6 +1149,7 @@ async function materialize(root: string, files: Files): Promise<void> {
 		await fs.rm(path.join(root, fromPosix(posixPath)), { force: true });
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
+	await writeUrlAttrs(root, files);
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);

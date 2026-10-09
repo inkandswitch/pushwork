@@ -26,9 +26,9 @@ const isDirectoryDoc = (doc: unknown): doc is DirectoryDoc => {
 const RESERVED = new Set([META, "lastSyncAt"]);
 
 export const vfsShape: Shape = {
-	async encode({ docs, files, previousRoot, title, isArtifact = () => false, fresh }) {
+	async encode({ docs, files, previousRoot, title, isArtifact = () => false, fresh, moved }) {
 		const previous = previousRoot && !fresh ? await vfsShape.decode({ docs, root: previousRoot }) : undefined;
-		const flat = flattenLeaves(await writeFileDocs(docs, files, previous, isArtifact));
+		const flat = flattenLeaves(await writeFileDocs(docs, files, previous, isArtifact, moved));
 		dlog("encode keys=%d previousRoot=%s", flat.size, previousRoot ?? "<new>");
 
 		const url =

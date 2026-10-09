@@ -32,6 +32,8 @@ export interface Shape {
 		isArtifact?: (posixPath: string) => boolean;
 		/** Make every document afresh rather than reusing the ones under `previousRoot`. */
 		fresh?: boolean;
+		/** Files moved since `previousRoot`, new path to old, which keep their docs. */
+		moved?: Map<string, string>;
 	}): Promise<AutomergeUrl>;
 	decode(args: { docs: Docs; root: AutomergeUrl }): Promise<Map<string, File>>;
 }
