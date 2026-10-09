@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { pushwork, readText, userFiles } from "../cli";
+import { homeEnv } from "../home";
 
 tmp.setGracefulCleanup();
 
@@ -10,7 +11,7 @@ async function setup() {
 	const work = tmp.dirSync({ unsafeCleanup: true }).name;
 	const a = path.join(work, "a");
 	const b = path.join(work, "b");
-	const stranger = { HOME: path.join(work, "stranger") };
+	const stranger = homeEnv(path.join(work, "stranger"));
 	await fs.mkdir(a);
 	await fs.mkdir(stranger.HOME);
 	await fs.writeFile(path.join(a, "hello.txt"), "hello");

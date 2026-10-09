@@ -4,6 +4,7 @@ import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
 import { exists, pushwork, readText, userFiles } from "../cli";
+import { homeEnv } from "../home";
 
 const server = inject("server");
 
@@ -197,9 +198,9 @@ describe("pushwork", () => {
 
 	describe("installed shapes", () => {
 		const slay = path.join(__dirname, "..", "..", "examples", "shapes", "slay.js");
-		let env: { HOME: string };
+		let env: NodeJS.ProcessEnv;
 		beforeEach(async () => {
-			env = { HOME: await dir("home") };
+			env = homeEnv(await dir("home"));
 		});
 
 		it("installs from a file, and init / clone use it by name", async () => {

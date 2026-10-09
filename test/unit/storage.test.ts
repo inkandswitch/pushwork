@@ -77,7 +77,7 @@ describe("FsStorage", () => {
 			expect(path.basename(metas[0])).toBe(`${digest}.meta`);
 			expect(SignedLooseCommit.tryDecode(meta).payload.digest.toHexString()).toBe(digest);
 		}
-		expect(files.filter(f => f.includes("/fragments/") && f.endsWith(".meta"))).toHaveLength(1);
+		expect(files.filter(f => f.includes(`${path.sep}fragments${path.sep}`) && f.endsWith(".meta"))).toHaveLength(1);
 		expect(files.some(f => f.endsWith(".tmp"))).toBe(false);
 	});
 

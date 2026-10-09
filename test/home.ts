@@ -10,3 +10,6 @@ export function setHome(dir: string): () => void {
 			else process.env[key] = saved[i];
 		});
 }
+
+// the same, for a child process
+export const homeEnv = (dir: string) => ({ HOME: dir, USERPROFILE: dir });

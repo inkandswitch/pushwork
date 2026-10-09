@@ -76,6 +76,8 @@ export async function startSilentServer(): Promise<{ url: string; connections():
 	const server = net.createServer(socket => {
 		count++;
 		sockets.add(socket);
+		// Windows resets the connection when the client process exits
+		socket.on("error", () => {});
 	});
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
 	const { port } = server.address() as net.AddressInfo;
