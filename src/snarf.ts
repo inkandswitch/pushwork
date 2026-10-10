@@ -4,11 +4,12 @@ import { log } from "./log.js";
 
 const dlog = log("snarf");
 
-export type SnarfKind = "modified" | "added" | "deleted";
+export type SnarfKind = "modified" | "added" | "deleted" | "renamed";
 
 export interface SnarfEntry {
 	path: string;
 	kind: SnarfKind;
+	from?: string; // renamed only: the old path
 	contentBase64?: string; // omitted for deleted
 }
 

@@ -69,6 +69,9 @@ pushwork diff
 | --- | --- |
 | `pushwork init [dir]` | Initialize pushwork in a directory (default `.`). |
 | `pushwork clone <url> <dir>` | Clone an `automerge:` URL into a directory. |
+| `pushwork track <url> [dir]` | Follow an `automerge:` URL from an existing directory without touching its files. The next `sync` pushes whatever differs, including files missing here as deletions, so check `status` first. |
+| `pushwork merge <url> [dir]` | Join an existing directory with an `automerge:` URL, keeping files from both sides: files only the URL has are written to disk, then local files are pushed. Where both have a file, the local copy wins. |
+| `pushwork migrate` | Upgrade a pushwork 2 repo in place (see below). |
 | `pushwork sync` | Sync local changes with peers and merge remote changes to disk. |
 | `pushwork save` (alias `commit`) | Commit local changes to local storage without contacting the server. |
 | `pushwork status` | Show changes against the saved state. |
@@ -77,10 +80,11 @@ pushwork diff
 | `pushwork heads [pathspec]` | Print Automerge heads for the root folder and every file doc (offline). |
 | `pushwork yoink <url> [path]` | Pull a single file doc by URL and write it to disk (default path: the doc's own name). |
 | `pushwork yeet <path> <url>` | Push a single file from disk into the file doc at `url`, mutating it in place. |
-| `pushwork migrate [dir]` | Upgrade an older `.pushwork/config.json` to the current format. |
 | `pushwork cut [name]` | Stash working-tree changes and reset the tree to the saved state (offline). |
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
+| `pushwork shape install <source>` | Install a shape from a file, an `http(s)://` url or an `automerge:` file doc, so `--shape <name>` can use it. `--name` picks the name (default: the source's file name). |
+| `pushwork shape list` / `shape remove <name>` | List or remove installed shapes. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
 
 ### Global options
@@ -98,10 +102,15 @@ These apply to every command:
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
+| `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, an installed shape's name, or a path to a shape module. |
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
-| `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
-| `--legacy` | both | Alias for `--no-sub`. |
+| `--sync-server <url>` | both | Server for document data, saved in the repo's config. Defaults to `wss://subduction.sync.inkandswitch.com`, or for a keyhive repo, its keyhive server. |
+| `--keyhive-server <server>` | both | For a keyhive repo: its keyhive server, `keyhive`, `subduction` or a `ws(s)://` url. Saved in the repo's config. Defaults to this machine's setting (see [Keyhive](#keyhive)). |
+| `--keyhive-card <card>` | both | The keyhive server's contact card, needed with a url: a built-in name, JSON, an `http(s)://` url or a file. |
+| `--offline` | init | Create the repo without contacting the server. The next `sync` publishes it. |
+| `--keyhive` | init | Protect the repo with keyhive (see [Keyhive](#keyhive)). Only you can read it, unless `--public-access` says otherwise. |
+| `--public-access <level>` | init | With `--keyhive`: what anyone may do, `relay`, `read`, `edit` or `admin`. Unset means no access. |
+| `--server-access <level>` | init | With `--keyhive`: what the keyhive server may do. Defaults to `relay`: store and forward, but not read. |
 
 On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.type` of `directory` → `vfs`, `folder` → `patchwork-folder`); `--shape` is only the fallback when the type isn't recognized.
 
@@ -111,21 +120,51 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 | --- | --- |
 | `--nuclear` | Re-create every file/folder doc with a fresh URL before syncing, dropping references to the old URLs from this repo. |
 
-## Sync backends
+`sync` ends with one of three verdicts:
 
-pushwork supports two WebSocket sync backends. **Subduction is the default.**
+| Verdict | Meaning |
+| --- | --- |
+| `SYNCED` | The server has every document in the tree, and you have everything it has. |
+| `PENDING` | Some documents weren't confirmed by the server (`--porcelain` lists them). The next `sync` retries them. |
+| `OFFLINE` | The server couldn't be reached. Local changes are saved and go out on the next `sync`. |
 
-| Backend | Default endpoint | Selected by |
-| --- | --- | --- |
-| `subduction` | `wss://subduction.sync.inkandswitch.com` | default |
-| `legacy` | `wss://sync3.automerge.org` | `--legacy` / `--no-sub` |
+## Keyhive
 
-Override either endpoint with an environment variable:
+`pushwork init --keyhive` creates a repo whose documents are protected with [keyhive](https://github.com/inkandswitch/keyhive). The repo gets a keyhive group that you own; every document in it belongs to that group, and the server refuses writes from anyone without edit access. Who else gets in is up to two flags:
+
+| | Means |
+| --- | --- |
+| `--keyhive` | Private: only you can read or write. |
+| `--keyhive --public-access read` | Anyone with the URL can clone and read; only you can write. Good for sharing tools. |
+| `--keyhive --public-access edit` | Anyone with the URL can read and write. |
+| `--server-access read` | The server can read the documents too, not just relay them. |
+
+On a clone without edit access, `sync` only pulls, and refuses to run while you have local edits (`pushwork cut` them first). Cloning a repo you can't read fails with an error saying so.
+
+Your signing key is `~/.pushwork/key` and your keyhive state is in `~/.pushwork/keyhive`, both shared by every repo on the machine. Keep them; they are what gives you access to your keyhive repos. One pushwork command at a time can change the keyhive state: a second `sync`, `save`, `init` or `clone` of a keyhive repo, in any repo, stops with an error naming the first. `status`, `diff`, `heads`, `cut` and `paste` only read it.
+
+pushwork carries two versions of keyhive (automerge-repo-keyhive 0.5 and 0.6), which can't read each other's state or talk to each other's servers. Each keyhive repo records which one it uses; `--keyhive-version` picks it at `init` or `clone`, and the default is `0.6`. A repo whose config has no version was made with `0.5`. Each version keeps its own state, in `~/.pushwork/keyhive/0.5/archive` and `~/.pushwork/keyhive/0.6/archive`, under the same identity. (State from before versions, a single `~/.pushwork/keyhive` file, is moved to `0.5/archive` the first time it's opened.)
+
+Each keyhive repo records its keyhive server in its config when it's created or cloned, because that's the server holding relay access on its group. `--keyhive-server` picks it; otherwise it's this machine's default, kept in `~/.pushwork/keyhive.json`, which starts as `wss://subduction.sync.inkandswitch.com` (`subduction`), which speaks keyhive 0.6. `wss://keyhive.sync.automerge.org` (`keyhive`) is built in too; it speaks 0.5, and repos from before configs recorded a server use it.
+
+Document data goes to the keyhive server too, unless `--sync-server` sends it elsewhere:
 
 ```sh
-PUSHWORK_SUBDUCTION_SERVER=wss://my-relay.example.com pushwork sync
-PUSHWORK_LEGACY_SERVER=wss://my-relay.example.com pushwork sync --legacy
+pushwork init --keyhive --public-access read --sync-server wss://subduction.sync.inkandswitch.com
 ```
+
+Keyhive membership then syncs through the keyhive server and documents through the sync server. A sync server that doesn't speak keyhive can't refuse writes from people without edit access; pushwork itself won't push them, but that check is client-side.
+
+| Command | Description |
+| --- | --- |
+| `pushwork keyhive` | Show the keyhive server, its peer id, your keyhive id and a contact card for you. |
+| `pushwork keyhive public <level>` | In a keyhive repo: what anyone with the URL may do, `relay`, `read`, `edit` or `admin`; `none` takes public access away. |
+| `pushwork keyhive access` | In a keyhive repo: who has access, named from your contacts. |
+| `pushwork keyhive access <contact> <level>` | Give a contact `relay`, `read`, `edit` or `admin`, or `none` to revoke it. New readers can read the whole history: every document gets a change under the new keys. |
+| `pushwork keyhive contacts add <name> <card>` | Save someone's contact card (JSON, an `http(s)://` url or a file) under a name, in `~/.pushwork/contacts.json`. `pushwork keyhive --help` shows how to get yours out of patchwork. |
+| `pushwork keyhive contacts ls` / `rm <name>` | List or forget saved contacts. Forgetting one doesn't change their access. |
+| `pushwork keyhive server <name>` | Make a built-in server, `keyhive` or `subduction`, with its contact card, the default for new keyhive repos. |
+| `pushwork keyhive server <url> <card>` | Make any `ws(s)://` server the default. The card is the server's contact card: a built-in name, its JSON, an `http(s)://` url serving it, or a file. pushwork checks that the server it connects to is the one in the card. |
 
 ## Configuration
 
@@ -134,22 +173,22 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | Path | Contents |
 | --- | --- |
 | `.pushwork/config.json` | Repo configuration (see below). |
-| `.pushwork/storage/` | Automerge CRDT storage (`NodeFSStorageAdapter`). |
+| `.pushwork/storage/` | Document storage, in the same layout as Subduction's Rust filesystem storage. |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is currently at version `4`:
+`config.json` is at version `6`:
 
 ```json
 {
-	"version": 4,
+	"version": 6,
 	"rootUrl": "automerge:2sX...e9",
-	"backend": "subduction",
 	"shape": "vfs",
-	"artifactDirectories": ["dist"]
+	"artifactDirectories": ["dist"],
+	"syncServer": "ws://localhost:8080"
 }
 ```
 
-If the config version doesn't match the installed pushwork, commands fail with a prompt to run `pushwork migrate`.
+`syncServer` is present only when the repo was created with `--sync-server`. A keyhive repo also has `keyhiveServer`, and `keyhiveCard` when its server isn't built in.
 
 ### Ignore files
 
@@ -190,9 +229,16 @@ A _shape_ controls how the directory tree is encoded into Automerge documents.
 | --- | --- | --- |
 | VFS _(default)_ | `vfs` | A single directory doc (`@patchwork.type: "directory"`) whose keys are posix file paths mapping to file-doc URLs. |
 | Patchwork folder | `patchwork-folder` | A recursive folder-of-docs (`@patchwork.type: "folder"`) compatible with Patchwork and original pushwork repos. |
-| Custom | _module path_ | A module with a `default` export implementing `{ encode, decode }`. |
+| Custom | _module path_ | A module whose `default` export is `{ encode, decode }`: `encode` turns files (a `Map` of posix path to bytes) into a root doc, `decode` reads them back. See [`design/shapes.md`](./design/shapes.md). |
 
-Select a shape with `--shape` at `init`/`clone`.
+Select a shape with `--shape` at `init`/`clone`. A custom shape can be given as a path, but installing it is better: `pushwork shape install` copies it to `~/.pushwork/shapes/` (checking that it loads as a shape first), and the repo's config then records just its name, which works on any machine that has it installed.
+
+[`examples/shapes/slay.js`](./examples/shapes/slay.js) is a custom shape for [slaygrounds](https://github.com/chee/slaygrounds) projects, which keep their files inline in one document:
+
+```sh
+pushwork shape install examples/shapes/slay.js
+pushwork clone --sync-server wss://galaxy.observer --shape slay automerge:... my-project
+```
 
 ## Stashing changes
 
@@ -216,7 +262,7 @@ pushwork yoink automerge:abcd grabbed.md   # …or to an explicit path
 pushwork yeet draft.md automerge:abcd      # overwrite the doc with draft.md
 ```
 
-Both run inside an initialized repo (they use its backend and storage) and contact the sync server. `yoink` is detached: the file it writes is an ordinary working-tree file, not linked back to the source doc — a later `save` or `sync` tracks it under a fresh file doc like any other path. `yeet` mutates the target doc in place (text merges character-by-character; binary is last-writer-wins), so peers holding that URL see the change.
+Both work anywhere and contact the sync server. Inside a repo they use its server, but they never keep anything in local storage. `yoink` is detached: the file it writes is an ordinary working-tree file, not linked back to the source doc — a later `save` or `sync` tracks it under a fresh file doc like any other path. `yeet` mutates the target doc in place (text merges character-by-character; binary is last-writer-wins), so peers holding that URL see the change.
 
 ## How it works
 
@@ -237,47 +283,45 @@ A `sync` performs a full round trip:
 sequenceDiagram
     participant FS as Working tree
     participant PW as pushwork
-    participant SRV as Sync server (WebSocket)
+    participant SRV as Sync server
     FS->>PW: read files, honor ignore rules
     PW->>PW: diff against saved tree, write changes into file docs
-    PW->>SRV: push/pull doc changes (Automerge merge)
+    PW->>SRV: push and pull each document
     SRV-->>PW: peer changes
     PW->>FS: materialize merged tree back to disk
 ```
 
-`save` (alias `commit`) runs the same pipeline _offline_ — it commits to local CRDT storage and never contacts a server.
+`save` (alias `commit`) runs the same pipeline _offline_ — it commits to local storage and never contacts a server.
 
-## Migrating older repos
+Every file on disk is labelled with its file doc's URL in the `user.automerge.url` extended attribute (`xattr -p user.automerge.url <file>` on macOS, `getfattr -n user.automerge.url <file>` on Linux). Moving a file with `mv` keeps the attribute, so pushwork sees a rename rather than a deletion and a new file: `status` and `diff` show it as renamed, and the file keeps its doc and URL. Tools that drop extended attributes (`git checkout`, `tar`, `zip`, editors that save by replacing the file) make a rename look like a deletion and an addition, as it always did. On Windows there are no labels.
 
-If you have a repo created by an older pushwork (or the original pushwork "main" repo with a `.pushwork/config.json` predating versioning), upgrade it in place:
+Each document is stored as a sedimentree: loose commits plus fragments that bundle runs of history. At the end of every command pushwork compacts the documents it changed, so old loose commits on disk are replaced by the fragments that cover them.
+
+## Upgrading from pushwork 2
+
+pushwork 3 uses a new storage format. In an old repo, run:
 
 ```sh
-pushwork migrate          # operates on the current directory
-pushwork migrate ./repo
+pushwork migrate
 ```
 
-Migration walks the config forward one version at a time and reports the steps taken, or that the repo is already up to date.
+This keeps the root URL, shape and artifact directories, moves the old `.pushwork` contents to `.pushwork/pushwork_migration_backup_safe_to_delete/`, and fetches the repo from the server as `track` does. Nothing is pushed: the next `sync` publishes whatever differs from the server, so check `pushwork status` first. Local edits that pushwork 2 saved but never synced only survive if the files are still on disk; to be sure, run `npx pushwork@2 sync` before migrating.
+
+Repos on the retired sync3 server can't be migrated; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo.
 
 ## Programmatic API
 
-The package also exposes a library API (`import` from `pushwork`). Functions that talk to the network accept `online: false` for fully offline operation.
+The package also exposes a library API (`import` from `pushwork`).
 
 ```ts
 import {init, clone, sync, save, status} from "pushwork"
 
-// Initialize a repo
-const {url, files} = await init({
-	dir: "./my-project",
-	backend: "subduction", // or "legacy"
-	shape: "vfs",
-})
+const {url, files} = await init({dir: "./my-project", shape: "vfs"})
 console.log(`Initialized ${files} files at ${url}`)
 
-// Clone it elsewhere
-await clone({url, dir: "./clone-target", backend: "subduction", shape: "vfs"})
+await clone({url, dir: "./clone-target", shape: "vfs"})
 
-// Sync / inspect
-await sync("./my-project") // online by default
+const report = await sync("./my-project") // { online, synced, unsynced, url, heads, ... }
 await save("./my-project") // offline commit
 const {diff} = await status("./my-project")
 ```
@@ -286,54 +330,61 @@ const {diff} = await status("./my-project")
 
 | Function | Signature |
 | --- | --- |
-| `init` | `(opts: InitOpts, report?: Reporter) => Promise<RepoSummary>` |
+| `init` | `(opts: InitOpts, report?: Reporter, warn?: Warn) => Promise<RepoSummary>` |
 | `clone` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
-| `sync` | `(cwd: string, opts?: { nuclear?: boolean }, report?: Reporter) => Promise<void>` |
-| `save` | `(cwd: string, report?: Reporter) => Promise<void>` |
+| `track` | `(opts: CloneOpts, report?: Reporter) => Promise<RepoSummary>` |
+| `merge` | `(opts: CloneOpts, report?: Reporter, warn?: Warn) => Promise<RepoSummary>` |
+| `migrate` | `(cwd: string, opts?: { syncServer?: string }, report?: Reporter) => Promise<RepoSummary>` |
+| `sync` | `(cwd: string, opts?: { nuclear?: boolean }, report?: Reporter, warn?: Warn) => Promise<SyncSummary>` |
+| `save` | `(cwd: string, report?: Reporter, warn?: Warn) => Promise<void>` |
 | `status` | `(cwd: string) => Promise<{ diff: Diff }>` |
-| `diff` | `(cwd: string, limitToPath?: string) => Promise<Array<{ path; kind; before?; after? }>>` |
+| `diff` | `(cwd: string, limitToPath?: string) => Promise<Change[]>` |
 | `url` | `(cwd: string) => Promise<AutomergeUrl>` |
 | `heads` | `(cwd: string, pathspec?: string) => Promise<HeadsEntry[]>` |
 | `cutWorkdir` | `(cwd: string, opts?: { name?: string }) => Promise<{ id; entries }>` |
 | `pasteSnarf` | `(cwd: string, selector?: string) => Promise<{ id; entries; name? }>` |
 | `showSnarfs` | `(cwd: string) => Promise<Snarf[]>` |
-| `nuclearizeRepo` | `(cwd: string) => Promise<void>` |
+| `nuclearizeRepo` | `(cwd: string, warn?: Warn) => Promise<void>` |
 
-Configuration and migration helpers (`migrate`, `migrations`, `detectVersion`, `readRawConfig`, `CONFIG_VERSION`) and shape helpers (`vfsShape`, `patchworkFolderShape`, `pinUrl`, `stripHeads`, `isInArtifactDir`, `normalizeArtifactDir`) are exported as well.
-
-Key option types:
+Also exported: the URL helpers (`parseAutomergeUrl`, `stringifyAutomergeUrl`, `isValidAutomergeUrl`, `stripHeads`), the shapes (`vfsShape`, `patchworkFolderShape`, `isInArtifactDir`, `normalizeArtifactDir`), `readAttributes`, `CONFIG_VERSION` and `DEFAULT_SERVER`.
 
 ```ts
-type Backend = "legacy" | "subduction"
-
 type InitOpts = {
 	dir: string
-	backend: Backend
 	shape: string // "vfs" | "patchwork-folder" | module path
 	artifactDirectories?: readonly string[] // default: ["dist"]
 	online?: boolean // default: true
+	syncServer?: string // default: DEFAULT_SERVER, or the keyhive server
+	keyhiveServer?: string // keyhive repos: built-in name or url
+	keyhiveCard?: string // with a keyhiveServer url
+	keyhive?: {publicAccess?: AccessLevel; serverAccess?: AccessLevel} // see Keyhive
 }
 
-type CloneOpts = InitOpts & {
+type CloneOpts = {
 	url: string
-	// optional interactive hooks for legacy "branches" / strategy docs:
-	onBranchesDoc?: (info) => AutomergeUrl | Promise<AutomergeUrl>
-	onStrategyDoc?: (info) => boolean | Promise<boolean>
+	dir: string
+	shape: string // used when the root doc's type isn't recognized
+	artifactDirectories?: readonly string[]
+	syncServer?: string
+	keyhiveServer?: string // keyhive repos: built-in name or url
+	keyhiveCard?: string // with a keyhiveServer url
+	onStrategyDoc?: (info) => boolean | Promise<boolean> // run the root's .pushworkStrategy?
+}
+
+type SyncSummary = {
+	online: boolean
+	error?: string // why the connection failed
+	connectMs?: number
+	synced: number
+	unsynced: AutomergeUrl[]
+	url: AutomergeUrl // the root
+	heads: string[]
 }
 ```
 
-## Environment variables
+## Debugging
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PUSHWORK_SUBDUCTION_SERVER` | `wss://subduction.sync.inkandswitch.com` | Subduction sync endpoint. |
-| `PUSHWORK_LEGACY_SERVER` | `wss://sync3.automerge.org` | Legacy WebSocket sync endpoint. |
-| `PUSHWORK_WS_INLINE` | _off_ | Set to `1` to open the sync WebSocket on the main thread instead of a worker thread. |
-| `DEBUG` | _off_ | Set `DEBUG=true` (rewritten to `DEBUG=*`) to enable `pushwork:*` debug logs. |
-
-### Concurrency
-
-pushwork runs a single Automerge `Repo` over one sync connection. The WebSocket (and its frame decoding) lives in a worker thread so a busy main thread never stalls reads or keepalives, and per-file document fetches during clone/pull are pipelined concurrently over that one connection. Every synced document sits under the same delivery check, so the final `SYNCED`/`PENDING` verdict covers the whole tree.
+Set `DEBUG=pushwork:*` for pushwork's debug log (`DEBUG=true` turns on everything). Subduction's own log stays at errors only unless `DEBUG` mentions `subduction`.
 
 ## Development
 
@@ -341,21 +392,23 @@ pushwork runs a single Automerge `Repo` over one sync connection. The WebSocket 
 | --- | --- |
 | `pnpm build` | Compile TypeScript to `dist/`. |
 | `pnpm dev` | `tsc --watch`. |
-| `pnpm test` | Run the Vitest suite. |
+| `pnpm test` | Run the Vitest suite against a local test server. |
+| `pnpm test:network` | Run the tests in `test/network/` against the real servers: the default server and, for keyhive repos, the keyhive server. |
 | `pnpm test:watch` / `pnpm test:coverage` | Watch / coverage modes. |
 | `pnpm typecheck` | `tsc --noEmit`. |
 | `pnpm lint` / `pnpm lint:fix` | ESLint over `src`. |
 | `pnpm bench` | Build and run the sync benchmark harness. |
 
 ```sh
-# Example benchmark runs
-npx tsx bench/sync-bench.ts --files 2000 --size 512 --text 1 --fanout 20
-npx tsx bench/sync-bench.ts --clone-local --files 3000
+pnpm bench:build
+node dist-bench/bench/sync-bench.js --files 2000 --size 512 --text 1 --fanout 20
+node dist-bench/bench/sync-bench.js --clone-local --files 3000
+node dist-bench/bench/incremental-bench.js --files 2000
 ```
 
 ## Design
 
-The [`design/`](./design/) directory documents how pushwork works under the hood: [document shapes](./design/shapes.md), [sync verdicts](./design/sync.md), [artifact directories](./design/artifacts.md), [config & migrations](./design/config.md), and [snarfs](./design/snarf.md).
+The [`design/`](./design/) directory documents how pushwork works under the hood: [document shapes](./design/shapes.md), [sync](./design/sync.md), [artifact directories](./design/artifacts.md), [config](./design/config.md), and [snarfs](./design/snarf.md).
 
 ## Contributing
 

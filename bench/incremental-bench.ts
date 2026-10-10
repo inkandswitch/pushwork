@@ -1,27 +1,19 @@
-/**
- * Offline bench for pushwork's *incremental* paths — the ones you hit on every
- * command after the first: `status`, `diff`, and `save` over a tree that has
- * barely moved.
- *
- * `sync-bench.ts` measures ingest and pull, where all the work is genuinely
- * new. This measures the repeat cost: walking the working tree, decoding file
- * documents, and comparing the two.
- *
- * Uses only the public API (`init`, `status`, `diff`, `save`), so the same
- * file runs against any revision of the library.
- *
- *   npx tsx bench/incremental-bench.ts --files 2000 --size 512
- *
- * Flags:
- *   --files   N    number of files to generate            (default 1000)
- *   --size    N    bytes per file                          (default 512)
- *   --fanout  N    files per leaf directory                (default 20)
- *   --touch   N    files to modify before the save phase   (default 1)
- *   --shape   S    shape to ingest with                    (default vfs)
- *   --keep         don't delete the temp dir afterwards
- *
- * A one-line JSON summary goes to stdout; a readable table to stderr.
- */
+// Offline bench for the repeat paths: `status`, `diff` and `save` over a tree
+// that has barely moved. Uses only the public API, so it runs against any revision.
+//
+//   pnpm bench:build
+//   node dist-bench/bench/incremental-bench.js --files 2000 --size 512
+//
+// Flags:
+//   --files   N    number of files to generate            (default 1000)
+//   --size    N    bytes per file                          (default 512)
+//   --fanout  N    files per leaf directory                (default 20)
+//   --touch   N    files to modify before the save phase   (default 1)
+//   --shape   S    shape to ingest with                    (default vfs)
+//   --keep         don't delete the temp dir afterwards
+//
+// One JSON summary line goes to stdout; a table goes to stderr.
+
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
@@ -89,12 +81,10 @@ async function main(): Promise<void> {
 
 		const phases: Record<string, number> = {};
 		[, phases.init] = await timed(() =>
-			init({ dir: root, backend: "subduction", shape: args.shape, online: false }),
+			init({ dir: root, shape: args.shape, online: false }),
 		);
 
-		// First status after init: nothing is warm yet on either revision.
 		[, phases.statusCold] = await timed(() => status(root));
-		// Repeat runs over an unchanged tree — the common case.
 		[, phases.statusWarm] = await timed(() => status(root));
 		[, phases.statusWarm2] = await timed(() => status(root));
 		[, phases.diffClean] = await timed(() => diff(root));

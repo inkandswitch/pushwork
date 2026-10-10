@@ -1,22 +1,31 @@
-/**
- * Vitest global setup: build dist/ once before any suite runs.
- *
- * Integration suites exercise the compiled CLI (`dist/cli.js`) in
- * subprocesses, so a fresh checkout must build first — previously each suite
- * ran `pnpm build` in its own `beforeAll`, which raced (suites without one
- * could run before dist existed) and required pnpm on PATH. Invoking tsc
- * through Node directly needs neither.
- */
 import { execFileSync } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
 import { createRequire } from "module";
 import * as path from "path";
+import type { GlobalSetupContext } from "vitest/node";
+import { setHome } from "./home";
+import { startServer } from "./server";
 
-const requireHere = createRequire(__filename);
+declare module "vitest" {
+	export interface ProvidedContext {
+		server: string;
+	}
+}
 
-export default function setup(): void {
+// Integration suites run the compiled CLI, so build dist/ once up front.
+export default async function setup({ provide }: GlobalSetupContext) {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-test-home-"));
+	setHome(home);
 	const root = path.join(__dirname, "..");
-	const tsc = requireHere.resolve("typescript/lib/tsc.js");
+	const tsc = createRequire(__filename).resolve("typescript/lib/tsc.js");
 	execFileSync(process.execPath, [tsc, "-p", path.join(root, "tsconfig.json")], {
 		stdio: "inherit",
 	});
+	const server = await startServer();
+	provide("server", server.url);
+	return async () => {
+		await server.close();
+		fs.rmSync(home, { recursive: true, force: true });
+	};
 }

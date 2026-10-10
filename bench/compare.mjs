@@ -24,7 +24,7 @@ function read(path) {
 
 function key(run) {
 	const c = run.config;
-	return `${run.mode} files=${c.files} size=${c.size}B text=${c.text} backend=${c.backend}`;
+	return `${run.mode} files=${c.files} size=${c.size}B text=${c.text}`;
 }
 
 function median(xs) {
@@ -106,9 +106,8 @@ if (rows.length === 0) {
 	const n = rows.find((r) => r.base)?.base.n ?? 0;
 	out.push(
 		`Median of ${n} run(s) per scenario, base and head interleaved on one runner. ` +
-			`Offline paths only — no network. Most of this wall clock is LMDB commit fsync, ` +
-			`which varies up to 2x run-to-run on shared CI hardware, so deltas under ${threshold}% ` +
-			`are noise and even a larger one wants a local profile before it counts as a regression.`,
+			`Offline paths only. Shared CI hardware is noisy, so deltas under ${threshold}% ` +
+			`are noise and a larger one wants a local profile before it counts as a regression.`,
 	);
 }
 
