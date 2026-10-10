@@ -1,35 +1,37 @@
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import {
-	isValidAutomergeUrl,
-	type AutomergeUrl,
-	type DocHandle,
-	type Repo,
-} from "@automerge/automerge-repo";
+import { MemoryStorage } from "@automerge/automerge-subduction";
 import {
 	CONFIG_VERSION,
 	configExists,
 	pushworkDir,
 	readConfig,
+	readOldConfig,
 	storageDir,
 	writeConfig,
-	type Backend,
 	type PushworkConfig,
 } from "./config.js";
+import { Docs, type SyncReport } from "./docs.js";
+import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
+import type { Grantee, Member } from "./keyhive/common.js";
+import { DEFAULT_KEYHIVE_VERSION, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
-import { byteEq, walkDir, writeFileAtomic } from "./fs-tree.js";
+import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
+import { loadSeed, signerFrom } from "./key.js";
 import { log } from "./log.js";
+import { FsStorage } from "./storage.js";
+import { readUrlAttr, writeUrlAttrs } from "./xattr.js";
 import {
-	openRepo,
-	safeShutdown,
-	waitForConnection,
-	waitForSync,
-	waitForServerSync,
-	type Connection,
-	type SyncSnapshot,
-} from "./repo.js";
+	encodeHeads,
+	isProtected,
+	isValidAutomergeUrl,
+	parseAutomergeUrl,
+	stringifyAutomergeUrl,
+	stripHeads,
+	type AutomergeUrl,
+} from "./url.js";
 import {
 	appendSnarf,
 	decodeBytes,
@@ -37,30 +39,28 @@ import {
 	listSnarfs,
 	takeSnarf,
 	type Snarf,
-	type SnarfEntry,
 } from "./snarf.js";
 import {
 	applyFileEntry,
-	contentToBytes,
-	flattenLeaves,
+	installShape,
+	listShapes,
+	removeShape,
 	isInArtifactDir,
 	makeFileEntry,
-	newDir,
 	normalizeArtifactDir,
 	patchworkFolderShape,
-	pinUrl,
 	readFileEntry,
 	resolveShape,
-	setFileAt,
-	stripHeads,
 	vfsShape,
+	type File,
 	type Shape,
 	type UnixFileEntry,
-	type VfsNode,
 } from "./shapes/index.js";
 import { loadCustomShape } from "./shapes/custom.js";
 
 const dlog = log("pushwork");
+
+export const DEFAULT_SERVER = "wss://subduction.sync.inkandswitch.com";
 
 const DEFAULT_ARTIFACT_DIRECTORIES = ["dist"];
 
@@ -68,22 +68,393 @@ const DEFAULT_ARTIFACT_DIRECTORIES = ["dist"];
 export type Reporter = (phase: string) => void;
 const noReport: Reporter = () => {};
 
-/** Surfaces a non-fatal warning (e.g. a settings override) to the user. */
+/** Surfaces a non-fatal warning to the user. */
 export type Warn = (message: string) => void;
 const noWarn: Warn = () => {};
 
-/** Decides whether a repo-relative posix path is an artifact (stored as an
- *  immutable, heads-pinned blob rather than a live CRDT doc). */
+/** Whether a repo-relative posix path is an artifact (immutable, heads-pinned). */
 type IsArtifact = (posixPath: string) => boolean;
 
+type Files = Map<string, File>;
+
+/** The server's verdict plus the root doc's heads (bs58check, as in URLs). */
+export type SyncSummary = SyncReport & { url: AutomergeUrl; heads: string[] };
+
+export type RepoSummary = {
+	url: AutomergeUrl;
+	files: number;
+	sync: SyncSummary;
+};
+
+export type InitOpts = {
+	dir: string;
+	shape: string;
+	artifactDirectories?: readonly string[];
+	online?: boolean; // default: true
+	syncServer?: string;
+	/** Protect the repo with keyhive. Without public access, only you can read it. */
+	keyhive?: { publicAccess?: AccessLevel; serverAccess?: AccessLevel };
+} & KeyhiveServerOpts;
+
 /**
- * Build the artifact classifier for an operation. A repo-level
- * `.pushworkattributes` file travels with the repo content, so its `artifact`
- * rules take precedence over the local `.pushwork/config.json`
- * `artifactDirectories`. When the attributes file is present *and* the local
- * config also lists directories, we warn — the local list is being ignored in
- * favor of the one the repo carries.
+ * A keyhive server (built-in name or url) and its contact card, unset meaning this machine's
+ * default; and the automerge-repo-keyhive version to use, unset meaning the default (0.6).
  */
+export type KeyhiveServerOpts = { keyhiveServer?: string; keyhiveCard?: string; keyhiveVersion?: KeyhiveVersion };
+
+// a repo's keyhive server and the keyhive version it speaks
+type KeyhiveSettings = Settings & { version: KeyhiveVersion };
+
+export const ACCESS_LEVELS: readonly AccessLevel[] = ["relay", "read", "edit", "admin"];
+
+export type CloneOpts = {
+	url: string;
+	dir: string;
+	shape: string;
+	artifactDirectories?: readonly string[];
+	syncServer?: string;
+	// Asked whether to download and run the root doc's `.pushworkStrategy` as a
+	// custom shape. Returning false (or omitting it) falls back to `shape`.
+	onStrategyDoc?: (info: {
+		url: AutomergeUrl;
+		viewCode: () => string;
+	}) => Promise<boolean> | boolean;
+} & KeyhiveServerOpts;
+
+export type Diff = {
+	added: string[];
+	modified: string[];
+	deleted: string[];
+	renamed: { from: string; to: string }[];
+};
+
+export type Change = {
+	path: string;
+	kind: "added" | "modified" | "deleted" | "renamed";
+	/** A renamed file's old path. */
+	from?: string;
+	before?: Uint8Array;
+	after?: Uint8Array;
+};
+
+async function openDocs(
+	root: string,
+	seed: Uint8Array,
+	server?: string,
+	hive?: Hive,
+	group?: string,
+): Promise<Docs> {
+	const docs = await Docs.open({
+		storage: await FsStorage.open(storageDir(root)),
+		signer: signerFrom(seed),
+		server,
+		codec: hive?.codec,
+		newId: group ? hive!.newId(group) : undefined,
+	});
+	// keyhive talks to its own server when documents sync elsewhere
+	if (hive && docs.online && hive.server !== server) await docs.connect(hive.server);
+	return docs;
+}
+
+const isKeyhive = (url: AutomergeUrl) => isProtected(parseAutomergeUrl(url).documentId);
+
+// Keyhive repos are encrypted with keyhive and sync through the one server that speaks it.
+// ARK is loaded only here, so plain repos never pay for it. The archive is per user, like
+// the key: keyhive breaks when one identity starts over in a fresh archive. Each keyhive
+// version has its own, in ~/.pushwork/keyhive/<version>/archive, because they can't read
+// each other's.
+const pushworkHome = () => path.join(os.homedir(), ".pushwork");
+const settingsFile = () => path.join(pushworkHome(), "keyhive.json");
+
+async function readKeyhiveSettings(): Promise<Settings> {
+	try {
+		return JSON.parse(await fs.readFile(settingsFile(), "utf8"));
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw e;
+	}
+}
+
+async function openHive(seed: Uint8Array, settings: KeyhiveSettings, reader = false): Promise<Hive> {
+	const { openHive, archiveFile } = await import("./keyhive.js");
+	const file = await archiveFile(path.join(pushworkHome(), "keyhive"), settings.version);
+	return openHive(file, seed, settings, reader, settings.version);
+}
+
+// A new repo's keyhive server: the flags, else this machine's default.
+async function keyhiveSettingsFor(opts: KeyhiveServerOpts): Promise<KeyhiveSettings> {
+	const version = opts.keyhiveVersion ?? DEFAULT_KEYHIVE_VERSION;
+	if (opts.keyhiveServer) return { ...(await parseKeyhiveServer(opts.keyhiveServer, opts.keyhiveCard)), version };
+	if (opts.keyhiveCard) throw new Error("--keyhive-card needs --keyhive-server");
+	return { ...(await readKeyhiveSettings()), version };
+}
+
+// An existing repo's keyhive server and version, as recorded at init or clone. Repos from
+// before those were recorded used keyhive.sync.automerge.org and keyhive 0.5.
+const recordedKeyhive = async (config: PushworkConfig): Promise<KeyhiveSettings> => ({
+	server: config.keyhiveServer ?? LEGACY_SERVER_NAME,
+	card: config.keyhiveServer ? config.keyhiveCard : undefined,
+	version: config.keyhiveVersion ?? LEGACY_KEYHIVE_VERSION,
+});
+
+const keyhiveConfig = async (settings: KeyhiveSettings) => {
+	const { DEFAULT_SERVER_NAME } = await import("./keyhive.js");
+	return {
+		keyhiveServer: settings.server ?? DEFAULT_SERVER_NAME,
+		...(settings.card ? { keyhiveCard: settings.card } : {}),
+		keyhiveVersion: settings.version,
+	};
+};
+
+export type KeyhiveInfo = {
+	version: KeyhiveVersion;
+	server: string;
+	serverName?: string;
+	card: string;
+	cardName?: string;
+	serverPeer: string;
+	/** This machine's keyhive id (base64) and a fresh contact card for it. */
+	id: string;
+	me: string;
+	builtIn: Record<string, string>;
+};
+
+/** The keyhive server keyhive repos use, and this machine's own contact card in `version`. */
+export async function keyhiveInfo(version: KeyhiveVersion = DEFAULT_KEYHIVE_VERSION): Promise<KeyhiveInfo> {
+	const { SERVERS, DEFAULT_SERVER_NAME, resolveSettings, cardPeerId } = await import("./keyhive.js");
+	const settings = { ...(await readKeyhiveSettings()), version };
+	const { url, card } = resolveSettings(settings);
+	const serverName = settings.server ?? DEFAULT_SERVER_NAME;
+	// each contact card carries a fresh share key, so the hive must be saved after making one
+	const hive = await openHive(await loadSeed(), settings);
+	try {
+		return {
+			version,
+			server: url,
+			serverName: SERVERS[serverName] ? serverName : undefined,
+			card,
+			cardName: SERVERS[settings.card ?? serverName] && (settings.card ?? serverName),
+			serverPeer: cardPeerId(card),
+			id: hive.id,
+			me: await hive.contactCard(),
+			builtIn: Object.fromEntries(Object.entries(SERVERS).map(([name, { url }]) => [name, url])),
+		};
+	} finally {
+		await hive.close();
+	}
+}
+
+/**
+ * Set the keyhive sync server: a built-in name (or its url), or any ws(s):// url
+ * with the server's contact card, given as a built-in name, JSON, an http(s) url
+ * or a file.
+ */
+export async function setKeyhiveServer(server: string, card?: string): Promise<void> {
+	await writeKeyhiveSettings(await parseKeyhiveServer(server, card));
+}
+
+async function parseKeyhiveServer(server: string, card?: string): Promise<Settings> {
+	const { SERVERS, cardPeerId } = await import("./keyhive.js");
+	const named = Object.entries(SERVERS).find(([name, { url }]) => server === name || server === url)?.[0];
+	if (!named && !/^wss?:\/\//.test(server)) {
+		throw new Error(`expected ${Object.keys(SERVERS).join(", ")} or a ws(s):// url, got ${server}`);
+	}
+	if (!card) {
+		if (!named) throw new Error(`the keyhive server ${server} needs its contact card`);
+		return { server: named };
+	}
+	const url = named ? SERVERS[named].url : server;
+	if (SERVERS[card]) return { server: url, card };
+	const json = await readCard(card);
+	try {
+		cardPeerId(json);
+	} catch {
+		throw new Error(`${card} is not a keyhive contact card`);
+	}
+	return { server: url, card: json };
+}
+
+async function readCard(card: string): Promise<string> {
+	if (card.trimStart().startsWith("{")) return card.trim();
+	if (/^https?:\/\//.test(card)) {
+		const res = await fetch(card);
+		if (!res.ok) throw new Error(`fetching ${card}: ${res.status} ${res.statusText}`);
+		return (await res.text()).trim();
+	}
+	return (await fs.readFile(card, "utf8")).trim();
+}
+
+// ---- contacts: keyhive contact cards by name, shared by every repo on the machine
+
+const contactsFile = () => path.join(pushworkHome(), "contacts.json");
+
+async function readContacts(): Promise<Record<string, string>> {
+	try {
+		return JSON.parse(await fs.readFile(contactsFile(), "utf8"));
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw e;
+	}
+}
+
+async function writeContacts(contacts: Record<string, string>): Promise<void> {
+	await fs.mkdir(pushworkHome(), { recursive: true });
+	await fs.writeFile(contactsFile(), JSON.stringify(contacts, null, 2) + "\n");
+}
+
+export type Contact = { name: string; id: string; card: string };
+
+/** Save a contact card under `name`: the card as JSON, an http(s) url or a file. */
+export async function addContact(name: string, card: string): Promise<Contact> {
+	const { cardPeerId } = await import("./keyhive.js");
+	const json = await readCard(card);
+	let id: string;
+	try {
+		id = cardPeerId(json);
+	} catch {
+		throw new Error(`${card} is not a keyhive contact card`);
+	}
+	const contacts = await readContacts();
+	contacts[name] = json;
+	await writeContacts(contacts);
+	return { name, id, card: json };
+}
+
+export async function listContacts(): Promise<Contact[]> {
+	const { cardPeerId } = await import("./keyhive.js");
+	return Object.entries(await readContacts())
+		.map(([name, card]) => ({ name, id: cardPeerId(card), card }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function removeContact(name: string): Promise<void> {
+	const contacts = await readContacts();
+	if (!(name in contacts)) throw new Error(`no contact named ${name}`);
+	delete contacts[name];
+	await writeContacts(contacts);
+}
+
+// ---- access to a keyhive repo
+
+/** Open this keyhive repo online with its group, for changing or reading who can access it. */
+async function openKeyhiveRepo(cwd: string) {
+	const repo = await openRepo(cwd, { online: true });
+	if (!repo.hive) {
+		await repo.docs.close();
+		throw new Error("not a keyhive repo");
+	}
+	if (!repo.group) {
+		await repo.docs.close();
+		await repo.hive.close();
+		throw new Error("this machine's keyhive doesn't know this repo's group");
+	}
+	return repo as typeof repo & { hive: Hive; group: string };
+}
+
+// change one membership, then publish it to the keyhive server
+async function setRepoAccess(cwd: string, who: Grantee, level: AccessLevel | "none"): Promise<void> {
+	const { docs, hive, group } = await openKeyhiveRepo(cwd);
+	try {
+		if (!docs.online) throw new Error(`could not connect to ${hive.server}: ${docs.report().error}`);
+		await hive.setAccess(group, who, level);
+		// A new member can only open what's encrypted after they joined, back through the
+		// keys each change carries for its predecessors. Give every document a change under
+		// the new keys, so they can read the whole history.
+		if (level === "read" || level === "edit" || level === "admin") {
+			for (const id of await hive.groupDocs(group)) await docs.touch(stringifyAutomergeUrl(id));
+		}
+		await syncAll(docs, hive);
+	} finally {
+		await docs.close();
+		await hive.close();
+	}
+}
+
+/** What anyone with this keyhive repo's URL may do; "none" takes public access away. */
+export const setPublicAccess = (cwd: string, level: AccessLevel | "none") => setRepoAccess(cwd, { public: true }, level);
+
+/** What the contact named `name` may do in this keyhive repo; "none" revokes their access. */
+export async function setContactAccess(cwd: string, name: string, level: AccessLevel | "none"): Promise<void> {
+	const card = (await readContacts())[name];
+	if (!card) throw new Error(`no contact named ${name}; add one with \`pushwork keyhive contacts add ${name} <card>\``);
+	await setRepoAccess(cwd, { card }, level);
+}
+
+export type AccessEntry = Member & { name?: string; you: boolean; server: boolean };
+
+/** Who has access to this keyhive repo, named from contacts where possible. */
+export async function repoAccess(cwd: string): Promise<AccessEntry[]> {
+	const { config, docs, hive, group } = await openKeyhiveRepo(cwd);
+	try {
+		// pick up membership changes made elsewhere first
+		if (docs.online) await hive.sync(docs);
+		const { resolveSettings, cardPeerId } = await import("./keyhive.js");
+		const server = cardPeerId(resolveSettings(await recordedKeyhive(config)).card);
+		const names = new Map((await listContacts()).map(c => [c.id, c.name]));
+		return (await hive.members(group)).map(m => ({
+			...m,
+			name: names.get(m.id),
+			you: m.id === hive.id,
+			server: m.id === server,
+		}));
+	} finally {
+		await docs.close();
+		await hive.close();
+	}
+}
+
+async function writeKeyhiveSettings(settings: Settings): Promise<void> {
+	await fs.mkdir(pushworkHome(), { recursive: true });
+	await fs.writeFile(settingsFile(), JSON.stringify(settings, null, 2) + "\n");
+}
+
+// a reader (status, diff, cut...) changes no docs, so it leaves the keyhive archive alone
+async function openRepo(cwd: string, { online = false, reader = false } = {}) {
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	const seed = await loadSeed();
+	const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), reader) : undefined;
+	const server = online ? (config.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
+	const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
+	const docs = await openDocs(root, seed, server, hive, group);
+	return { root, config, docs, hive, group };
+}
+
+// In a keyhive repo, only those with edit access (and the group, to add docs to) write.
+const canWrite = async (config: PushworkConfig, hive?: Hive, group?: string) =>
+	!hive || (group !== undefined && (await hive.canWrite(parseAutomergeUrl(config.rootUrl).documentId)));
+
+// The server drops docs whose keyhive membership it hasn't seen, so that goes first.
+async function syncAll(docs: Docs, hive?: Hive): Promise<void> {
+	if (hive && docs.online) {
+		await docs.save();
+		await hive.sync(docs);
+	}
+	await docs.sync();
+}
+
+// The tree as last saved, with every file's bytes. Offline; the caller calls close.
+async function loadSavedTree(cwd: string) {
+	const { root, config, docs, hive } = await openRepo(cwd, { reader: true });
+	const close = async () => {
+		await docs.close();
+		await hive?.close();
+	};
+	try {
+		const shape = await resolveShape(config.shape);
+		const files = await readSaved(docs, shape, config.rootUrl);
+		return { root, config, docs, shape, files, close };
+	} catch (e) {
+		await close();
+		throw e;
+	}
+}
+
+async function summarize(docs: Docs, url: AutomergeUrl): Promise<SyncSummary> {
+	return { ...docs.report(), url, heads: encodeHeads(await docs.heads(url)) };
+}
+
+// A `.pushworkattributes` with artifact rules wins over config.json's artifactDirectories.
 async function resolveIsArtifact(
 	root: string,
 	configDirs: readonly string[],
@@ -97,60 +468,10 @@ async function resolveIsArtifact(
 					`artifactDirectories [${configDirs.join(", ")}] from .pushwork/config.json`,
 			);
 		}
-		dlog("artifact source: %s", ATTRIBUTES_FILE);
 		return (p) => attrs.isArtifact(p);
 	}
-	dlog("artifact source: config artifactDirectories %o", configDirs);
 	return (p) => isInArtifactDir(p, configDirs);
 }
-
-/** Result of init/clone: the root doc URL, how many files it tracks, and — when
- * run online — how it stands relative to the sync server (see {@link SyncSnapshot}). */
-export type RepoSummary = {
-	url: AutomergeUrl;
-	files: number;
-	sync?: SyncSnapshot;
-};
-
-export type InitOpts = {
-	dir: string;
-	backend: Backend;
-	shape: string;
-	artifactDirectories?: readonly string[];
-	online?: boolean; // default: true
-};
-
-export type CloneOpts = {
-	url: string;
-	dir: string;
-	backend: Backend;
-	shape: string;
-	artifactDirectories?: readonly string[];
-	online?: boolean; // default: true
-	// If the URL turns out to be a legacy "branches" doc, this callback is
-	// invoked with the available branch entries and must return the URL to
-	// clone instead. If absent, clone throws.
-	onBranchesDoc?: (info: {
-		title?: string;
-		branches: { name: string; url: AutomergeUrl }[];
-	}) => Promise<AutomergeUrl> | AutomergeUrl;
-	// If the root doc has no recognized @patchwork.type but declares a
-	// `.pushworkStrategy` automerge URL, this callback is invoked to decide
-	// whether to download that strategy module and run it as a custom shape.
-	// `viewCode` returns the strategy source so the user can inspect it before
-	// approving. Returning false (or omitting the callback) skips the strategy
-	// and falls back to `opts.shape`.
-	onStrategyDoc?: (info: {
-		url: AutomergeUrl;
-		viewCode: () => string;
-	}) => Promise<boolean> | boolean;
-};
-
-export type Diff = {
-	added: string[];
-	modified: string[];
-	deleted: string[];
-};
 
 export async function init(
 	opts: InitOpts,
@@ -159,13 +480,14 @@ export async function init(
 ): Promise<RepoSummary> {
 	const root = path.resolve(opts.dir);
 	const online = opts.online ?? true;
-	dlog("init root=%s backend=%s shape=%s online=%s", root, opts.backend, opts.shape, online);
+	dlog("init root=%s shape=%s online=%s", root, opts.shape, online);
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
-	// A `.pushworkattributes` file already in the working tree is authoritative;
-	// keep config.json's artifactDirectories empty so it never fights the
-	// repo-carried attributes (and never triggers an override warning later).
+	if (!opts.keyhive && (opts.keyhiveServer || opts.keyhiveCard || opts.keyhiveVersion)) {
+		throw new Error("--keyhive-server, --keyhive-card and --keyhive-version only apply with --keyhive");
+	}
+	// An existing `.pushworkattributes` is authoritative; keep config.json's list empty.
 	const attrs = await readAttributes(root);
 	if (attrs?.hasArtifactRules && opts.artifactDirectories?.length) {
 		warn(
@@ -176,244 +498,243 @@ export async function init(
 	const artifactDirs = attrs?.hasArtifactRules
 		? []
 		: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
-	const isArtifactPath: IsArtifact = attrs?.hasArtifactRules
+	const isArtifact: IsArtifact = attrs?.hasArtifactRules
 		? (p) => attrs.isArtifact(p)
 		: (p) => isInArtifactDir(p, artifactDirs);
-	dlog("init artifactDirs=%o attributes=%s", artifactDirs, Boolean(attrs?.hasArtifactRules));
-	await fs.mkdir(pushworkDir(root), { recursive: true });
 
-	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
-	// Start measuring the connection now so the local walk/encode overlaps it.
-	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
+	const seed = await loadSeed();
+	const keyhive = opts.keyhive ? await keyhiveSettingsFor(opts) : undefined;
+	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
+	const group = await hive?.createGroup({
+		public: opts.keyhive?.publicAccess,
+		server: opts.keyhive?.serverAccess ?? "relay",
+	});
+	const server = online ? (opts.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
+	const docs = await openDocs(root, seed, server, hive, group);
 	try {
 		const shape = await resolveShape(opts.shape);
-		const ig = await loadIgnore(root);
 		report("Reading working tree");
-		const fsFiles = await walkDir(root, ig);
-		dlog("init walked %d files", fsFiles.size);
-
-		const title = path.basename(root) || undefined;
-		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
-		const folderUrl = await shape.encode({
-			repo,
-			tree,
-			title,
-			isArtifactDir: isArtifactPath,
+		const fsFiles = await walk(root);
+		report(`Encoding ${plural(fsFiles.size, "file")}`);
+		const url = await writeFiles(docs, shape, fsFiles, undefined, isArtifact, {
+			title: path.basename(root) || undefined,
 		});
-		dlog("init encoded folder=%s title=%s", folderUrl, title);
-		const folderHandle = await repo.find<unknown>(folderUrl);
-
-		let sync: SyncSnapshot | undefined;
-		if (online) {
-			report(
-				`Publishing ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"} to the sync server`,
-			);
-			stampLastSyncAt(folderHandle);
-			sync = await waitForServerSync(repo, folderHandle, opts.backend, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
-		}
-
+		dlog("init root doc %s", url);
+		if (docs.online) report(`Publishing ${plural(fsFiles.size, "file")} to the sync server`);
+		await syncAll(docs, hive);
 		await writeConfig(root, {
 			version: CONFIG_VERSION,
-			rootUrl: folderUrl,
-			backend: opts.backend,
+			rootUrl: url,
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
+			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
+			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
-		await attachConnectMs(sync, connWait);
-		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
-		return { url: folderUrl, files: fsFiles.size, sync };
+		await writeUrlAttrs(root, await readSaved(docs, shape, url));
+		return { url, files: fsFiles.size, sync: await summarize(docs, url) };
 	} finally {
-		await safeShutdown(repo);
+		await docs.close();
+		await hive?.close();
 	}
 }
 
-export async function clone(
-	opts: CloneOpts,
-	report: Reporter = noReport,
-): Promise<RepoSummary> {
+type Attach = "clone" | "track" | "merge";
+
+// Sets up `opts.dir` to follow an existing url. clone makes the directory match
+// it; track leaves the directory alone; merge writes the files only the url has.
+async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<RepoSummary> {
 	if (!isValidAutomergeUrl(opts.url)) {
 		throw new Error(`invalid automerge URL: ${opts.url}`);
 	}
+	const url = stripHeads(opts.url);
 	const root = path.resolve(opts.dir);
-	dlog("clone url=%s root=%s backend=%s shape=%s", opts.url, root, opts.backend, opts.shape);
-	await fs.mkdir(root, { recursive: true });
+	dlog("%s url=%s root=%s shape=%s", mode, url, root, opts.shape);
 	if (await configExists(root)) {
 		throw new Error(`pushwork already initialized at ${root}`);
 	}
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
-	const online = opts.online ?? true;
-	const repo = await openRepo(opts.backend, storageDir(root), { offline: !online });
-	const connWait = online ? waitForConnection(repo, opts.backend) : undefined;
+	const seed = await loadSeed();
+	if (!isKeyhive(url) && (opts.keyhiveServer || opts.keyhiveCard || opts.keyhiveVersion)) {
+		throw new Error("--keyhive-server, --keyhive-card and --keyhive-version only apply to keyhive repos");
+	}
+	const keyhive = isKeyhive(url) ? await keyhiveSettingsFor(opts) : undefined;
+	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
+	const server = opts.syncServer ?? hive?.server ?? DEFAULT_SERVER;
+	const docs = await openDocs(root, seed, server, hive);
 	try {
+		if (!docs.online) {
+			throw new Error(`could not connect to ${server}: ${docs.report().error}`);
+		}
 		report("Fetching repository");
-		let folderHandle = await repo.find<unknown>(opts.url as AutomergeUrl);
-		if (online) {
-			await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
+		await hive?.sync(docs);
+		if (hive && !(await docs.find(url).then(() => true, () => false))) {
+			throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
+		}
+		const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
+		report("Downloading files");
+		const remote = await readSaved(docs, shape, url);
+		const files = remote.size;
+		if (mode === "clone") {
+			await materialize(root, remote);
+		} else if (mode === "merge") {
+			const present = await walk(root);
+			for (const [posixPath, { bytes }] of remote) {
+				if (present.has(posixPath)) continue;
+				await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
+			}
 		}
 
-		let storedUrl: AutomergeUrl = opts.url as AutomergeUrl;
-		const branchesDoc = asBranchesDoc(folderHandle.doc());
-		if (branchesDoc) {
-			if (!opts.onBranchesDoc) {
-				throw new Error(
-					`URL ${opts.url} is a legacy branches doc; pushwork no longer supports branches. Provide an onBranchesDoc callback (or use the CLI, which will prompt you to pick a branch).`,
-				);
-			}
-			const branches = Object.entries(branchesDoc.branches).map(
-				([name, url]) => ({ name, url }),
-			);
-			const chosenUrl = await opts.onBranchesDoc({
-				title: branchesDoc.title,
-				branches,
-			});
-			dlog("clone branches doc → chose %s", chosenUrl);
-			folderHandle = await repo.find<unknown>(chosenUrl);
-			if (online) {
-				await waitForSync(folderHandle, { idleMs: 1500, maxMs: 15000 });
-			}
-			storedUrl = chosenUrl;
-		}
-
-		const { shape, shapeName } = await resolveCloneShape({
-			opts,
-			repo,
-			root,
-			online,
-			folderHandle,
-		});
-
-		const tree = await shape.decode({ repo, root: folderHandle });
-		const fileCount = flattenLeaves(tree).size;
-		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
-		await materializeTree(repo, root, tree);
-
-		// Now that the tree (including any `.pushworkattributes`) is on disk,
-		// decide what to record locally. If the repo carries its own artifact
-		// attributes, leave config.json's list empty so it defers to them and
-		// never triggers an override warning on later operations.
-		const cloned = await readAttributes(root);
-		const artifactDirs = cloned?.hasArtifactRules
+		// If the repo carries its own artifact attributes, config.json defers to them.
+		const attrs = await readAttributes(root);
+		const artifactDirs = attrs?.hasArtifactRules
 			? []
 			: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
-
-		// Confirm we hold everything the server has for the root doc before we
-		// declare the clone done, and capture both head sets for reporting.
-		const sync = online
-			? await waitForServerSync(repo, folderHandle, opts.backend, {
-					idleMs: 1500,
-					maxMs: 15000,
-				})
-			: undefined;
-
 		await writeConfig(root, {
 			version: CONFIG_VERSION,
-			rootUrl: storedUrl,
-			backend: opts.backend,
+			rootUrl: url,
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
+			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
+			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
-		await attachConnectMs(sync, connWait);
-		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
-		return { url: storedUrl, files: fileCount, sync };
+		return { url, files, sync: await summarize(docs, url) };
 	} finally {
-		await safeShutdown(repo);
+		await docs.close();
+		await hive?.close();
 	}
 }
 
-// Reads `doc["@patchwork"].type` if present (e.g. "directory", "folder").
-function patchworkType(doc: unknown): string | undefined {
-	if (!doc || typeof doc !== "object") return undefined;
-	const meta = (doc as Record<string, unknown>)["@patchwork"];
-	if (!meta || typeof meta !== "object") return undefined;
-	const t = (meta as Record<string, unknown>).type;
-	return typeof t === "string" ? t : undefined;
+export const clone = (opts: CloneOpts, report: Reporter = noReport) =>
+	attach(opts, "clone", report);
+
+export const MIGRATION_BACKUP = "pushwork_migration_backup_safe_to_delete";
+
+/**
+ * Upgrade a pushwork 2 repo in place. The old `.pushwork` contents move to
+ * `.pushwork/${MIGRATION_BACKUP}/`, then the root url is tracked afresh.
+ * Nothing is pushed: the next `sync` publishes whatever differs, so check `status` first.
+ */
+export async function migrate(
+	cwd: string,
+	opts: { syncServer?: string } = {},
+	report: Reporter = noReport,
+): Promise<RepoSummary> {
+	const root = path.resolve(cwd);
+	const old = await readOldConfig(root);
+	if (!old) throw new Error("this repo is already up to date");
+	const dir = pushworkDir(root);
+	const backup = path.join(dir, MIGRATION_BACKUP);
+	const moved = (await fs.readdir(dir)).filter((name) => name !== MIGRATION_BACKUP);
+	await fs.mkdir(backup, { recursive: true });
+	for (const name of moved) await fs.rename(path.join(dir, name), path.join(backup, name));
+	try {
+		return await attach(
+			{
+				url: old.rootUrl,
+				dir: root,
+				shape: old.shape,
+				artifactDirectories: old.artifactDirectories,
+				syncServer: opts.syncServer,
+			},
+			"track",
+			report,
+		);
+	} catch (e) {
+		await fs.rm(storageDir(root), { recursive: true, force: true });
+		for (const name of moved) await fs.rename(path.join(backup, name), path.join(dir, name));
+		await fs.rmdir(backup);
+		throw e;
+	}
 }
 
-// Reads a `.pushworkStrategy` automerge URL off the root doc, if present.
-function strategyUrl(doc: unknown): AutomergeUrl | undefined {
-	if (!doc || typeof doc !== "object") return undefined;
-	const v = (doc as Record<string, unknown>)[".pushworkStrategy"];
-	return typeof v === "string" && isValidAutomergeUrl(v) ? v : undefined;
+/** Follow `opts.url` from `opts.dir` without touching the files in it. */
+export const track = (opts: CloneOpts, report: Reporter = noReport) =>
+	attach(opts, "track", report);
+
+/**
+ * Join `opts.dir` and `opts.url` without losing anything on either side: files
+ * only the url has are written to disk, then a sync pushes the local files.
+ * Where both have a file, the local copy wins.
+ */
+export async function merge(
+	opts: CloneOpts,
+	report: Reporter = noReport,
+	warn: Warn = noWarn,
+): Promise<RepoSummary> {
+	const { url, files } = await attach(opts, "merge", report);
+	const sync = await commitWorkdir(path.resolve(opts.dir), true, report, warn);
+	return { url, files, sync };
 }
 
-// Picks the shape to decode a cloned repo with, based on the root doc:
-//   @patchwork.type === "directory" → vfs
-//   @patchwork.type === "folder"    → patchwork-folder
-//   otherwise, if a `.pushworkStrategy` URL is present, prompt (via
-//     opts.onStrategyDoc) to download + run it as a custom shape
-//   otherwise, fall back to the explicitly requested opts.shape
-// Returns the resolved Shape plus the name to record in config (a builtin
-// name, a repo-relative path to the downloaded strategy, or opts.shape).
-async function resolveCloneShape(args: {
-	opts: CloneOpts;
-	repo: Repo;
-	root: string;
-	online: boolean;
-	folderHandle: DocHandle<unknown>;
-}): Promise<{ shape: Shape; shapeName: string }> {
-	const { opts, repo, root, online, folderHandle } = args;
-	const doc = folderHandle.doc();
+type RootDoc = {
+	"@patchwork"?: { type?: unknown };
+	".pushworkStrategy"?: unknown;
+};
 
-	const type = patchworkType(doc);
-	if (type === "directory") {
-		dlog("clone shape: @patchwork.type=directory → vfs");
-		return { shape: vfsShape, shapeName: "vfs" };
-	}
-	if (type === "folder") {
-		dlog("clone shape: @patchwork.type=folder → patchwork-folder");
-		return { shape: patchworkFolderShape, shapeName: "patchwork-folder" };
-	}
+// @patchwork.type picks a builtin shape; otherwise a `.pushworkStrategy` may be
+// downloaded and run (with consent); otherwise opts.shape.
+async function resolveCloneShape(
+	docs: Docs,
+	url: AutomergeUrl,
+	root: string,
+	opts: CloneOpts,
+): Promise<{ shape: Shape; shapeName: string }> {
+	const doc = await docs.find<RootDoc>(url);
+	const type = doc["@patchwork"]?.type;
+	if (type === "directory") return { shape: vfsShape, shapeName: "vfs" };
+	if (type === "folder") return { shape: patchworkFolderShape, shapeName: "patchwork-folder" };
 
-	const sUrl = strategyUrl(doc);
-	if (sUrl) {
-		dlog("clone shape: root doc declares .pushworkStrategy=%s", sUrl);
+	const strategy = doc[".pushworkStrategy"];
+	if (isValidAutomergeUrl(strategy)) {
 		if (!opts.onStrategyDoc) {
 			throw new Error(
-				`root doc has no recognized @patchwork.type and declares a .pushworkStrategy (${sUrl}); refusing to download and run it without confirmation. Provide an onStrategyDoc callback (the CLI prompts you), or pass --shape explicitly.`,
+				`root doc has no recognized @patchwork.type and declares a .pushworkStrategy (${strategy}); refusing to run it without confirmation. Pass --shape explicitly.`,
 			);
 		}
-		const strategyHandle = await repo.find<UnixFileEntry>(sUrl);
-		if (online) {
-			await waitForSync(strategyHandle as DocHandle<unknown>, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
-		}
-		const { bytes } = readFileEntry(strategyHandle as DocHandle<unknown>);
-		const code = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-		const approved = await opts.onStrategyDoc({ url: sUrl, viewCode: () => code });
-		if (approved) {
+		const { bytes } = readFileEntry(await docs.find(strategy));
+		const code = new TextDecoder().decode(bytes);
+		if (await opts.onStrategyDoc({ url: strategy, viewCode: () => code })) {
 			const dest = path.join(pushworkDir(root), "strategy.mjs");
 			await fs.writeFile(dest, code, "utf8");
-			const shapeName = path.relative(root, dest);
-			dlog("clone shape: wrote strategy to %s, running it", dest);
-			return { shape: await loadCustomShape(dest), shapeName };
+			return { shape: await loadCustomShape(dest), shapeName: path.relative(root, dest) };
 		}
-		dlog("clone shape: user declined strategy, falling back to opts.shape");
 	}
-
-	dlog("clone shape: falling back to opts.shape=%s", opts.shape);
 	return { shape: await resolveShape(opts.shape), shapeName: opts.shape };
 }
 
-function asBranchesDoc(
-	doc: unknown,
-): { title?: string; branches: Record<string, AutomergeUrl> } | null {
-	if (!doc || typeof doc !== "object") return null;
-	const meta = (doc as Record<string, unknown>)["@patchwork"];
-	if (!meta || typeof meta !== "object") return null;
-	if ((meta as Record<string, unknown>).type !== "branches") return null;
-	const branches = (doc as Record<string, unknown>).branches;
-	if (!branches || typeof branches !== "object") return null;
-	return {
-		title: (meta as { title?: string }).title,
-		branches: branches as Record<string, AutomergeUrl>,
-	};
+/**
+ * Install a shape from a file, an http(s) url, or an automerge: url of a file
+ * doc, so `--shape <name>` finds it. The name defaults to the source's file name.
+ */
+export async function shapeInstall(
+	cwd: string,
+	source: string,
+	opts: { name?: string; syncServer?: string } = {},
+): Promise<{ name: string; path: string }> {
+	let code: string;
+	let file: string;
+	if (isValidAutomergeUrl(source)) {
+		const docs = await openDetached(path.resolve(cwd), source, opts.syncServer);
+		try {
+			await docs.sync([stripHeads(source)]);
+			const { bytes, entry } = readFileEntry(await docs.find(source));
+			code = new TextDecoder().decode(bytes);
+			file = entry.name;
+		} finally {
+			await docs.close();
+		}
+	} else if (/^https?:\/\//.test(source)) {
+		const res = await fetch(source);
+		if (!res.ok) throw new Error(`fetching ${source}: ${res.status} ${res.statusText}`);
+		code = await res.text();
+		file = path.posix.basename(new URL(source).pathname);
+	} else {
+		code = await fs.readFile(path.resolve(cwd, source), "utf8");
+		file = path.basename(source);
+	}
+	const name = opts.name ?? file.replace(/\.[^.]*$/, "");
+	return { name, path: await installShape(name, code) };
 }
 
 export async function url(cwd: string): Promise<AutomergeUrl> {
@@ -421,134 +742,71 @@ export async function url(cwd: string): Promise<AutomergeUrl> {
 	return config.rootUrl;
 }
 
-/**
- * Resolve the sync backend + storage for the detached `yoink`/`yeet` commands.
- * These act on a single doc by URL and don't touch the tracked tree, so they
- * work even outside a pushwork repo — no `.pushwork/config.json` required. When
- * a config is present its backend and on-disk storage are reused (so a legacy
- * repo keeps talking to the legacy server, and fetched docs land in the repo's
- * cache); otherwise we fall back to `backend ?? "subduction"` and an ephemeral
- * temp storage dir that `cleanup` removes on shutdown. An explicit `backend`
- * always wins over the config's.
- */
-async function openDetachedRepo(
-	root: string,
-	backend?: Backend,
-): Promise<{ repo: Repo; backend: Backend; cleanup: () => Promise<void> }> {
-	if (await configExists(root)) {
-		const config = await readConfig(root);
-		const resolved = backend ?? config.backend;
-		const repo = await openRepo(resolved, storageDir(root), {
-			offline: false,
-		});
-		return { repo, backend: resolved, cleanup: () => safeShutdown(repo) };
-	}
-	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-"));
-	dlog("openDetachedRepo no config; ephemeral storage=%s", tmp);
-	const resolved = backend ?? "subduction";
-	const repo = await openRepo(resolved, tmp, { offline: false });
-	return {
-		repo,
-		backend: resolved,
-		cleanup: async () => {
-			await safeShutdown(repo);
-			await fs.rm(tmp, { recursive: true, force: true });
-		},
-	};
+// Inside a repo, yoink/yeet use its server but not its storage: a doc the repo tracks
+// that changed underneath it would look like a local edit to its next sync and be undone.
+async function openDetached(root: string, url: AutomergeUrl, server?: string): Promise<Docs> {
+	if (isKeyhive(url)) throw new Error("a single keyhive doc can't be fetched on its own; clone its repo");
+	const config = (await configExists(root)) ? await readConfig(root) : undefined;
+	return Docs.open({
+		storage: new MemoryStorage(),
+		signer: signerFrom(await loadSeed()),
+		server: server ?? config?.syncServer ?? DEFAULT_SERVER,
+	});
 }
 
 /**
- * Pull a single UnixFileEntry doc from `docUrl` and write its content to a
- * file on disk. Online: fetches the doc from the sync server. `destPath`
- * (relative to the repo root) overrides where it lands; if omitted, the
- * doc's own `name` field is used. Detached — the written file is an ordinary
- * working-tree file, not linked to `docUrl`; a later `save`/`sync` will track
- * it under a fresh file doc like any other path. Works outside a pushwork repo;
- * `backend` overrides the sync backend (default: the repo's config, else
- * subduction).
+ * Fetch one file doc and write its content to `destPath` (default: the doc's
+ * own name). The written file is not linked to the doc.
  */
 export async function yoink(
 	cwd: string,
 	docUrl: string,
 	destPath?: string,
-	backend?: Backend,
+	server?: string,
 ): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
 	if (!isValidAutomergeUrl(docUrl)) {
 		throw new Error(`invalid automerge URL: ${docUrl}`);
 	}
 	const root = path.resolve(cwd);
-	dlog("yoink url=%s dest=%s root=%s", docUrl, destPath ?? "(from doc)", root);
-
-	const { repo, cleanup } = await openDetachedRepo(root, backend);
+	const docs = await openDetached(root, docUrl, server);
 	try {
-		const handle = await repo.find<UnixFileEntry>(docUrl);
-		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
-		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
-
+		await docs.sync([stripHeads(docUrl)]);
+		const { bytes, entry } = readFileEntry(await docs.find(docUrl));
 		const rel = destPath ?? entry.name;
-		if (!rel) {
-			throw new Error(
-				`doc ${docUrl} has no name field; pass a destination path`,
-			);
-		}
+		if (!rel) throw new Error(`doc ${docUrl} has no name field; pass a destination path`);
 		const target = path.resolve(root, fromPosix(rel));
-		if (!target.startsWith(root + path.sep) && target !== root) {
+		if (!target.startsWith(root + path.sep)) {
 			throw new Error(`destination escapes the repo: ${rel}`);
 		}
-		await writeFileAtomic(target, bytes);
-		dlog("yoink wrote %s (%d bytes)", target, bytes.length);
-		return { path: path.relative(root, target), bytes: bytes.length, url: handle.url };
+		await writeFileMkdir(target, bytes);
+		return { path: path.relative(root, target), bytes: bytes.length, url: docUrl };
 	} finally {
-		await cleanup();
+		await docs.close();
 	}
 }
 
-/**
- * Push a single file from disk into the UnixFileEntry doc at `docUrl`,
- * mutating it in place (text content merges via Automerge.updateText; binary
- * is last-writer-wins). Online: publishes the change to the sync server so
- * peers holding `docUrl` see it. Detached — `srcPath` is read straight off
- * disk and need not be tracked by this repo. Works outside a pushwork repo;
- * `backend` overrides the sync backend (default: the repo's config, else
- * subduction).
- */
+/** Write one file from disk into the file doc at `docUrl`, in place, and push it. */
 export async function yeet(
 	cwd: string,
 	srcPath: string,
 	docUrl: string,
-	backend?: Backend,
-): Promise<{ path: string; bytes: number; url: AutomergeUrl }> {
+	server?: string,
+): Promise<{ path: string; bytes: number; url: AutomergeUrl; sync: SyncReport }> {
 	if (!isValidAutomergeUrl(docUrl)) {
 		throw new Error(`invalid automerge URL: ${docUrl}`);
 	}
 	const root = path.resolve(cwd);
-	const abs = path.resolve(root, fromPosix(srcPath));
-	dlog("yeet src=%s url=%s root=%s", abs, docUrl, root);
-
-	const bytes = new Uint8Array(await fs.readFile(abs));
+	const bytes = new Uint8Array(await fs.readFile(path.resolve(root, fromPosix(srcPath))));
 	const fresh = makeFileEntry(srcPath.split(path.sep).join("/"), bytes, false);
-
-	const { repo, backend: resolvedBackend, cleanup } = await openDetachedRepo(
-		root,
-		backend,
-	);
+	const bare = stripHeads(docUrl);
+	const docs = await openDetached(root, bare, server);
 	try {
-		const handle = await repo.find<UnixFileEntry>(stripHeads(docUrl));
-		// Catch up to the server before overwriting, then confirm our write made
-		// it back to the server.
-		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
-			idleMs: 1500,
-			maxMs: 15000,
-		});
-		applyFileEntry(handle, fresh);
-		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
-			idleMs: 1500,
-			maxMs: 15000,
-		});
-		dlog("yeet pushed %s (%d bytes) → %s", abs, bytes.length, handle.url);
-		return { path: srcPath, bytes: bytes.length, url: handle.url };
+		await docs.sync([bare]);
+		await docs.change<UnixFileEntry>(bare, (d) => applyFileEntry(d, fresh));
+		const sync = await docs.sync([bare]);
+		return { path: srcPath, bytes: bytes.length, url: bare, sync };
 	} finally {
-		await cleanup();
+		await docs.close();
 	}
 }
 
@@ -557,113 +815,55 @@ export async function sync(
 	opts: { nuclear?: boolean } = {},
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
-): Promise<SyncSnapshot | undefined> {
-	if (opts.nuclear) {
+): Promise<SyncSummary> {
+	if (!opts.nuclear) return commitWorkdir(cwd, true, report, warn);
+	const { root, config, docs, hive, group } = await openRepo(cwd, { online: true });
+	try {
 		report("Recreating documents");
-		await nuclearizeRepo(cwd, warn);
-		report("Publishing to sync server");
-		return await publishCurrentTree(cwd);
-	}
-	return await commitWorkdir(cwd, { online: true }, report, warn);
-}
-
-/**
- * Open an online repo, subscribe the root folder and every file leaf so the
- * network adapter announces them to peers, then wait for the local heads to
- * settle. No decode/diff/encode — used after nuclearizeRepo, where every doc
- * is freshly created locally and the server has nothing to merge in.
- */
-async function publishCurrentTree(cwd: string): Promise<SyncSnapshot | undefined> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-	dlog("publish root=%s", root);
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: false });
-	const connWait = waitForConnection(repo, config.backend);
-	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const tree = await shape.decode({ repo, root: folderHandle });
-		// Touch every leaf so the network adapter knows to push it.
-		for (const [, fileUrl] of flattenLeaves(tree)) {
-			await repo.find<UnixFileEntry>(fileUrl);
-		}
-		stampLastSyncAt(folderHandle);
-		const sync = await waitForServerSync(repo, folderHandle, config.backend, {
-			idleMs: 1500,
-			maxMs: 15000,
-		});
-		await attachConnectMs(sync, connWait);
-		dlog("publish complete synced=%s", sync.synced);
-		return sync;
+		await nuclearize(docs, root, config, hive, group, warn);
+		if (docs.online) report("Publishing to sync server");
+		await syncAll(docs, hive);
+		return await summarize(docs, config.rootUrl);
 	} finally {
-		await safeShutdown(repo);
+		await docs.close();
+		await hive?.close();
 	}
 }
 
 /**
- * Re-create every UnixFileEntry doc this repo references with a fresh URL,
- * then rewrite the existing folder doc's leaves to point at the new file
- * URLs. The folder doc URL itself is preserved so anyone holding it keeps
- * tracking this repo. Offline; the next sync publishes the new file docs
- * and the rewritten folder doc to the server.
- *
- * The previous file-doc URLs are orphaned from this repo's perspective.
- * Anyone holding one of those URLs directly continues to work from it;
- * this client just stops referencing them.
+ * Point the root doc (same URL) at freshly created copies of every file doc.
+ * Anyone holding an old file URL keeps it; this repo stops referencing it.
  */
-export async function nuclearizeRepo(
-	cwd: string,
-	warn: Warn = noWarn,
-): Promise<void> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-	dlog("nuclear root=%s rootUrl=%s", root, config.rootUrl);
-	const isArtifactPath = await resolveIsArtifact(
-		root,
-		config.artifactDirectories,
-		warn,
-	);
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+export async function nuclearizeRepo(cwd: string, warn: Warn = noWarn): Promise<void> {
+	const { root, config, docs, hive, group } = await openRepo(cwd);
 	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-
-		const title = path.basename(root) || undefined;
-		const oldTree = await shape.decode({ repo, root: folderHandle });
-
-		// For each leaf: read content, create a fresh UnixFileEntry doc.
-		const newTree = newDir();
-		for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
-			const bare = stripHeads(fileUrl);
-			const oldFileHandle = await repo.find<UnixFileEntry>(bare);
-			const oldDoc = oldFileHandle.doc();
-			const newFileHandle = repo.create<UnixFileEntry>({
-				"@patchwork": { type: "file" },
-				name: oldDoc.name,
-				extension: oldDoc.extension,
-				mimeType: oldDoc.mimeType,
-				content: oldDoc.content,
-			});
-			let finalUrl: AutomergeUrl = newFileHandle.url;
-			if (isArtifactPath(posixPath)) {
-				finalUrl = pinUrl(newFileHandle);
-			}
-			setFileAt(newTree, posixPath.split("/").filter(Boolean), finalUrl);
-		}
-
-		// Mutate the existing folder doc in place — same URL, new file leaves.
-		await shape.encode({
-			repo,
-			tree: newTree,
-			previousRoot: folderHandle,
-			title,
-			isArtifactDir: isArtifactPath,
-		});
+		await nuclearize(docs, root, config, hive, group, warn);
 	} finally {
-		await safeShutdown(repo);
+		await docs.close();
+		await hive?.close();
 	}
+}
+
+async function nuclearize(
+	docs: Docs,
+	root: string,
+	config: PushworkConfig,
+	hive: Hive | undefined,
+	group: string | undefined,
+	warn: Warn,
+) {
+	if (!(await canWrite(config, hive, group))) throw new Error("read-only repo");
+	const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
+	const shape = await resolveShape(config.shape);
+	const saved = await shape.decode({ docs, root: config.rootUrl });
+	await shape.encode({
+		docs,
+		files: bytesOf(saved),
+		previousRoot: config.rootUrl,
+		title: path.basename(root) || undefined,
+		isArtifact,
+		fresh: true,
+	});
 }
 
 export async function save(
@@ -671,338 +871,184 @@ export async function save(
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<void> {
-	await commitWorkdir(cwd, { online: false }, report, warn);
+	await commitWorkdir(cwd, false, report, warn);
 }
 
 async function commitWorkdir(
 	cwd: string,
-	{ online }: { online: boolean },
-	report: Reporter = noReport,
-	warn: Warn = noWarn,
-): Promise<SyncSnapshot | undefined> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
+	online: boolean,
+	report: Reporter,
+	warn: Warn,
+): Promise<SyncSummary> {
+	const { root, config, docs, hive, group } = await openRepo(cwd, { online });
 	dlog("commit online=%s root=%s", online, root);
-	const isArtifactPath = await resolveIsArtifact(
-		root,
-		config.artifactDirectories,
-		warn,
-	);
-
-	const repo = await openRepo(config.backend, storageDir(root), {
-		offline: !online,
-	});
-	const connWait = online ? waitForConnection(repo, config.backend) : undefined;
 	try {
+		const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
+		const rootUrl = config.rootUrl;
 
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-
-		const ig = await loadIgnore(root);
+		// diff against the last local state, not the server's
+		const prevFiles = await readSaved(docs, shape, rootUrl);
 		report("Scanning working tree");
-		const fsFiles = await walkDir(root, ig);
-
-		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
-			repo,
-			fsFiles,
-			previousFiles,
-			isArtifactPath,
-		);
-		const changed = !sameTree(previousTree, newTree);
-		dlog("commit tree changed: %s", changed);
-		if (changed) {
-			await shape.encode({
-				repo,
-				tree: newTree,
-				previousRoot: folderHandle,
-				isArtifactDir: isArtifactPath,
-			});
+		const fsFiles = await walk(root);
+		const writable = await canWrite(config, hive, group);
+		if (writable) {
+			report(online ? "Committing local changes" : "Writing documents");
+			const moved = await findMoves(root, prevFiles, fsFiles);
+			await writeFiles(docs, shape, fsFiles, prevFiles, isArtifact, { previousRoot: rootUrl, moved });
+		} else if (changes(prevFiles, fsFiles).length) {
+			throw new Error("read-only repo; `pushwork cut` your changes first");
 		}
 
-		let sync: SyncSnapshot | undefined;
-		if (online) {
-			report("Syncing with peers");
-			// Only artifact (pinned) leaves need a pre-refresh catch-up (to pin to
-			// the server's merged heads). No artifacts → the single confirm-wait
-			// below both pulls peer changes and pushes our stamp.
-			const hasArtifacts = [...flattenLeaves(newTree).keys()].some(isArtifactPath);
-
-			let refreshed = false;
-			if (hasArtifacts) {
-				// Catch up so the re-pin captures each file doc's post-merge heads.
-				await waitForServerSync(repo, folderHandle, config.backend, {
-					idleMs: 1500,
-					maxMs: 15000,
-				});
-				// Bare URLs already track current heads implicitly; only pins move.
-				refreshed = await refreshFolderPins(
-					repo,
-					folderHandle,
-					shape,
-					isArtifactPath,
-				);
+		if (docs.online) {
+			report("Syncing with server");
+			await syncAll(docs, hive);
+			if (writable && [...fsFiles.keys()].some(isArtifact)) {
+				const moved = await refreshPins(docs, rootUrl, shape, isArtifact);
+				if (moved.length) await docs.sync(moved);
 			}
-
-			// Always stamp lastSyncAt — a sync is also a checkpoint that
-			// "we reconciled with the server at this time" — then confirm the
-			// server has caught up to the stamped (and any refreshed) state.
-			stampLastSyncAt(folderHandle);
-			sync = await waitForServerSync(repo, folderHandle, config.backend, {
-				idleMs: 1500,
-				maxMs: refreshed ? 10000 : hasArtifacts ? 5000 : 15000,
-			});
+			report("Writing changes");
 		}
-
-		if (online) report("Writing changes");
-		const finalTree = await shape.decode({ repo, root: folderHandle });
-		await materializeTree(repo, root, finalTree);
-		await attachConnectMs(sync, connWait);
-		dlog("commit complete synced=%s", sync?.synced);
-		return sync;
+		await materialize(root, await readSaved(docs, shape, rootUrl));
+		return await summarize(docs, rootUrl);
 	} finally {
-		await safeShutdown(repo);
+		await docs.close();
+		await hive?.close();
 	}
 }
 
 export type HeadsEntry = {
-	path: string; // "/" for the root folder doc, posix file path otherwise
+	path: string; // "/" for the root doc, posix file path otherwise
 	url: AutomergeUrl;
 	heads: string[];
 };
 
 /**
- * List the current Automerge heads for the root folder doc and every file
- * leaf it references. Offline; never contacts a sync server.
- *
- * `pathspec` filters results: exact match, or prefix match against a folder
- * (e.g. "src" or "src/" matches "src/index.ts"). Pass "/" to show only the
- * root folder doc.
+ * Heads of the root doc and every file leaf. Offline. `pathspec` matches a
+ * path exactly or as a folder prefix; "/" shows only the root doc.
  */
-export async function heads(
-	cwd: string,
-	pathspec?: string,
-): Promise<HeadsEntry[]> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+export async function heads(cwd: string, pathspec?: string): Promise<HeadsEntry[]> {
+	const { config, docs, files, close } = await loadSavedTree(cwd);
 	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const tree = await shape.decode({ repo, root: folderHandle });
-
-		const out: HeadsEntry[] = [];
-		const matches = (p: string) => matchesPathspec(p, pathspec);
-
-		if (matches("/")) {
-			out.push({
-				path: "/",
-				url: config.rootUrl,
-				heads: folderHandle.heads() ?? [],
-			});
-		}
-
-		for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-			if (!matches(posixPath)) continue;
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
-			out.push({
-				path: posixPath,
-				url: fileUrl,
-				heads: handle.heads() ?? [],
-			});
-		}
-
-		out.sort((a, b) => a.path.localeCompare(b.path));
-		return out;
+		const entries: HeadsEntry[] = [];
+		const add = async (p: string, url: AutomergeUrl) => {
+			if (matchesPathspec(p, pathspec)) {
+				entries.push({ path: p, url, heads: encodeHeads(await docs.heads(url)) });
+			}
+		};
+		await add("/", config.rootUrl);
+		for (const [p, { url }] of files) if (url) await add(p, url);
+		return entries.sort((a, b) => a.path.localeCompare(b.path));
 	} finally {
-		await safeShutdown(repo);
+		await close();
 	}
 }
 
-function matchesPathspec(path: string, spec?: string): boolean {
+function matchesPathspec(p: string, spec?: string): boolean {
 	if (!spec) return true;
-	if (spec === "/") return path === "/";
-	const trimmed = spec.endsWith("/") ? spec.slice(0, -1) : spec;
-	if (path === trimmed) return true;
-	return path.startsWith(trimmed + "/");
+	if (spec === "/") return p === "/";
+	const trimmed = spec.replace(/\/$/, "");
+	return p === trimmed || p.startsWith(trimmed + "/");
+}
+
+// Working-tree changes against the saved tree. Offline.
+async function workdirChanges(cwd: string) {
+	const saved = await loadSavedTree(cwd);
+	try {
+		const current = await walk(saved.root);
+		const moved = await findMoves(saved.root, saved.files, current);
+		return { ...saved, changes: changes(saved.files, current, moved) };
+	} catch (e) {
+		await saved.close();
+		throw e;
+	}
 }
 
 export async function status(cwd: string): Promise<{ diff: Diff }> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
-	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const diff = computeDiff(previousFiles, fsFiles);
-		return { diff };
-	} finally {
-		await safeShutdown(repo);
-	}
+	const { changes, close } = await workdirChanges(cwd);
+	await close();
+	const of = (kind: Change["kind"]) => changes.filter((c) => c.kind === kind);
+	const paths = (kind: Change["kind"]) => of(kind).map((c) => c.path);
+	return {
+		diff: {
+			added: paths("added"),
+			modified: paths("modified"),
+			deleted: paths("deleted"),
+			renamed: of("renamed").map((c) => ({ from: c.from!, to: c.path })),
+		},
+	};
 }
 
-export async function diff(
-	cwd: string,
-	limitToPath?: string,
-): Promise<Array<{ path: string; kind: "added" | "modified" | "deleted"; before?: Uint8Array; after?: Uint8Array }>> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
-	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const out: Array<{ path: string; kind: "added" | "modified" | "deleted"; before?: Uint8Array; after?: Uint8Array }> = [];
-		for (const [p, bytes] of fsFiles) {
-			if (limitToPath && p !== limitToPath) continue;
-			const prev = previousFiles.get(p);
-			if (!prev) {
-				out.push({ path: p, kind: "added", after: bytes });
-			} else if (!byteEq(prev.bytes, bytes)) {
-				out.push({ path: p, kind: "modified", before: prev.bytes, after: bytes });
-			}
-		}
-		for (const [p, prev] of previousFiles) {
-			if (limitToPath && p !== limitToPath) continue;
-			if (!fsFiles.has(p)) out.push({ path: p, kind: "deleted", before: prev.bytes });
-		}
-		return out;
-	} finally {
-		await safeShutdown(repo);
-	}
+export async function diff(cwd: string, limitToPath?: string): Promise<Change[]> {
+	const { changes, close } = await workdirChanges(cwd);
+	await close();
+	return limitToPath ? changes.filter((c) => c.path === limitToPath || c.from === limitToPath) : changes;
 }
 
 /**
- * Capture the working tree's changes against the saved state into a local
- * snarf, then reset the working tree to the saved state. Snarfs live in
- * `.pushwork/snarf/` and are never synced.
+ * Save the working tree's changes into a local snarf (`.pushwork/snarf/`,
+ * never synced), then reset the working tree to the saved state.
  */
 export async function cutWorkdir(
 	cwd: string,
 	opts: { name?: string } = {},
 ): Promise<{ id: number; entries: number }> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-	dlog("cut root=%s name=%s", root, opts.name ?? "(unnamed)");
-
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	const { root, files, changes, close } = await workdirChanges(cwd);
 	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const entries: SnarfEntry[] = [];
-		for (const [p, bytes] of fsFiles) {
-			const prev = previousFiles.get(p);
-			if (!prev) {
-				entries.push({ path: p, kind: "added", contentBase64: encodeBytes(bytes) });
-			} else if (!byteEq(prev.bytes, bytes)) {
-				entries.push({
-					path: p,
-					kind: "modified",
-					contentBase64: encodeBytes(bytes),
-				});
-			}
-		}
-		for (const [p] of previousFiles) {
-			if (!fsFiles.has(p)) entries.push({ path: p, kind: "deleted" });
-		}
-
-		if (entries.length === 0) {
-			throw new Error("nothing to cut: working tree clean");
-		}
-		entries.sort((a, b) => a.path.localeCompare(b.path));
-
+		if (changes.length === 0) throw new Error("nothing to cut: working tree clean");
 		const snarf = await appendSnarf(root, {
 			name: opts.name,
-			entries,
+			entries: changes.map((c) => ({
+				path: c.path,
+				kind: c.kind,
+				...(c.from ? { from: c.from } : {}),
+				...(c.after ? { contentBase64: encodeBytes(c.after) } : {}),
+			})),
 		});
-
-		// Reset working tree to the saved state.
-		await materializeTree(repo, root, previousTree);
-		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
-		return { id: snarf.id, entries: entries.length };
+		await materialize(root, files);
+		return { id: snarf.id, entries: changes.length };
 	} finally {
-		await safeShutdown(repo);
+		await close();
 	}
 }
 
 /**
- * Apply a snarf on top of the current working tree, then remove the snarf
- * entry. Refuses if the working tree has uncommitted changes (caller can
- * `pushwork save` or `pushwork cut` first).
+ * Apply a snarf on top of the working tree and remove it. Refuses when the
+ * working tree has unsaved changes.
  */
 export async function pasteSnarf(
 	cwd: string,
 	selector?: string,
 ): Promise<{ id: number; entries: number; name?: string }> {
-	const root = path.resolve(cwd);
-	const config = await readConfig(root);
-
-	// Check the working tree is clean against the saved state.
-	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
-	try {
-		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-		const dirty = computeDiff(previousFiles, fsFiles);
-		if (dirty.added.length || dirty.modified.length || dirty.deleted.length) {
-			throw new Error(
-				"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
-			);
-		}
-	} finally {
-		await safeShutdown(repo);
-	}
-
-	const snarf = await takeSnarf(root, selector);
-	if (!snarf) {
+	const { root, changes, close } = await workdirChanges(cwd);
+	await close();
+	if (changes.length > 0) {
 		throw new Error(
-			selector
-				? `no snarf matches "${selector}"`
-				: "nothing to paste: no snarfs",
+			"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
 		);
 	}
-
+	const snarf = await takeSnarf(root, selector);
+	if (!snarf) {
+		throw new Error(selector ? `no snarf matches "${selector}"` : "nothing to paste: no snarfs");
+	}
 	for (const entry of snarf.entries) {
-		const target = path.join(root, fromPosix(entry.path));
+		const rel = fromPosix(entry.path);
 		if (entry.kind === "deleted") {
-			try {
-				await fs.unlink(target);
-			} catch {
-				// already gone
-			}
-			await pruneEmptyDirs(root, path.dirname(fromPosix(entry.path)));
-		} else if (entry.contentBase64 != null) {
-			const bytes = decodeBytes(entry.contentBase64);
-			await writeFileAtomic(target, bytes);
+			await fs.rm(path.join(root, rel), { force: true });
+			await pruneEmptyDirs(root, path.dirname(rel));
+			continue;
+		}
+		// a rename is replayed with one, so the file takes its url xattr along
+		if (entry.kind === "renamed" && entry.from) {
+			const from = fromPosix(entry.from);
+			await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+			await fs.rename(path.join(root, from), path.join(root, rel)).catch(() => {});
+			await pruneEmptyDirs(root, path.dirname(from));
+		}
+		if (entry.contentBase64 != null) {
+			await writeFileMkdir(path.join(root, rel), decodeBytes(entry.contentBase64));
 		}
 	}
-
-	dlog("paste complete id=%d entries=%d", snarf.id, snarf.entries.length);
 	return { id: snarf.id, name: snarf.name, entries: snarf.entries.length };
 }
 
@@ -1010,244 +1056,114 @@ export async function showSnarfs(cwd: string): Promise<Snarf[]> {
 	return listSnarfs(path.resolve(cwd));
 }
 
-type Stamped = { lastSyncAt?: number };
+const normalizeDirs = (dirs: readonly string[]) => [
+	...new Set(dirs.map(normalizeArtifactDir).filter(Boolean)),
+];
 
-function stampLastSyncAt(handle: DocHandle<unknown>): void {
-	(handle as DocHandle<Stamped>).change((d: Stamped) => {
-		d.lastSyncAt = Date.now();
-	});
+const walk = async (root: string) => walkDir(root, await loadIgnore(root));
+
+// `moved` (new path to old, from findMoves) turns an added and a deleted file into a rename.
+function changes(saved: Files, current: FileTree, moved = new Map<string, string>()): Change[] {
+	const movedFrom = new Set(moved.values());
+	const out: Change[] = [];
+	for (const [p, after] of current) {
+		const from = moved.get(p);
+		const before = saved.get(from ?? p)?.bytes;
+		if (from) out.push({ path: p, kind: "renamed", from, before, after });
+		else if (!before) out.push({ path: p, kind: "added", after });
+		else if (!byteEq(before, after)) out.push({ path: p, kind: "modified", before, after });
+	}
+	for (const [p, { bytes }] of saved) {
+		if (!current.has(p) && !movedFrom.has(p)) out.push({ path: p, kind: "deleted", before: bytes });
+	}
+	return out.sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
-/**
- * Await the connection probe started at repo-open and stamp its measured connect
- * time (and any server peer id) onto the sync snapshot.
- */
-async function attachConnectMs(
-	sync: SyncSnapshot | undefined,
-	connWait: Promise<Connection> | undefined,
-): Promise<void> {
-	if (!connWait) return;
-	const conn = await connWait;
-	if (sync) {
-		sync.connectMs = conn.connectMs;
-		if (sync.serverPeerId == null) sync.serverPeerId = conn.serverPeerId;
+// Edited files change their doc in place, so file URLs stay stable.
+
+// An added file carrying the url of a file that's gone (`mv` keeps xattrs) was moved
+// there, and keeps its doc. A copy, whose original is still in place, gets a new one.
+async function findMoves(root: string, saved: Files, current: FileTree): Promise<Map<string, string>> {
+	const gone = new Map<string, string>();
+	for (const [p, { url }] of saved) if (url && !current.has(p)) gone.set(stripHeads(url), p);
+	const moved = new Map<string, string>();
+	if (gone.size === 0) return moved;
+	for (const p of [...current.keys()].sort()) {
+		if (saved.has(p)) continue;
+		const url = await readUrlAttr(root, p);
+		const from = url && gone.get(stripHeads(url));
+		if (!from) continue;
+		dlog("moved %s -> %s", from, p);
+		moved.set(p, from);
+		gone.delete(stripHeads(url));
 	}
+	return moved;
 }
 
-function normalizeDirs(dirs: readonly string[]): string[] {
-	const seen = new Set<string>();
-	const out: string[] = [];
-	for (const d of dirs) {
-		const norm = normalizeArtifactDir(d);
-		if (!norm || seen.has(norm)) continue;
-		seen.add(norm);
-		out.push(norm);
-	}
-	return out;
-}
-
-function computeDiff(
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }>,
-	current: Map<string, Uint8Array>,
-): Diff {
-	const added: string[] = [];
-	const modified: string[] = [];
-	const deleted: string[] = [];
-	for (const [p, bytes] of current) {
-		const prev = previous.get(p);
-		if (!prev) added.push(p);
-		else if (!byteEq(prev.bytes, bytes)) modified.push(p);
-	}
-	for (const p of previous.keys()) {
-		if (!current.has(p)) deleted.push(p);
-	}
-	added.sort();
-	modified.sort();
-	deleted.sort();
-	return { added, modified, deleted };
-}
-
-async function pushFiles(
-	repo: Repo,
-	fsFiles: Map<string, Uint8Array>,
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
-	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
-	const root = newDir();
-	let created = 0;
-	let updated = 0;
-	let unchanged = 0;
-	for (const [posixPath, bytes] of fsFiles) {
-		const segments = posixPath.split("/").filter(Boolean);
-		const isArtifact = isArtifactPath(posixPath);
-		const fresh = makeFileEntry(posixPath, bytes, isArtifact);
-		const prev = previous?.get(posixPath);
-
-		let baseUrl: AutomergeUrl;
-		if (prev && byteEq(prev.bytes, bytes)) {
-			// Unchanged path: keep the existing file-doc URL. For artifacts
-			// we'll re-pin from the current heads below.
-			baseUrl = stripHeads(prev.url);
-			unchanged++;
-		} else if (prev) {
-			// Changed path: mutate the existing file doc in place (see
-			// applyFileEntry). This keeps the file URL stable across edits and
-			// avoids the propagation race where a brand-new file doc URL is
-			// referenced by the folder before its bytes have reached the server.
-			const refreshUrl = stripHeads(prev.url);
-			const handle = await repo.find<UnixFileEntry>(refreshUrl);
-			applyFileEntry(handle, fresh);
-			baseUrl = refreshUrl;
-			updated++;
-			dlog("pushFiles updated %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
-		} else {
-			// New path: create a fresh file doc.
-			const handle = repo.create<UnixFileEntry>(fresh);
-			baseUrl = handle.url;
-			created++;
-			dlog("pushFiles created %s url=%s artifact=%s bytes=%d", posixPath, baseUrl, isArtifact, bytes.length);
-		}
-
-		const finalUrl = isArtifact
-			? pinUrl(await repo.find<UnixFileEntry>(baseUrl))
-			: baseUrl;
-		setFileAt(root, segments, finalUrl);
-	}
-	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
-	return root;
-}
-
-/**
- * Re-pin every artifact leaf in the folder doc to its file doc's current
- * heads. Bare (non-artifact) URLs are left as-is since they already track
- * current heads implicitly. Returns true if any leaf URL was rewritten.
- */
-async function refreshFolderPins(
-	repo: Repo,
-	folderHandle: DocHandle<unknown>,
+// Re-pin artifact leaves to their docs' current (post-merge) heads. Returns the docs that moved.
+// Encode the saved files again so artifacts pin to the heads sync brought in;
+// returns the docs that changed.
+async function refreshPins(
+	docs: Docs,
+	rootUrl: AutomergeUrl,
 	shape: Shape,
-	isArtifactPath: IsArtifact,
-): Promise<boolean> {
-	const tree = await shape.decode({ repo, root: folderHandle });
-	const refreshed = newDir();
-	let changed = false;
-	for (const [posixPath, currentUrl] of flattenLeaves(tree)) {
-		const segments = posixPath.split("/").filter(Boolean);
-		let finalUrl: AutomergeUrl = currentUrl;
-		if (isArtifactPath(posixPath)) {
-			const handle = await repo.find<UnixFileEntry>(stripHeads(currentUrl));
-			const repinned = pinUrl(handle);
-			if (repinned !== currentUrl) {
-				finalUrl = repinned;
-				changed = true;
-			}
-		}
-		setFileAt(refreshed, segments, finalUrl);
-	}
-	if (changed) {
-		dlog("refreshFolderPins: re-pinned artifacts to current heads");
-		await shape.encode({
-			repo,
-			tree: refreshed,
-			previousRoot: folderHandle,
-			isArtifactDir: isArtifactPath,
-		});
-	}
-	return changed;
+	isArtifact: IsArtifact,
+): Promise<AutomergeUrl[]> {
+	const headsOf = async () =>
+		new Map(await Promise.all(docs.urls().map(async (u) => [u, (await docs.heads(u)).join()] as const)));
+	const files = bytesOf(await shape.decode({ docs, root: rootUrl }));
+	const before = await headsOf();
+	await shape.encode({ docs, files, previousRoot: rootUrl, isArtifact });
+	const after = await headsOf();
+	return [...after].filter(([u, h]) => before.get(u) !== h).map(([u]) => u);
 }
 
-async function readFileBytes(
-	repo: Repo,
-	tree: VfsNode,
-): Promise<Map<string, { url: AutomergeUrl; bytes: Uint8Array }>> {
-	const out = new Map<string, { url: AutomergeUrl; bytes: Uint8Array }>();
-	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
-		out.set(posixPath, {
-			url: fileUrl,
-			bytes: contentToBytes(handle.doc().content),
-		});
-	}
-	return out;
+const readSaved = (docs: Docs, shape: Shape, root: AutomergeUrl): Promise<Files> => shape.decode({ docs, root });
+
+const bytesOf = (files: Files) => new Map([...files].map(([p, { bytes }]) => [p, bytes]));
+
+// Write the working tree's files into a root (a new one without `previousRoot`),
+// leaving the root alone when nothing changed.
+async function writeFiles(
+	docs: Docs,
+	shape: Shape,
+	fsFiles: FileTree,
+	saved: Files | undefined,
+	isArtifact: IsArtifact,
+	{ previousRoot, title, moved }: { previousRoot?: AutomergeUrl; title?: string; moved?: Map<string, string> },
+): Promise<AutomergeUrl> {
+	if (previousRoot && saved && changes(saved, fsFiles).length === 0) return previousRoot;
+	return shape.encode({ docs, files: fsFiles, previousRoot, title, isArtifact, moved });
 }
 
-async function materializeTree(
-	repo: Repo,
-	root: string,
-	tree: VfsNode,
-): Promise<void> {
-	const leaves = flattenLeaves(tree);
-
-	// Fetch all leaves concurrently: a single Subduction connection
-	// multiplexes concurrent `repo.find`s, so per-doc sync round-trips overlap
-	// instead of serializing (benched vs serial and vs the old worker pool in
-	// ADR-031/032). The transport's own receive-credit windowing is the
-	// backpressure; no artificial cap here.
-	const desired = new Map<string, Uint8Array>();
-	await Promise.all(
-		[...leaves].map(async ([posixPath, fileUrl]) => {
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
-			desired.set(posixPath, contentToBytes(handle.doc().content));
-		}),
-	);
-	dlog("materialize desired: %d files", desired.size);
-	// Invariant: every leaf was fetched. The loop below DELETES anything on
-	// disk that isn't in `desired`, so a silent fetch shortfall must be a loud
-	// error here rather than a tree wipe.
-	if (desired.size !== leaves.size) {
-		throw new Error(
-			`materialize fetched ${desired.size} of ${leaves.size} documents; refusing to reconcile a partial tree`,
-		);
-	}
-
-	const ig = await loadIgnore(root);
-	const present = await walkDir(root, ig);
-
-	let written = 0;
-	let removed = 0;
-	for (const [posixPath, bytes] of desired) {
+// Make the working tree match `tree`: write what differs, delete what's not in it.
+// Make the working tree hold exactly `files`, each labelled with its doc's url.
+async function materialize(root: string, files: Files): Promise<void> {
+	const present = await walk(root);
+	for (const [posixPath, { bytes }] of files) {
 		if (byteEq(present.get(posixPath), bytes)) continue;
-		await writeFileAtomic(path.join(root, fromPosix(posixPath)), bytes);
-		written++;
+		await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
 	}
 	for (const posixPath of present.keys()) {
-		if (desired.has(posixPath)) continue;
-		try {
-			await fs.unlink(path.join(root, fromPosix(posixPath)));
-			removed++;
-		} catch {
-			// already gone
-		}
+		if (files.has(posixPath)) continue;
+		await fs.rm(path.join(root, fromPosix(posixPath)), { force: true });
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
-	dlog("materialize done: %d written, %d removed", written, removed);
+	await writeUrlAttrs(root, files);
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);
 
 async function pruneEmptyDirs(root: string, relDir: string): Promise<void> {
-	let dir = relDir;
-	while (dir && dir !== "." && dir !== path.sep) {
+	for (let dir = relDir; dir && dir !== "." && dir !== path.sep; dir = path.dirname(dir)) {
 		const full = path.join(root, dir);
-		try {
-			const entries = await fs.readdir(full);
-			if (entries.length > 0) return;
-			await fs.rmdir(full);
-		} catch {
-			return;
-		}
-		dir = path.dirname(dir);
+		const entries = await fs.readdir(full).catch(() => null);
+		if (!entries || entries.length > 0) return;
+		await fs.rmdir(full);
 	}
 }
 
-function sameTree(a: VfsNode, b: VfsNode): boolean {
-	const av = flattenLeaves(a);
-	const bv = flattenLeaves(b);
-	if (av.size !== bv.size) return false;
-	for (const [k, v] of av) {
-		if (bv.get(k) !== v) return false;
-	}
-	return true;
-}
 
-export type { Shape, UnixFileEntry, VfsNode, PushworkConfig };
+export const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+export { listShapes, removeShape };

@@ -1,9 +1,6 @@
-import type {
-	AutomergeUrl,
-	DocHandle,
-	ImmutableString,
-	Repo,
-} from "@automerge/automerge-repo";
+import type { ImmutableString } from "@automerge/automerge";
+import type { Docs } from "../docs.js";
+import type { AutomergeUrl } from "../url.js";
 
 export type VfsNode =
 	| { kind: "dir"; entries: Map<string, VfsNode> }
@@ -17,24 +14,28 @@ export type UnixFileEntry = {
 	name: string;
 };
 
+/** A file's bytes, and the doc that holds it when it has one of its own. */
+export type File = { bytes: Uint8Array; url?: AutomergeUrl };
+
+/**
+ * How a tree of files is laid out in documents. A shape maps a root doc to
+ * files by posix path and back; whether a file gets a doc of its own is up to it.
+ */
 export interface Shape {
 	encode(args: {
-		repo: Repo;
-		tree: VfsNode;
-		previousRoot?: DocHandle<unknown>;
+		docs: Docs;
+		files: Map<string, Uint8Array>;
+		/** The root to update; without it, make a new one. */
+		previousRoot?: AutomergeUrl;
 		title?: string;
-		/**
-		 * Classifies a repo-relative posix *directory* path as an artifact
-		 * directory (immutable, heads-pinned). Shapes that represent directories
-		 * as their own docs (e.g. patchwork-folder) pin those folder links so
-		 * the whole subtree reads as frozen. Omitted ⇒ no folder is pinned.
-		 */
-		isArtifactDir?: (posixPath: string) => boolean;
+		/** Artifact paths (files or directories) are frozen: linked pinned to their heads. */
+		isArtifact?: (posixPath: string) => boolean;
+		/** Make every document afresh rather than reusing the ones under `previousRoot`. */
+		fresh?: boolean;
+		/** Files moved since `previousRoot`, new path to old, which keep their docs. */
+		moved?: Map<string, string>;
 	}): Promise<AutomergeUrl>;
-	decode(args: {
-		repo: Repo;
-		root: DocHandle<unknown>;
-	}): Promise<VfsNode>;
+	decode(args: { docs: Docs; root: AutomergeUrl }): Promise<Map<string, File>>;
 }
 
 export const newDir = (): VfsNode => ({ kind: "dir", entries: new Map() });

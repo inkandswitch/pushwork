@@ -1,68 +1,56 @@
 # Sync
 
-## Flow
+pushwork runs one Subduction node per command (`src/docs.ts`). Documents are loaded from `.pushwork/storage`, changed in memory, saved back, and synced with the server one document at a time. Nothing is kept between commands except what is on disk.
 
-`pushwork sync` is a commit + reconcile against the sync server:
+## Flow
 
 ```mermaid
 sequenceDiagram
     participant W as Working dir
-    participant L as Local repo (.pushwork/storage)
+    participant D as Docs (.pushwork/storage)
     participant S as Sync server
 
-    Note over L,S: 1. Open repo, start connection wait (overlapped)
-    W->>L: walk tree, diff against decoded doc tree
-    L->>L: encode local changes (shape.encode)
-    S-->>L: remote commits arrive as docs are found
-    L->>W: write remote changes to disk (atomic)
-    Note over L,S: 2. waitForServerSync on the root folder doc
-    L->>S: push un-broadcast commits
-    S-->>L: advertise heads back
-    Note over L,S: 3. Verdict: SYNCED / PENDING / timeout
+    W->>D: walk tree, diff against the saved tree
+    D->>D: write changes into file docs, re-encode the shape
+    D->>D: save new commits and fragments to disk
+    D->>S: syncWithPeer, once per document
+    S-->>D: commits we don't have
+    D->>W: write the merged tree to disk
+    D->>D: compact, disconnect
 ```
 
-Key properties:
+The steps of `sync`, in order (`commitWorkdir` in `src/pushwork.ts`):
 
-- `repo.find` is what triggers delivery — every file leaf is touched so the network layer announces it to peers.
-- The connection wait (`waitForConnection`) starts immediately after `openRepo` so local tree work overlaps the Subduction handshake.
-- Big fresh clones/ingests shard across worker threads (`ingest-pool.ts`) past a size threshold.
+1. Decode the saved tree. This is local: we diff against the last local state, not the remote one.
+2. Walk the working directory and write changed files into their docs.
+3. If the tree changed, re-encode it into the root.
+4. `docs.sync()`: save, then sync every document this run has loaded (the whole tree).
+5. If artifact pins moved during the sync, sync the folders that hold them again.
+6. Decode the tree again and write it to disk. Documents it references that we don't have yet are fetched as they are found.
+7. Close: save, compact, disconnect.
 
-## The Sync Verdict
+`save` is the same pipeline offline, stopping after step 3 and materializing.
 
-The CLI must not claim SYNCED unless the server demonstrably has our data. `syncVerdict` (in `repo.ts`) judges against the _server's_ advertised state, not a local-settle heuristic:
+## The verdict
 
-| Condition | Meaning |
+A document is synced when one `syncWithPeer` round sends nothing and receives nothing. pushwork tries up to six rounds per document. A server that keeps asking for data it never accepts (a write it refuses) never reaches a quiet round.
+
+The server only counts a commit as held once its storage write has finished, so the round after we send can ask for the same commit again. After a round where we only sent, pushwork waits before the next one: 50ms, doubling each time, about 1.5s in all before it gives up.
+
+| Verdict | Condition |
 | --- | --- |
-| _local-quiet_ | Our heads haven't changed for `idleMs` (local writes flushed) |
-| _pull-complete_ | We hold every commit the server advertised (`containsHeads`) |
-| _push-confirmed_ | The server advertised our current frontier back to us |
+| `OFFLINE` | The connection failed. |
+| `SYNCED` | Every document reached a quiet round. |
+| `PENDING` | At least one didn't. |
 
-```
-SYNCED  = local-quiet ∧ pull-complete ∧ push-confirmed
-PENDING = local-quiet ∧ pull-complete ∧ ¬push-confirmed
-```
+The server's heads are sedimentree heads (loose commits and fragment boundaries), not the Automerge frontier, so they are never compared with local heads.
 
-> [!NOTE]
->
-> Server heads are Subduction _sedimentree_ heads (loose-commit and fragment-boundary ids), NOT the Automerge frontier — they are never compared to `handle.heads()` for equality. Pull-completeness asks "do we already contain everything advertised?"; push-confirmation asks "is our frontier a subset of what the server advertises?".
+## Storage and compaction
 
-### Known false negative
+Each document is a sedimentree: loose commits plus fragments that cover runs of history. `save` writes the commits and fragments Automerge reports that aren't on disk yet. On close, every document that was saved or received data this run is compacted: blobs on disk that the live fragment set no longer needs are deleted, provided everything in that set is already on disk.
 
-A server that compacts our change into a fragment may re-advertise it under a different id, so push-confirmation fails and the CLI shows PENDING even though the data landed. This is deliberate — a conservative false-PENDING replaced the old false-SYNCED. Only a server-ack (`awaitSynced()`-style) API in automerge-repo closes the gap completely.
+The current server doesn't compact, so after a client compacts, the next sync may receive the old loose commits again. The result is still correct; it costs bandwidth on documents with long histories.
 
-### Stuck-doc nudge
+## Offline commands
 
-If we're behind for `resyncAfterMs` (default 6 s) and the scheduler isn't catching us up, `waitForServerSync` re-arms a single fresh sync round via `repo.resyncSubduction(documentId)` — once per document per run (`claimResync`).
-
-## Backends
-
-| Backend | Selection | Verdict basis |
-| --- | --- | --- |
-| Subduction (default) | unflagged | server-advertised heads (above) |
-| Legacy WebSocket relay | `--legacy`/`--no-sub` | local head-stability settle only |
-
-The backend is persisted per-repo in the config; both share the same `automerge-repo` API surface.
-
-## Offline Commands
-
-`save`, `status`, `diff`, `heads`, `cut`/`paste`, and `nuclearizeRepo` open the repo offline (`openRepo(..., { offline: true })`) and never contact the server; the next online `sync` publishes whatever they produced.
+`save`, `status`, `diff`, `heads`, `cut`, `paste` and `snarfs` never open a connection. The next `sync` publishes whatever they produced.

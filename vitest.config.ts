@@ -1,16 +1,18 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config"
 
-export default defineConfig({
+// test/network talks to the real servers; it only runs with `--mode network`.
+export default defineConfig(({ mode }) => ({
 	test: {
 		globals: true,
 		environment: "node",
-		include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
-		setupFiles: ["./test/setup.ts"],
-		// Build dist/ once up front: integration suites run the compiled CLI.
+		include:
+			mode === "network"
+				? ["test/network/**/*.test.ts"]
+				: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
+		exclude: [...configDefaults.exclude, ...(mode === "network" ? [] : ["test/network/**"])],
 		globalSetup: ["./test/global-setup.ts"],
-		// Many integration tests spawn the CLI as a subprocess; allow time
-		// for build server / sync server roundtrips.
+		// Integration tests spawn the CLI and sync over the network.
 		testTimeout: 60000,
 		hookTimeout: 60000,
 	},
-});
+}));
