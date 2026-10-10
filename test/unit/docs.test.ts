@@ -21,6 +21,11 @@ async function diskIds(storage: FsStorage, url: AutomergeUrl) {
 	return new Set(ids.map(c => c.toHexString()));
 }
 
+async function looseIds(storage: FsStorage, url: AutomergeUrl) {
+	const sid = toSedimentreeId(parseAutomergeUrl(url).documentId);
+	return new Set((await storage.listCommitIds(sid)).map(c => c.toHexString()));
+}
+
 const bump = async (docs: Docs, url: AutomergeUrl, times = 16) => {
 	for (let i = 0; i < times; i++) {
 		await docs.change<Counter>(url, d => {
@@ -130,6 +135,18 @@ describe("Docs offline", () => {
 		const again = await open({ storage: reopened });
 		expect(await again.heads(url)).toEqual(heads);
 		await again.close();
+	});
+
+	it("stores every fragment's head as a loose commit", async () => {
+		const dir = await tmp();
+		const storage = await FsStorage.open(dir);
+		const docs = await open({ storage });
+		const url = await docs.create<Counter>({ n: 0 });
+		await growFragment(docs, storage, url);
+		const fragments = A.getFragmentMetadata(await docs.find(url), { start: 1 });
+		const loose = await looseIds(storage, url);
+		for (const m of fragments) expect(loose).toContain(m.head);
+		await docs.close();
 	});
 
 	it("keeps a fragment's commits when the fragment's write was interrupted", async () => {
@@ -300,6 +317,51 @@ describe("Docs online", () => {
 		const fresh = await open({ server });
 		expect(await fresh.heads(url)).toEqual(heads);
 		await fresh.close();
+	});
+
+	it("holds a fragment back until its head has reached the server", async () => {
+		const server = inject("server");
+		const storage = await FsStorage.open(await tmp());
+		const docs = await open({ server, storage });
+		const url = await docs.create<Counter>({ n: 0 });
+		const sid = toSedimentreeId(parseAutomergeUrl(url).documentId);
+		const formed = async () => {
+			const doc = await docs.find(url);
+			const heads = A.getHeads(doc);
+			return A.getFragmentMetadata(doc, { start: 1 }).filter(m => !heads.includes(m.head)).map(m => m.head);
+		};
+		const fragmentIds = async () => new Set((await storage.listFragmentIds(sid)).map(c => c.toHexString()));
+		while (!(await formed()).length) {
+			await bump(docs, url);
+			await docs.save();
+		}
+		const heads = await formed();
+		for (const h of heads) {
+			expect(await looseIds(storage, url)).toContain(h);
+			expect(await fragmentIds()).not.toContain(h);
+		}
+		expect((await docs.sync()).unsynced).toEqual([]);
+		for (const h of heads) expect(await fragmentIds()).toContain(h);
+		await docs.close();
+	});
+
+	// The server sees a fragment cover the commits before it only when the fragment's head
+	// reached it first; otherwise it sends compacted commits back on every sync.
+	it("gets nothing back when it syncs a compacted doc", async () => {
+		const server = inject("server");
+		const dir = await tmp();
+		const a = await open({ server, storage: await FsStorage.open(dir) });
+		const url = await a.create<Counter>({ n: 0 });
+		await growFragment(a, await FsStorage.open(dir), url);
+		expect((await a.sync()).unsynced).toEqual([]);
+		await a.close();
+
+		const storage = await FsStorage.open(dir);
+		const compacted = await diskIds(storage, url);
+		const again = await open({ server, storage });
+		expect((await again.sync([url])).unsynced).toEqual([]);
+		expect(await diskIds(storage, url)).toEqual(compacted);
+		await again.close();
 	});
 
 	it("gives up on a server that stops answering", async () => {

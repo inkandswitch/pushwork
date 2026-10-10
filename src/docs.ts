@@ -109,6 +109,10 @@ export class Docs {
 	private entries = new Map<DocumentId, Entry>();
 	private loading = new Map<DocumentId, Promise<Entry>>();
 	private results = new Map<DocumentId, Result>();
+	// the loose commits on disk at each doc's last good sync, which the server holds (see write)
+	private sent = new Map<DocumentId, Set<string>>();
+	// docs with a fragment held back until its head reaches the server
+	private waiting = new Set<DocumentId>();
 	private limit = limiter(16);
 
 	private constructor(
@@ -205,7 +209,18 @@ export class Docs {
 	async sync(urls = this.urls()): Promise<SyncReport> {
 		if (!this.online) return this.report();
 		await this.save();
-		await Promise.all(urls.map(url => this.syncDoc(parseAutomergeUrl(url).documentId)));
+		const ids = urls.map(url => parseAutomergeUrl(url).documentId);
+		await Promise.all(ids.map(id => this.syncDoc(id)));
+		// a fragment held back until its head reached the server (see write) can go now
+		const held = ids.filter(id => this.waiting.has(id) && this.results.get(id)?.ok);
+		for (const id of held) {
+			const entry = this.entries.get(id);
+			if (entry) entry.dirty = true;
+		}
+		if (held.length) {
+			await this.save();
+			await Promise.all(held.map(id => this.syncDoc(id)));
+		}
 		return this.report();
 	}
 
@@ -299,11 +314,27 @@ export class Docs {
 		const levels = A.getFragmentMetadata(doc, { start: 1 });
 		const covered = new Set(levels.filter(m => !atHead(m)).flatMap(m => m.members));
 		const deferred = new Set(levels.filter(atHead).flatMap(m => m.members));
-		const loose = [...deferred]
-			.filter(h => !covered.has(h))
-			.map(h => ({ head: h, level: 0, boundary: A.inspectChange(doc, h)!.deps, checkpoints: [], members: [h] }));
+		// Every fragment's head is stored as a loose commit too, and a fragment waits until its head
+		// has reached the server. A server only sees that a fragment covers the loose commits before
+		// it when it holds the fragment's head among them; otherwise it keeps them for good, loads
+		// them all, and sends them back to every peer that has compacted them away. But a node that
+		// holds a fragment never offers its head, and a server that holds a fragment never asks for
+		// it, so the head has to get there first. Without a server there is nothing to wait for.
+		const fragmentHeads = levels.map(m => m.head);
+		const loose = [...new Set([...[...deferred].filter(h => !covered.has(h)), ...fragmentHeads])].map(h => ({
+			head: h,
+			level: 0,
+			boundary: A.inspectChange(doc, h)!.deps,
+			checkpoints: [],
+			members: [h],
+		}));
 		const commits = [...A.getFragmentMetadata(doc, 0), ...loose].filter(m => !commitIds.has(m.head));
-		const fragments = levels.filter(m => !atHead(m) && !fragmentIds.has(m.head));
+		const sent = this.sent.get(id);
+		const ready = (m: A.FragmentMeta) => !this.options.server || (sent?.has(m.head) ?? false);
+		const unstored = levels.filter(m => !atHead(m) && !fragmentIds.has(m.head));
+		const fragments = unstored.filter(ready);
+		if (fragments.length < unstored.length) this.waiting.add(id);
+		else this.waiting.delete(id);
 		const encode = async (metas: A.FragmentMeta[]) => {
 			const bytes = A.bundleFragmentMetadata(doc, metas);
 			const { codec } = this.options;
@@ -343,6 +374,7 @@ export class Docs {
 				}
 				result.received ||= r.stats.totalReceived > 0;
 				if (r.stats.totalSent === 0 && r.stats.totalReceived === 0) {
+					this.sent.set(id, (await this.onDisk(sid)).commitIds);
 					if (!(await this.hasHeads(id, r.stats.remoteHeads))) {
 						if (pulled) {
 							result.error = "remote heads not found";
