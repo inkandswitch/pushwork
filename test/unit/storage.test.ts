@@ -160,4 +160,15 @@ describe("FsStorage", () => {
 		expect(await storage.containsSedimentreeId(sid())).toBe(false);
 		expect(await storage.loadAllSedimentreeIds()).toHaveLength(0);
 	});
+	it("remembers the fragment heads a server holds, for that server only", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-sent-"));
+		const storage = await FsStorage.open(dir);
+		expect(await storage.loadSent(sid(), "ws://a")).toEqual([]);
+		const heads = ["00" + "a".repeat(62), "00" + "b".repeat(62)];
+		await storage.saveSent(sid(), "ws://a", heads);
+		expect(await (await FsStorage.open(dir)).loadSent(sid(), "ws://a")).toEqual(heads);
+		expect(await storage.loadSent(sid(), "ws://b")).toEqual([]);
+		expect(await storage.loadAllSedimentreeIds()).toHaveLength(0);
+		await fs.rm(dir, { recursive: true, force: true });
+	});
 });

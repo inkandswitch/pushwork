@@ -113,6 +113,29 @@ export class FsStorage implements SedimentreeStorage {
 		return path.join(this.tree(id), "fragments");
 	}
 
+	// outside trees/, so the layout stays the Rust crate's
+	private sentFile(id: SedimentreeId) {
+		return path.join(this.root, "sent", hex(id.toBytes()));
+	}
+
+	// the fragment heads a server is known to hold (see Docs.layout); the first line is the server
+	async loadSent(id: SedimentreeId, server: string): Promise<string[]> {
+		const text = await fs.readFile(this.sentFile(id), "utf8").catch(e => {
+			if (e.code === "ENOENT") return "";
+			throw e;
+		});
+		const [from, ...heads] = text.split("\n").filter(Boolean);
+		return from === server ? heads.filter(isId) : [];
+	}
+
+	async saveSent(id: SedimentreeId, server: string, heads: string[]) {
+		const file = this.sentFile(id);
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		const tmp = `${file}.${process.pid}-${nonce++}.tmp`;
+		await writeSynced(tmp, new TextEncoder().encode([server, ...heads].join("\n") + "\n"));
+		await fs.rename(tmp, file);
+	}
+
 	// the blob is renamed into place before the meta: a .meta means the pair is complete
 	private async writePair(dir: string, meta: Uint8Array, blob: Uint8Array) {
 		const file = path.join(dir, payloadDigest(meta));
@@ -160,6 +183,7 @@ export class FsStorage implements SedimentreeStorage {
 
 	async deleteSedimentreeId(id: SedimentreeId) {
 		await fs.rm(this.tree(id), { recursive: true, force: true });
+		await fs.rm(this.sentFile(id), { force: true });
 	}
 
 	async containsSedimentreeId(id: SedimentreeId) {

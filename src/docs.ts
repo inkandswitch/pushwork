@@ -37,6 +37,14 @@ export type Codec = {
 	decode(id: DocumentId, head: string, bytes: Uint8Array): Promise<Uint8Array | null>;
 };
 
+// storage that remembers, across runs, which fragment heads a server holds (FsStorage does)
+type SentStorage = {
+	loadSent(id: SedimentreeId, server: string): Promise<string[]>;
+	saveSent(id: SedimentreeId, server: string, heads: string[]): Promise<void>;
+};
+const remembersSent = (storage: SedimentreeStorage): storage is SedimentreeStorage & SentStorage =>
+	"loadSent" in storage && "saveSent" in storage;
+
 export type DocsOptions = {
 	storage: SedimentreeStorage;
 	signer: Signer;
@@ -109,7 +117,7 @@ export class Docs {
 	private entries = new Map<DocumentId, Entry>();
 	private loading = new Map<DocumentId, Promise<Entry>>();
 	private results = new Map<DocumentId, Result>();
-	// the loose commits on disk at each doc's last good sync, which the server holds (see write)
+	// the fragment heads each doc's server holds as loose commits (see layout)
 	private sent = new Map<DocumentId, Set<string>>();
 	// docs with a fragment held back until its head reaches the server
 	private waiting = new Set<DocumentId>();
@@ -304,36 +312,44 @@ export class Docs {
 		return { commits, fragments, commitIds: hex(commits), fragmentIds: hex(fragments) };
 	}
 
-	private async write(id: DocumentId, doc: A.Doc<unknown>) {
-		const sid = toSedimentreeId(id);
-		const { commitIds, fragmentIds } = await this.onDisk(sid);
-		// Subduction never sends a peer the children of a fragment head it holds (upstream bug),
-		// so a fragment that ends at a head is stored as loose commits until the head has children.
+	// What to store for a doc: its loose commits, and the fragments it can store whole.
+	// Subduction never sends a peer the children of a fragment head it holds (upstream bug),
+	// so a fragment that ends at a head is stored as loose commits until the head has children.
+	// A server only sees that a fragment covers the loose commits before it when it holds the
+	// fragment's head and the commits before it, linked up as loose commits; otherwise it keeps
+	// them for good, loads them all, and sends them back to every peer that has compacted them
+	// away. But a node that holds a fragment never offers its head, and a server that holds a
+	// fragment never asks for it, so every fragment's head is stored as a loose commit too, and
+	// a fragment is stored as loose commits until its head has reached the server. Without a
+	// server there is nothing to wait for.
+	private layout(id: DocumentId, doc: A.Doc<unknown>, fragmentIds: Set<string>) {
 		const heads = A.getHeads(doc);
-		const atHead = (m: A.FragmentMeta) => heads.includes(m.head);
+		const sent = this.sent.get(id);
+		const ready = (m: A.FragmentMeta) => !this.options.server || (sent?.has(m.head) ?? false);
 		const levels = A.getFragmentMetadata(doc, { start: 1 });
-		const covered = new Set(levels.filter(m => !atHead(m)).flatMap(m => m.members));
-		const deferred = new Set(levels.filter(atHead).flatMap(m => m.members));
-		// Every fragment's head is stored as a loose commit too, and a fragment waits until its head
-		// has reached the server. A server only sees that a fragment covers the loose commits before
-		// it when it holds the fragment's head among them; otherwise it keeps them for good, loads
-		// them all, and sends them back to every peer that has compacted them away. But a node that
-		// holds a fragment never offers its head, and a server that holds a fragment never asks for
-		// it, so the head has to get there first. Without a server there is nothing to wait for.
-		const fragmentHeads = levels.map(m => m.head);
-		const loose = [...new Set([...[...deferred].filter(h => !covered.has(h)), ...fragmentHeads])].map(h => ({
+		const whole = (m: A.FragmentMeta) => !heads.includes(m.head) && (fragmentIds.has(m.head) || ready(m));
+		const fragments = levels.filter(whole);
+		const covered = new Set(fragments.flatMap(m => m.members));
+		const deferred = levels.filter(m => !whole(m)).flatMap(m => m.members);
+		const loose = [...new Set([...deferred.filter(h => !covered.has(h)), ...levels.map(m => m.head)])].map(h => ({
 			head: h,
 			level: 0,
 			boundary: A.inspectChange(doc, h)!.deps,
 			checkpoints: [],
 			members: [h],
 		}));
-		const commits = [...A.getFragmentMetadata(doc, 0), ...loose].filter(m => !commitIds.has(m.head));
-		const sent = this.sent.get(id);
-		const ready = (m: A.FragmentMeta) => !this.options.server || (sent?.has(m.head) ?? false);
-		const unstored = levels.filter(m => !atHead(m) && !fragmentIds.has(m.head));
-		const fragments = unstored.filter(ready);
-		if (fragments.length < unstored.length) this.waiting.add(id);
+		const held = levels.some(m => !heads.includes(m.head) && !whole(m));
+		return { commits: [...A.getFragmentMetadata(doc, 0), ...loose], fragments, held };
+	}
+
+	private async write(id: DocumentId, doc: A.Doc<unknown>) {
+		const sid = toSedimentreeId(id);
+		const { commitIds, fragmentIds } = await this.onDisk(sid);
+		await this.loadSent(id);
+		const layout = this.layout(id, doc, fragmentIds);
+		const commits = layout.commits.filter(m => !commitIds.has(m.head));
+		const fragments = layout.fragments.filter(m => !fragmentIds.has(m.head));
+		if (layout.held) this.waiting.add(id);
 		else this.waiting.delete(id);
 		const encode = async (metas: A.FragmentMeta[]) => {
 			const bytes = A.bundleFragmentMetadata(doc, metas);
@@ -367,6 +383,8 @@ export class Docs {
 			let wait = SEND_SETTLE_MS;
 			let pulled = false;
 			for (let round = 0; round < SYNC_ROUNDS; round++) {
+				// what was on disk before the round, so a save during it isn't counted as sent
+				const before = await this.onDisk(sid);
 				const r = await this.node.syncWithPeer(this.peer!, sid, false, TIMEOUT_MS);
 				if (!r.success) {
 					result.error = r.transportErrors[0]?.message ?? "not authorized / not found";
@@ -374,7 +392,7 @@ export class Docs {
 				}
 				result.received ||= r.stats.totalReceived > 0;
 				if (r.stats.totalSent === 0 && r.stats.totalReceived === 0) {
-					this.sent.set(id, (await this.onDisk(sid)).commitIds);
+					await this.markSent(id, before);
 					if (!(await this.hasHeads(id, r.stats.remoteHeads))) {
 						if (pulled) {
 							result.error = "remote heads not found";
@@ -409,6 +427,28 @@ export class Docs {
 		});
 	}
 
+	private async loadSent(id: DocumentId) {
+		const { storage, server } = this.options;
+		if (this.sent.has(id) || !server) return;
+		const heads = remembersSent(storage) ? await storage.loadSent(toSedimentreeId(id), server) : [];
+		this.sent.set(id, new Set(heads));
+	}
+
+	// After a quiet round the server holds every loose commit that was on disk before it. Only a
+	// commit whose hash starts with a zero byte can head a fragment, and once its fragment is
+	// stored there is nothing left to wait for, so only those still waiting are kept.
+	private async markSent(id: DocumentId, disk: { commitIds: Set<string>; fragmentIds: Set<string> }) {
+		const { storage, server } = this.options;
+		await this.loadSent(id);
+		const old = this.sent.get(id)!;
+		const heads = [...old, ...disk.commitIds].filter(h => h.startsWith("00") && !disk.fragmentIds.has(h));
+		const next = new Set(heads);
+		this.sent.set(id, next);
+		if (remembersSent(storage) && (next.size !== old.size || [...next].some(h => !old.has(h)))) {
+			await storage.saveSent(toSedimentreeId(id), server!, [...next].sort());
+		}
+	}
+
 	// Stored ids answer without decoding; a head inside a fragment needs the doc.
 	private async hasHeads(id: DocumentId, heads: CommitId[]): Promise<boolean> {
 		const { commitIds, fragmentIds } = await this.onDisk(toSedimentreeId(id));
@@ -441,13 +481,16 @@ export class Docs {
 		}
 	}
 
+	// Delete what the doc's layout no longer stores, once everything it does store is on disk.
 	private async compact(id: DocumentId, doc: A.Doc<unknown>) {
 		const sid = toSedimentreeId(id);
 		const { storage } = this.options;
-		const metas = A.getFragmentMetadata(doc);
-		const live = new Set(metas.map(m => m.head));
 		const { commits, fragments, commitIds, fragmentIds } = await this.onDisk(sid);
-		for (const m of metas) if (!(m.level === 0 ? commitIds : fragmentIds).has(m.head)) return;
+		await this.loadSent(id);
+		const layout = this.layout(id, doc, fragmentIds);
+		if (!layout.commits.every(m => commitIds.has(m.head))) return;
+		if (!layout.fragments.every(m => fragmentIds.has(m.head))) return;
+		const live = new Set([...layout.commits, ...layout.fragments].map(m => m.head));
 		const stale = (c: CommitId) => !live.has(c.toHexString()) && A.hasHeads(doc, [c.toHexString()]);
 		for (const c of commits) if (stale(c)) await storage.deleteCommit(sid, c);
 		for (const f of fragments) if (stale(f)) await storage.deleteFragment(sid, f);
