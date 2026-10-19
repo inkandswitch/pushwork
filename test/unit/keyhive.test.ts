@@ -97,7 +97,7 @@ describe("keyhive", () => {
 		}
 	});
 
-	for (const version of ["0.5", "0.6"] as const) {
+	for (const version of ["0.5", "0.6", "0.7"] as const) {
 		it(`sets and revokes access on a group with keyhive ${version}`, async () => {
 			const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-hive-")), "archive");
 			const hive = await openHive(file, crypto.getRandomValues(new Uint8Array(32)), {}, false, version);
@@ -200,7 +200,7 @@ describe("keyhive", () => {
 			const first = await keyhiveInfo();
 			expect(first.server).toBe(SERVERS.subduction.url);
 			expect(first.serverPeer).toBe(cardPeerId(SERVERS.subduction.card));
-			expect(first.version).toBe("0.6");
+			expect(first.version).toBe("0.7");
 			expect(cardPeerId(first.me)).toBe(first.id);
 			expect((await keyhiveInfo()).id).toBe(first.id);
 		});

@@ -20,7 +20,7 @@ export {
 	isKeyhiveVersion,
 } from "./keyhive/common.js";
 
-// Both versions ship the same built-in servers and cards, and read cards the same way.
+// Every version ships the same built-in servers and cards, and read cards the same way.
 export { SERVERS, cardPeerId, resolveSettings } from "./keyhive/ark-0.5.js";
 
 /** Open the keyhive archive in `file` with `version`; see each version's `openHive`. */
@@ -31,6 +31,11 @@ export async function openHive(
 	reader = false,
 	version: KeyhiveVersion = DEFAULT_KEYHIVE_VERSION,
 ): Promise<Hive> {
-	const impl = version === "0.6" ? await import("./keyhive/ark-0.6.js") : await import("./keyhive/ark-0.5.js");
+	const impl =
+		version === "0.7"
+			? await import("./keyhive/ark-0.7.js")
+			: version === "0.6"
+				? await import("./keyhive/ark-0.6.js")
+				: await import("./keyhive/ark-0.5.js");
 	return impl.openHive(file, seed, settings, reader);
 }

@@ -1,4 +1,4 @@
-// What both keyhive versions share: settings, the hive interface, the archive lock and
+// What every keyhive version shares: settings, the hive interface, the archive lock and
 // where each version keeps its archive.
 
 import * as fs from "fs/promises";
@@ -7,14 +7,14 @@ import type { Codec, Docs } from "../docs.js";
 import type { DocumentId } from "../url.js";
 
 /**
- * The automerge-repo-keyhive a repo uses. 0.5 and 0.6 can't read each other's archives
+ * The automerge-repo-keyhive a repo uses. No two versions can read each other's archives
  * or talk to each other's servers, so each repo records its own and each has its own
  * archive.
  */
-export const KEYHIVE_VERSIONS = ["0.5", "0.6"] as const;
+export const KEYHIVE_VERSIONS = ["0.5", "0.6", "0.7"] as const;
 export type KeyhiveVersion = (typeof KEYHIVE_VERSIONS)[number];
 /** What new keyhive repos use. */
-export const DEFAULT_KEYHIVE_VERSION: KeyhiveVersion = "0.6";
+export const DEFAULT_KEYHIVE_VERSION: KeyhiveVersion = "0.7";
 /** What a repo without a recorded version was made with: before versions there was only 0.5. */
 export const LEGACY_KEYHIVE_VERSION: KeyhiveVersion = "0.5";
 

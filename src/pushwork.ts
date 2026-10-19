@@ -98,7 +98,7 @@ export type InitOpts = {
 
 /**
  * A keyhive server (built-in name or url) and its contact card, unset meaning this machine's
- * default; and the automerge-repo-keyhive version to use, unset meaning the default (0.6).
+ * default; and the automerge-repo-keyhive version to use, unset meaning the default (0.7).
  */
 export type KeyhiveServerOpts = { keyhiveServer?: string; keyhiveCard?: string; keyhiveVersion?: KeyhiveVersion };
 
