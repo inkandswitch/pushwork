@@ -98,7 +98,7 @@ These apply to every command:
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
+| `--shape <shape>` | both | Document shape: `patchwork-folder` (default), `vfs`, or a path to a custom shape module. |
 | `--artifact-dir <dir>` | both | Directory stored as immutable, heads-pinned content. Repeatable. Defaults to `dist`. |
 | `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
 | `--legacy` | both | Alias for `--no-sub`. |
@@ -144,7 +144,7 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 	"version": 4,
 	"rootUrl": "automerge:2sX...e9",
 	"backend": "subduction",
-	"shape": "vfs",
+	"shape": "patchwork-folder",
 	"artifactDirectories": ["dist"]
 }
 ```
@@ -188,8 +188,8 @@ A _shape_ controls how the directory tree is encoded into Automerge documents.
 
 | Shape | Value | Structure |
 | --- | --- | --- |
-| VFS _(default)_ | `vfs` | A single directory doc (`@patchwork.type: "directory"`) whose keys are posix file paths mapping to file-doc URLs. |
-| Patchwork folder | `patchwork-folder` | A recursive folder-of-docs (`@patchwork.type: "folder"`) compatible with Patchwork and original pushwork repos. |
+| Patchwork folder _(default)_ | `patchwork-folder` | A recursive folder-of-docs (`@patchwork.type: "folder"`) compatible with Patchwork and original pushwork repos. |
+| VFS | `vfs` | A single directory doc (`@patchwork.type: "directory"`) whose keys are posix file paths mapping to file-doc URLs (stored as `ImmutableString`). |
 | Custom | _module path_ | A module with a `default` export implementing `{ encode, decode }`. |
 
 Select a shape with `--shape` at `init`/`clone`.
@@ -269,12 +269,12 @@ import {init, clone, sync, save, status} from "pushwork"
 const {url, files} = await init({
 	dir: "./my-project",
 	backend: "subduction", // or "legacy"
-	shape: "vfs",
+	shape: "patchwork-folder",
 })
 console.log(`Initialized ${files} files at ${url}`)
 
 // Clone it elsewhere
-await clone({url, dir: "./clone-target", backend: "subduction", shape: "vfs"})
+await clone({url, dir: "./clone-target", backend: "subduction", shape: "patchwork-folder"})
 
 // Sync / inspect
 await sync("./my-project") // online by default

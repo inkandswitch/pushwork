@@ -4,6 +4,7 @@ import * as Automerge from "@automerge/automerge";
 import {
 	ImmutableString,
 	isImmutableString,
+	isValidAutomergeUrl,
 	parseAutomergeUrl,
 	stringifyAutomergeUrl,
 	type AutomergeUrl,
@@ -13,6 +14,22 @@ import {
 import type { UnixFileEntry } from "./types.js";
 
 export type Content = string | Uint8Array | ImmutableString;
+
+/**
+ * Reads a string field off a doc. Any string in a doc may be stored as a plain
+ * (collaborative) string or as an ImmutableString; callers shouldn't care.
+ */
+export function asString(v: unknown): string | undefined {
+	if (typeof v === "string") return v;
+	if (isImmutableString(v)) return String(v);
+	return undefined;
+}
+
+/** Reads an automerge URL field off a doc, string or ImmutableString. */
+export function asUrl(v: unknown): AutomergeUrl | undefined {
+	const s = asString(v);
+	return s !== undefined && isValidAutomergeUrl(s) ? s : undefined;
+}
 
 export function bytesToContent(
 	bytes: Uint8Array,
@@ -85,9 +102,9 @@ export function applyFileEntry(
 				d.content = fresh.content;
 			}
 		}
-		if (d.extension !== fresh.extension) d.extension = fresh.extension;
-		if (d.mimeType !== fresh.mimeType) d.mimeType = fresh.mimeType;
-		if (d.name !== fresh.name) d.name = fresh.name;
+		if (asString(d.extension) !== fresh.extension) d.extension = fresh.extension;
+		if (asString(d.mimeType) !== fresh.mimeType) d.mimeType = fresh.mimeType;
+		if (asString(d.name) !== fresh.name) d.name = fresh.name;
 		if (!d["@patchwork"]) d["@patchwork"] = { type: "file" };
 	});
 }

@@ -1,12 +1,11 @@
 import * as path from "path";
 import {
-	isValidAutomergeUrl,
 	type AutomergeUrl,
 	type DocHandle,
 	type Repo,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
-import { pinUrl, stripHeads } from "./file.js";
+import { asString, asUrl, pinUrl, stripHeads } from "./file.js";
 import { newDir, type Shape, type VfsNode } from "./types.js";
 
 const dlog = log("shapes:folder");
@@ -33,7 +32,7 @@ const isFolderDoc = (doc: unknown): doc is FolderDoc => {
 	return (
 		!!meta &&
 		typeof meta === "object" &&
-		(meta as Record<string, unknown>).type === "folder"
+		asString((meta as Record<string, unknown>).type) === "folder"
 	);
 };
 
@@ -133,8 +132,12 @@ async function syncFolder(
 	if (tree.kind !== "dir") throw new Error("syncFolder: not a dir");
 
 	const desired = new Map<string, VfsNode>(tree.entries);
-	const existingLinks = new Map<string, DocLink>();
-	for (const link of handle.doc().docs) existingLinks.set(link.name, link);
+	const existingLinks = new Map<string, { type?: string; url: AutomergeUrl }>();
+	for (const link of handle.doc().docs ?? []) {
+		const name = asString(link?.name);
+		const url = asUrl(link?.url);
+		if (name && url) existingLinks.set(name, { type: asString(link.type), url });
+	}
 
 	const nextLinks: DocLink[] = [];
 
@@ -184,10 +187,42 @@ async function syncFolder(
 
 	handle.change((d: FolderDoc) => {
 		if (!d["@patchwork"]) d["@patchwork"] = { type: "folder" };
-		if (typeof d.title !== "string") d.title = "pushwork";
-		d.docs = nextLinks;
+		if (asString(d.title) === undefined) d.title = "pushwork";
+		updateLinks(d, nextLinks);
 	});
 	return isArtifact(dirPath);
+}
+
+/**
+ * Edit `d.docs` in place to match `want` rather than replacing the list, so
+ * peers concurrently adding or removing different entries merge instead of
+ * one whole list overwriting the other. Unchanged links (including fields
+ * stored as ImmutableString) are left alone.
+ */
+function updateLinks(d: FolderDoc, want: DocLink[]): void {
+	if (!Array.isArray(d.docs)) {
+		d.docs = want;
+		return;
+	}
+	const wanted = new Map(want.map((l) => [l.name, l]));
+	const kept = new Set<string>();
+	for (let i = d.docs.length - 1; i >= 0; i--) {
+		const name = asString(d.docs[i]?.name);
+		// Drop removed entries, and duplicates left by concurrent adds of the
+		// same name (keeping the last).
+		if (!name || !wanted.has(name) || kept.has(name)) {
+			d.docs.splice(i, 1);
+			continue;
+		}
+		kept.add(name);
+		const link = d.docs[i];
+		const next = wanted.get(name)!;
+		if (asString(link.type) !== next.type) link.type = next.type;
+		if (asString(link.url) !== next.url) link.url = next.url;
+	}
+	for (const link of want) {
+		if (!kept.has(link.name)) d.docs.push(link);
+	}
 }
 
 async function readFolder(
@@ -198,17 +233,19 @@ async function readFolder(
 	const tree: VfsNode = newDir();
 	if (!doc?.docs) return tree;
 	for (const link of doc.docs) {
-		if (!link?.name) continue;
-		if (!isValidAutomergeUrl(link.url)) continue;
-		if (link.type === "folder") {
-			const sub = await repo.find<FolderDoc>(link.url);
+		// Link fields may be plain strings or ImmutableStrings.
+		const name = asString(link?.name);
+		const url = asUrl(link?.url);
+		if (!name || !url) continue;
+		if (asString(link.type) === "folder") {
+			const sub = await repo.find<FolderDoc>(url);
 			if (isFolderDoc(sub.doc())) {
 				const subTree = await readFolder(repo, sub);
-				if (tree.kind === "dir") tree.entries.set(link.name, subTree);
+				if (tree.kind === "dir") tree.entries.set(name, subTree);
 			}
 		} else {
 			if (tree.kind === "dir") {
-				tree.entries.set(link.name, { kind: "file", url: link.url });
+				tree.entries.set(name, { kind: "file", url });
 			}
 		}
 	}

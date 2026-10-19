@@ -41,6 +41,8 @@ import {
 } from "./snarf.js";
 import {
 	applyFileEntry,
+	asString,
+	asUrl,
 	contentToBytes,
 	flattenLeaves,
 	isInArtifactDir,
@@ -330,15 +332,13 @@ function patchworkType(doc: unknown): string | undefined {
 	if (!doc || typeof doc !== "object") return undefined;
 	const meta = (doc as Record<string, unknown>)["@patchwork"];
 	if (!meta || typeof meta !== "object") return undefined;
-	const t = (meta as Record<string, unknown>).type;
-	return typeof t === "string" ? t : undefined;
+	return asString((meta as Record<string, unknown>).type);
 }
 
 // Reads a `.pushworkStrategy` automerge URL off the root doc, if present.
 function strategyUrl(doc: unknown): AutomergeUrl | undefined {
 	if (!doc || typeof doc !== "object") return undefined;
-	const v = (doc as Record<string, unknown>)[".pushworkStrategy"];
-	return typeof v === "string" && isValidAutomergeUrl(v) ? v : undefined;
+	return asUrl((doc as Record<string, unknown>)[".pushworkStrategy"]);
 }
 
 // Picks the shape to decode a cloned repo with, based on the root doc:
@@ -407,12 +407,17 @@ function asBranchesDoc(
 	if (!doc || typeof doc !== "object") return null;
 	const meta = (doc as Record<string, unknown>)["@patchwork"];
 	if (!meta || typeof meta !== "object") return null;
-	if ((meta as Record<string, unknown>).type !== "branches") return null;
-	const branches = (doc as Record<string, unknown>).branches;
-	if (!branches || typeof branches !== "object") return null;
+	if (asString((meta as Record<string, unknown>).type) !== "branches") return null;
+	const raw = (doc as Record<string, unknown>).branches;
+	if (!raw || typeof raw !== "object") return null;
+	const branches: Record<string, AutomergeUrl> = {};
+	for (const [name, value] of Object.entries(raw)) {
+		const url = asUrl(value);
+		if (url) branches[name] = url;
+	}
 	return {
-		title: (meta as { title?: string }).title,
-		branches: branches as Record<string, AutomergeUrl>,
+		title: asString((meta as Record<string, unknown>).title),
+		branches,
 	};
 }
 
@@ -485,7 +490,7 @@ export async function yoink(
 		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
 		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
 
-		const rel = destPath ?? entry.name;
+		const rel = destPath ?? asString(entry.name);
 		if (!rel) {
 			throw new Error(
 				`doc ${docUrl} has no name field; pass a destination path`,

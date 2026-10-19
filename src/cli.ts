@@ -223,8 +223,8 @@ program
 	.option("--legacy", "Alias for --no-sub")
 	.option(
 		"--shape <shape>",
-		"Document shape: vfs, patchwork-folder, or path to a custom shape module",
-		"vfs",
+		"Document shape: patchwork-folder, vfs, or path to a custom shape module",
+		"patchwork-folder",
 	)
 	.option(
 		"--artifact-dir <dir>",
@@ -265,8 +265,8 @@ program
 	.option("--legacy", "Alias for --no-sub")
 	.option(
 		"--shape <shape>",
-		"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: vfs, patchwork-folder, or path to a custom shape module",
-		"vfs",
+		"Fallback shape if the root doc's @patchwork.type isn't recognized (directory→vfs, folder→patchwork-folder) and no .pushworkStrategy is run: patchwork-folder, vfs, or path to a custom shape module",
+		"patchwork-folder",
 	)
 	.option(
 		"--artifact-dir <dir>",

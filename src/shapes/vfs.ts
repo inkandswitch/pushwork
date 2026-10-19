@@ -1,9 +1,11 @@
 import {
-	isValidAutomergeUrl,
+	ImmutableString,
+	isImmutableString,
 	type AutomergeUrl,
 	type DocHandle,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
+import { asString, asUrl } from "./file.js";
 import { flattenLeaves, newDir, type Shape, type VfsNode } from "./types.js";
 
 const dlog = log("shapes:vfs");
@@ -22,7 +24,7 @@ const isDirectoryDoc = (doc: unknown): doc is DirectoryDoc => {
 	return (
 		!!meta &&
 		typeof meta === "object" &&
-		(meta as Record<string, unknown>).type === "directory"
+		asString((meta as Record<string, unknown>).type) === "directory"
 	);
 };
 
@@ -42,13 +44,17 @@ export const vfsShape: Shape = {
 
 		handle.change((d: DirectoryDoc) => {
 			if (!d["@patchwork"]) d["@patchwork"] = { type: "directory" };
-			if (title && d["@patchwork"].title !== title) d["@patchwork"].title = title;
+			if (title && asString(d["@patchwork"].title) !== title) {
+				d["@patchwork"].title = title;
+			}
 			for (const k of Object.keys(d)) {
 				if (RESERVED.has(k)) continue;
 				if (!flat.has(k)) delete d[k];
 			}
 			for (const [k, url] of flat) {
-				d[k] = url;
+				const prev = d[k];
+				if (isImmutableString(prev) && String(prev) === url) continue;
+				d[k] = new ImmutableString(url);
 			}
 		});
 
@@ -65,11 +71,12 @@ export const vfsShape: Shape = {
 		let count = 0;
 		for (const [key, value] of Object.entries(doc)) {
 			if (RESERVED.has(key)) continue;
-			if (typeof value !== "string") continue;
-			if (!isValidAutomergeUrl(value)) continue;
+			// Links are written as ImmutableString; older docs have plain strings.
+			const link = asUrl(value);
+			if (!link) continue;
 			const segments = key.split("/").filter(Boolean);
 			if (segments.length === 0) continue;
-			setLeaf(tree, segments, value as AutomergeUrl);
+			setLeaf(tree, segments, link);
 			count++;
 		}
 		dlog("decode url=%s leaves=%d", root.url, count);

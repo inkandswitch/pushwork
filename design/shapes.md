@@ -77,10 +77,12 @@ A single directory doc mapping slash-separated relative paths directly to file-d
 ```ts
 {
   "@patchwork": { type: "directory", title? },
-  "src/cli.ts": "automerge:...",
-  "README.md": "automerge:...",
+  "src/cli.ts": ImmutableString("automerge:..."),
+  "README.md": ImmutableString("automerge:..."),
 }
 ```
+
+Links are written as `ImmutableString`; plain-string links from older docs are still read, and are rewritten on the next save.
 
 Flat and cheap — one doc for the whole tree structure — at the cost of folder-level granularity and Patchwork folder interop.
 

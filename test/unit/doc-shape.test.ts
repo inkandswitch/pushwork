@@ -20,11 +20,16 @@ import {
 	initSubduction,
 	parseAutomergeUrl,
 	isImmutableString,
+	type AutomergeUrl,
 	type DocHandle,
+	type ImmutableString,
 	type Repo,
 } from "@automerge/automerge-repo";
 import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
-import { Repo as RepoCtor } from "@automerge/automerge-repo";
+import {
+	Repo as RepoCtor,
+	ImmutableString as ImmutableStringCtor,
+} from "@automerge/automerge-repo";
 
 import {
 	init,
@@ -33,9 +38,18 @@ import {
 	pasteSnarf,
 	showSnarfs,
 	nuclearizeRepo,
+	vfsShape,
+	patchworkFolderShape,
 	type UnixFileEntry,
 } from "../../src/index.js";
 import { readConfig } from "../../src/config.js";
+import {
+	applyFileEntry,
+	flattenLeaves,
+	makeFileEntry,
+	newDir,
+	setFileAt,
+} from "../../src/shapes/index.js";
 
 async function openOfflineRepo(storage: string): Promise<Repo> {
 	await initSubduction();
@@ -60,6 +74,13 @@ function readDoc<T>(handle: DocHandle<T>): T {
 	const d = handle.doc();
 	if (!d) throw new Error(`empty doc at ${handle.url}`);
 	return d;
+}
+
+// vfs directory docs store each link as an ImmutableString.
+function linkAt(doc: Record<string, unknown>, key: string): AutomergeUrl {
+	const v = doc[key];
+	expect(isImmutableString(v)).toBe(true);
+	return (v as ImmutableString).val as AutomergeUrl;
 }
 
 describe("doc shape", () => {
@@ -129,9 +150,7 @@ describe("doc shape", () => {
 		await withRepo(storageOf(workRoot), async (repo) => {
 			const folder = await repo.find(cfg.rootUrl);
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
-			const fileUrl = folderDoc["a.txt"];
-			expect(typeof fileUrl).toBe("string");
-			const file = await repo.find(fileUrl as `automerge:${string}`);
+			const file = await repo.find(linkAt(folderDoc, "a.txt"));
 			const fd = readDoc(file) as UnixFileEntry;
 			expect(fd["@patchwork"].type).toBe("file");
 			expect(fd.content).toBe("hello world\n");
@@ -153,8 +172,8 @@ describe("doc shape", () => {
 			const folder = await repo.find(cfg.rootUrl);
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
 
-			const artifactUrl = folderDoc["dist/main.js"] as string;
-			const sourceUrl = folderDoc["src.ts"] as string;
+			const artifactUrl = linkAt(folderDoc, "dist/main.js");
+			const sourceUrl = linkAt(folderDoc, "src.ts");
 			expect(parseAutomergeUrl(artifactUrl).heads).toBeTruthy();
 			expect(parseAutomergeUrl(sourceUrl).heads).toBeFalsy();
 
@@ -196,10 +215,10 @@ describe("doc shape", () => {
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
 			// out/ is pinned (heads present); dist/ is not.
 			expect(
-				parseAutomergeUrl(folderDoc["out/bundle.js"] as string).heads,
+				parseAutomergeUrl(linkAt(folderDoc, "out/bundle.js")).heads,
 			).toBeTruthy();
 			expect(
-				parseAutomergeUrl(folderDoc["dist/main.js"] as string).heads,
+				parseAutomergeUrl(linkAt(folderDoc, "dist/main.js")).heads,
 			).toBeFalsy();
 		});
 	});
@@ -315,7 +334,7 @@ describe("doc shape", () => {
 		await withRepo(storageOf(workRoot), async (repo) => {
 			const folder = await repo.find(cfg.rootUrl);
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
-			const file = await repo.find(folderDoc["img.png"] as `automerge:${string}`);
+			const file = await repo.find(linkAt(folderDoc, "img.png"));
 			const fd = readDoc(file) as UnixFileEntry;
 			expect(fd.content instanceof Uint8Array).toBe(true);
 			expect(Array.from(fd.content as Uint8Array)).toEqual(Array.from(bytes));
@@ -354,7 +373,7 @@ describe("file-doc lifecycle", () => {
 			return withRepo(storageOf(workRoot), async (repo) => {
 				const folder = await repo.find(cfg.rootUrl);
 				const folderDoc = readDoc(folder) as Record<string, unknown>;
-				return folderDoc[filePath] as string;
+				return linkAt(folderDoc, filePath);
 			});
 		}
 
@@ -528,7 +547,7 @@ describe("snarf (cut/paste)", () => {
 			const folder = await repo.find(cfg1.rootUrl);
 			for (const [k, v] of Object.entries(readDoc(folder) as Record<string, unknown>)) {
 				if (k === "@patchwork" || k === "lastSyncAt") continue;
-				if (typeof v === "string") oldFileUrls.push(v);
+				if (isImmutableString(v)) oldFileUrls.push(String(v));
 			}
 		});
 
@@ -544,7 +563,7 @@ describe("snarf (cut/paste)", () => {
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
 			for (const [k, v] of Object.entries(folderDoc)) {
 				if (k === "@patchwork" || k === "lastSyncAt") continue;
-				if (typeof v === "string") newFileUrls.push(v);
+				if (isImmutableString(v)) newFileUrls.push(String(v));
 			}
 			// Same content preserved.
 			expect("a.txt" in folderDoc).toBe(true);
@@ -555,5 +574,218 @@ describe("snarf (cut/paste)", () => {
 		const oldSet = new Set(oldFileUrls);
 		expect(newFileUrls.length).toBe(oldFileUrls.length);
 		for (const u of newFileUrls) expect(oldSet.has(u)).toBe(false);
+	});
+});
+
+describe("doc strings may be string or ImmutableString", () => {
+	let workRoot: string;
+	let cleanup: () => void;
+
+	beforeEach(() => {
+		const t = tmp.dirSync({ unsafeCleanup: true });
+		workRoot = t.name;
+		cleanup = t.removeCallback;
+	});
+
+	afterEach(() => cleanup());
+
+	const imm = (v: string) => new ImmutableStringCtor(v);
+	const storage = () => path.join(workRoot, "storage");
+
+	it("vfs decodes plain-string links and encode rewrites them as ImmutableString", async () => {
+		await withRepo(storage(), async (repo) => {
+			const file = repo.create({ "@patchwork": { type: "file" } });
+			const root = repo.create<Record<string, unknown>>({
+				"@patchwork": { type: "directory" },
+				"src/a.txt": file.url,
+			});
+
+			const tree = await vfsShape.decode({ repo, root });
+			expect(flattenLeaves(tree)).toEqual(new Map([["src/a.txt", file.url]]));
+
+			await vfsShape.encode({ repo, tree, previousRoot: root });
+			expect(linkAt(readDoc(root), "src/a.txt")).toBe(file.url);
+		});
+	});
+
+	it("vfs decodes all-ImmutableString docs", async () => {
+		await withRepo(storage(), async (repo) => {
+			const file = repo.create({ "@patchwork": { type: "file" } });
+			const root = repo.create({
+				"@patchwork": { type: imm("directory"), title: imm("t") },
+				"a.txt": imm(file.url),
+			});
+			const tree = await vfsShape.decode({ repo, root });
+			expect(flattenLeaves(tree)).toEqual(new Map([["a.txt", file.url]]));
+		});
+	});
+
+	it("vfs decodes mixed links and encode replaces only the plain strings", async () => {
+		await withRepo(storage(), async (repo) => {
+			const a = repo.create({ "@patchwork": { type: "file" } });
+			const b = repo.create({ "@patchwork": { type: "file" } });
+			const root = repo.create<Record<string, unknown>>({
+				"@patchwork": { type: imm("directory"), title: "mixed" },
+				"a.txt": a.url,
+				"dir/b.txt": imm(b.url),
+			});
+
+			const tree = await vfsShape.decode({ repo, root });
+			expect(flattenLeaves(tree)).toEqual(
+				new Map([
+					["a.txt", a.url],
+					["dir/b.txt", b.url],
+				]),
+			);
+
+			await vfsShape.encode({ repo, tree, previousRoot: root, title: "mixed" });
+			const doc = readDoc(root);
+			expect(linkAt(doc, "a.txt")).toBe(a.url);
+			expect(linkAt(doc, "dir/b.txt")).toBe(b.url);
+
+			// Everything is ImmutableString now, so re-encoding is a no-op.
+			const heads = root.heads();
+			await vfsShape.encode({ repo, tree, previousRoot: root, title: "mixed" });
+			expect(root.heads()).toEqual(heads);
+		});
+	});
+
+	it("patchwork-folder decodes all-ImmutableString docs", async () => {
+		await withRepo(storage(), async (repo) => {
+			const file = repo.create({ "@patchwork": { type: "file" } });
+			const sub = repo.create({
+				"@patchwork": { type: imm("folder") },
+				title: imm("sub"),
+				docs: [{ name: imm("b.txt"), type: imm("txt"), url: imm(file.url) }],
+			});
+			const folder = repo.create({
+				"@patchwork": { type: imm("folder") },
+				title: imm("root"),
+				docs: [
+					{ name: imm("a.txt"), type: imm("txt"), url: imm(file.url) },
+					{ name: imm("sub"), type: imm("folder"), url: imm(sub.url) },
+				],
+			});
+			const tree = await patchworkFolderShape.decode({ repo, root: folder });
+			expect(flattenLeaves(tree)).toEqual(
+				new Map([
+					["a.txt", file.url],
+					["sub/b.txt", file.url],
+				]),
+			);
+		});
+	});
+
+	it("patchwork-folder decodes mixed links and encode keeps the subfolder doc", async () => {
+		await withRepo(storage(), async (repo) => {
+			const a = repo.create({ "@patchwork": { type: "file" } });
+			const b = repo.create({ "@patchwork": { type: "file" } });
+			const c = repo.create({ "@patchwork": { type: "file" } });
+			const sub = repo.create({
+				"@patchwork": { type: "folder" },
+				title: imm("sub"),
+				docs: [{ name: "b.txt", type: imm("txt"), url: b.url }],
+			});
+			const folder = repo.create({
+				"@patchwork": { type: imm("folder") },
+				title: "root",
+				docs: [
+					{ name: "a.txt", type: "txt", url: imm(a.url) },
+					{ name: imm("sub"), type: imm("folder"), url: sub.url },
+					{ name: imm("c.txt"), type: "txt", url: c.url },
+				],
+			});
+
+			const tree = await patchworkFolderShape.decode({ repo, root: folder });
+			expect(flattenLeaves(tree)).toEqual(
+				new Map([
+					["a.txt", a.url],
+					["sub/b.txt", b.url],
+					["c.txt", c.url],
+				]),
+			);
+
+			await patchworkFolderShape.encode({ repo, tree, previousRoot: folder });
+			// Links are edited in place, so ImmutableString fields survive.
+			const docs = (readDoc(folder) as { docs: Record<string, unknown>[] }).docs;
+			const subLink = docs.find((l) => String(l.name) === "sub");
+			expect(isImmutableString(subLink?.name)).toBe(true);
+			expect(String(subLink?.url)).toBe(sub.url);
+			const again = await patchworkFolderShape.decode({ repo, root: folder });
+			expect(flattenLeaves(again)).toEqual(flattenLeaves(tree));
+		});
+	});
+
+	it("patchwork-folder re-encoding an unchanged tree writes nothing", async () => {
+		await withRepo(storage(), async (repo) => {
+			const a = repo.create({ "@patchwork": { type: "file" } });
+			const b = repo.create({ "@patchwork": { type: "file" } });
+			const tree = newDir();
+			setFileAt(tree, ["a.txt"], a.url);
+			setFileAt(tree, ["sub", "b.txt"], b.url);
+
+			const url = await patchworkFolderShape.encode({ repo, tree });
+			const root = await repo.find(url);
+			await patchworkFolderShape.encode({ repo, tree, previousRoot: root });
+			const sub = await repo.find(
+				linkByName((readDoc(root) as { docs: { name: string; url: AutomergeUrl }[] }).docs),
+			);
+			const rootHeads = root.heads();
+			const subHeads = sub.heads();
+
+			await patchworkFolderShape.encode({ repo, tree, previousRoot: root });
+			expect(root.heads()).toEqual(rootHeads);
+			expect(sub.heads()).toEqual(subHeads);
+		});
+
+		function linkByName(docs: { name: string; url: AutomergeUrl }[]): AutomergeUrl {
+			const link = docs.find((l) => String(l.name) === "sub");
+			if (!link) throw new Error("no sub link");
+			return link.url;
+		}
+	});
+
+	it("patchwork-folder merges concurrent adds of different files", async () => {
+		await withRepo(storage(), async (repo) => {
+			const a = repo.create({ "@patchwork": { type: "file" } });
+			const b = repo.create({ "@patchwork": { type: "file" } });
+			const base = repo.create({
+				"@patchwork": { type: "folder" },
+				title: "root",
+				docs: [],
+			});
+			const fork = repo.clone(base);
+
+			const withA = newDir();
+			setFileAt(withA, ["a.txt"], a.url);
+			await patchworkFolderShape.encode({ repo, tree: withA, previousRoot: base });
+			const withB = newDir();
+			setFileAt(withB, ["b.txt"], b.url);
+			await patchworkFolderShape.encode({ repo, tree: withB, previousRoot: fork });
+
+			base.merge(fork);
+			const merged = await patchworkFolderShape.decode({ repo, root: base });
+			expect(flattenLeaves(merged)).toEqual(
+				new Map([
+					["a.txt", a.url],
+					["b.txt", b.url],
+				]),
+			);
+		});
+	});
+
+	it("file docs with ImmutableString metadata aren't rewritten when unchanged", async () => {
+		await withRepo(storage(), async (repo) => {
+			const fresh = makeFileEntry("a.txt", new TextEncoder().encode("hi\n"), false);
+			const handle = repo.create<UnixFileEntry>({
+				...fresh,
+				name: imm(fresh.name) as unknown as string,
+				extension: imm(fresh.extension) as unknown as string,
+				mimeType: fresh.mimeType,
+			});
+			const heads = handle.heads();
+			applyFileEntry(handle, fresh);
+			expect(handle.heads()).toEqual(heads);
+		});
 	});
 });
