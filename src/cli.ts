@@ -17,6 +17,7 @@ import {
 	addContact,
 	listContacts,
 	removeContact,
+	checkAccess,
 	addPublicApp,
 	listPublicApps,
 	newPublicApp,
@@ -369,10 +370,30 @@ keyhive
 	.command("server")
 	.description("Set the keyhive sync server for new keyhive repos on this machine")
 	.argument("<server>", "A built-in name (keyhive, subduction) or a ws(s):// url")
-	.argument("[card]", "The server's contact card, required with a url: a built-in name, JSON, an http(s) url or a file")
+	.argument(
+		"[card]",
+		"The server's contact card, for a url (a keyline server is asked for its own): a built-in name, JSON or base64, an http(s) url or a file",
+	)
 	.action(async (server, card) => {
 		await setKeyhiveServer(server, card);
 		out.log(`keyhive server set to ${server}`);
+	});
+
+keyhive
+	.command("check")
+	.description("Check what you, or an app's public user, can do with a keyhive repo: pull it, and read it")
+	.argument("<url>", "The repo's automerge: URL")
+	.option("--app <name>", "Check as this app's public user instead of as you (keyline; see `keyhive apps`)")
+	.option("--keyhive-server <server>", "The repo's keyhive server: a built-in name or a ws(s):// url")
+	.option("--keyhive-card <card>", "The keyhive server's contact card, for a url (a keyline server is asked for its own)")
+	.addOption(new Option("--keyhive-version <version>", "The repo's keyhive version (default 0.6)").choices(KEYHIVE_VERSIONS))
+	.action(async (url, _opts, cmd) => {
+		const check = await checkAccess(url as `automerge:${string}`, cmd.optsWithGlobals());
+		out.obj({
+			as: check.as,
+			pulled: `${check.pulled} blob${check.pulled === 1 ? "" : "s"} of the root doc`,
+			verdict: check.readable ? "can read" : check.pulled ? "can pull but not read (relay)" : "can't pull: no access",
+		});
 	});
 
 const GRANT_LEVELS = ["relay", "read", "edit", "admin", "none"] as const;
@@ -474,6 +495,19 @@ contacts
 	.action(async (name, card) => {
 		const contact = await addContact(name, card);
 		out.log(`saved ${contact.name} (${contact.id})`);
+	});
+
+contacts
+	.command("me")
+	.description("Print your own contact card, for someone to add and grant you access with")
+	.addOption(
+		new Option("--keyhive-version <version>", "Which keyhive identity's card (default 0.6)").choices(KEYHIVE_VERSIONS),
+	)
+	.action(async (_opts, cmd) => {
+		// `keyhive` has its own --keyhive-version, which commander gives the flag to
+		const { keyhiveVersion } = cmd.optsWithGlobals();
+		// only the card goes to stdout, so it can be captured
+		out.log((await keyhiveInfo(keyhiveVersion)).me);
 	});
 
 contacts

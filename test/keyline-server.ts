@@ -21,7 +21,7 @@ const freePort = () =>
 	});
 
 /** A keyhive subduction server on a free port, with its keys and storage in a temp dir. */
-export async function startKeylineServer(): Promise<{ url: string; close(): Promise<void> }> {
+export async function startKeylineServer(extraArgs: string[] = []): Promise<{ url: string; close(): Promise<void> }> {
 	if (!keylineServerBinary) throw new Error("no subduction_cli; set SUBDUCTION_CLI");
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-keyline-server-"));
 	const ready = path.join(dir, "ready");
@@ -30,7 +30,7 @@ export async function startKeylineServer(): Promise<{ url: string; close(): Prom
 	const host = `127.0.0.1:${port}`;
 	const child: ChildProcess = spawn(
 		keylineServerBinary,
-		["server", "--socket", host, "--service-name", host, "--ephemeral-key", "--data-dir", dir, "--ready-file", ready],
+		["server", "--socket", host, "--service-name", host, "--ephemeral-key", "--data-dir", dir, "--ready-file", ready, ...extraArgs],
 		{ env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "warn" }, stdio: ["ignore", "ignore", "inherit"] },
 	);
 	const exited = new Promise<never>((_, reject) => child.once("exit", code => reject(new Error(`subduction_cli exited: ${code}`))));

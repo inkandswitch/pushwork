@@ -12,7 +12,7 @@ import {
 	writeConfig,
 	type PushworkConfig,
 } from "./config.js";
-import { Docs, type SyncReport } from "./docs.js";
+import { Docs, DocumentUnreadable, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
 import type { Grantee, Member, PublicPair } from "./keyhive/common.js";
 import type { PublicPrincipals } from "./keyhive/keyline/public.js";
@@ -31,6 +31,7 @@ import {
 	parseAutomergeUrl,
 	stringifyAutomergeUrl,
 	stripHeads,
+	toSedimentreeId,
 	type AutomergeUrl,
 } from "./url.js";
 import {
@@ -267,7 +268,22 @@ export async function keyhiveInfo(version: KeyhiveVersion = DEFAULT_KEYHIVE_VERS
  * or a file.
  */
 export async function setKeyhiveServer(server: string, card?: string): Promise<void> {
-	await writeKeyhiveSettings(await parseKeyhiveServer(server, card));
+	await writeKeyhiveSettings(card ? await parseKeyhiveServer(server, card) : await serverWithoutCard(server));
+}
+
+// A built-in name needs no card. A keyline server hands out its own, so a url without one
+// is asked for it; one that doesn't answer needs it given.
+async function serverWithoutCard(server: string): Promise<Settings> {
+	const { SERVERS } = await import("./keyhive.js");
+	if (Object.entries(SERVERS).some(([name, { url }]) => server === name || server === url)) {
+		return parseKeyhiveServer(server);
+	}
+	if (!/^wss?:\/\//.test(server)) return parseKeyhiveServer(server);
+	const { fetchCard } = await import("./keyhive/keyline.js");
+	const card = await fetchCard(server).catch((e: Error) => {
+		throw new Error(`the keyhive server ${server} needs its contact card (it didn't hand one out: ${e.message})`);
+	});
+	return { server, card };
 }
 
 async function parseKeyhiveServer(server: string, card?: string): Promise<Settings> {
@@ -457,6 +473,59 @@ async function publicPairFor(version: KeyhiveVersion, app: string): Promise<Publ
 	if (!principals) throw new Error(`no public app named ${app}; see \`pushwork keyhive apps ls\``);
 	const { pairOf } = await import("./keyhive/keyline/public.js");
 	return pairOf(principals);
+}
+
+// ---- checking access to a keyhive repo from outside it
+
+export type AccessCheck = {
+	/** Who checked: "you", or an app's public user. */
+	as: string;
+	/** Blobs of the root doc pulled from the server: none means no access at all. */
+	pulled: number;
+	readable: boolean;
+};
+
+/**
+ * What `url`'s keyhive repo lets you, or `app`'s public user (keyline), do: pull it
+ * from its server, and decrypt it. Pulls into memory only: nothing is written, and your
+ * keyhive archive is opened as a reader.
+ */
+export async function checkAccess(url: AutomergeUrl, opts: KeyhiveServerOpts & { app?: string } = {}): Promise<AccessCheck> {
+	if (!isValidAutomergeUrl(url) || !isProtected(parseAutomergeUrl(url).documentId)) {
+		throw new Error(`${url} is not a keyhive repo's URL`);
+	}
+	const settings = await keyhiveSettingsFor(opts);
+	let as = "you";
+	let seed: Uint8Array;
+	let hive: Pick<Hive, "server" | "codec" | "sync"> & { close?(): Promise<void> };
+	if (opts.app) {
+		if (settings.version !== "keyline") throw new Error("--app checks a keyline repo; pass --keyhive-version keyline");
+		const principals = (await publicApps())[opts.app];
+		if (!principals) throw new Error(`no public app named ${opts.app}; see \`pushwork keyhive apps ls\``);
+		const { openPublicHive } = await import("./keyhive/keyline.js");
+		const open = await openPublicHive(settings, principals);
+		[as, seed, hive] = [`${opts.app}'s public user`, open.seed, open];
+	} else {
+		seed = await loadSeed();
+		hive = await openHive(seed, settings, true);
+	}
+	const storage = new MemoryStorage();
+	const docs = await Docs.open({ storage, signer: signerFrom(seed), server: hive.server, codec: hive.codec });
+	try {
+		if (!docs.online) throw new Error(`could not connect to ${hive.server}: ${docs.report().error}`);
+		await hive.sync(docs);
+		await docs.sync([stripHeads(url)]);
+		const sid = toSedimentreeId(parseAutomergeUrl(url).documentId);
+		const pulled = (await storage.loadAllCommits(sid)).length + (await storage.loadAllFragments(sid)).length;
+		const readable = await docs.find(stripHeads(url)).then(
+			() => true,
+			() => false,
+		);
+		return { as, pulled, readable };
+	} finally {
+		await docs.close();
+		await hive.close?.();
+	}
 }
 
 // ---- access to a keyhive repo
@@ -702,8 +771,15 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 		}
 		report("Fetching repository");
 		await hive?.sync(docs);
-		if (hive && !(await docs.find(url).then(() => true, () => false))) {
-			throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
+		if (hive) {
+			const found = await docs.find(url).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+			if (found instanceof DocumentUnreadable) {
+				throw new Error(`${url} is a keyhive repo you can pull but not read: you have relay access at most, so its contents can't be decrypted here`);
+			}
+			if (found) throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
 		}
 		const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
 		report("Downloading files");

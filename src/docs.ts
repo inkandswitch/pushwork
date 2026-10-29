@@ -97,6 +97,25 @@ export function limiter(n: number) {
 
 type Connection = { peer?: PeerId; error?: string; connectMs?: number };
 
+/** No blob of the document is stored here, or on the server. */
+export class DocumentNotFound extends Error {
+	constructor(readonly id: DocumentId) {
+		super(`document not found: ${bare(id)}`);
+		this.name = "DocumentNotFound";
+	}
+}
+
+/** The document's blobs are stored, but the codec can open none of them: a relay can hold it but not read it. */
+export class DocumentUnreadable extends Error {
+	constructor(
+		readonly id: DocumentId,
+		readonly blobs: number,
+	) {
+		super(`document can't be decrypted here: ${bare(id)} (${blobs} stored blob${blobs === 1 ? "" : "s"}, none readable)`);
+		this.name = "DocumentUnreadable";
+	}
+}
+
 // The handshake runs off the node, so one that times out leaves the node free to be freed.
 async function connect(node: Subduction, signer: Signer, server: string): Promise<Connection> {
 	const start = performance.now();
@@ -270,7 +289,11 @@ export class Docs {
 			await this.syncDoc(id);
 			doc = await this.read(id);
 		}
-		if (!doc) throw new Error(`document not found: ${bare(id)}`);
+		if (!doc) {
+			const { commits, fragments } = await this.onDisk(toSedimentreeId(id));
+			const blobs = commits.length + fragments.length;
+			throw blobs ? new DocumentUnreadable(id, blobs) : new DocumentNotFound(id);
+		}
 		const entry = { doc, dirty: false, touched: this.results.get(id)?.received ?? false };
 		this.entries.set(id, entry);
 		return entry;

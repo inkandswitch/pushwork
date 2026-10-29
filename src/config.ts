@@ -70,7 +70,10 @@ async function snapshotRootUrl(root: string): Promise<string | undefined> {
 }
 
 export async function readConfig(root: string): Promise<PushworkConfig> {
-	const text = await fs.readFile(path.join(root, DIR, CONFIG), "utf8");
+	const text = await fs.readFile(path.join(root, DIR, CONFIG), "utf8").catch(e => {
+		if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+		throw new Error(`not a pushwork repo: ${root} has no ${DIR}/${CONFIG} (run this inside one, or \`pushwork init\` here)`);
+	});
 	const parsed = JSON.parse(text);
 	if (parsed.version !== CONFIG_VERSION) {
 		throw new Error(

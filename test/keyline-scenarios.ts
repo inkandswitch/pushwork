@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { MemorySigner, MemoryStorage } from "@automerge/automerge-subduction";
-import { Docs } from "../src/docs";
+import { Docs, DocumentNotFound, DocumentUnreadable } from "../src/docs";
 import { type Hive, openHive } from "../src/keyhive";
 import { fetchCard, openPublicHive } from "../src/keyhive/keyline";
 import { type PublicPrincipals, pairOf } from "../src/keyhive/keyline/public";
@@ -73,7 +73,7 @@ export async function publicAccess(url: string, level: "relay" | "read", app?: P
 		const patchwork = await openPublicHive(settings);
 		const patchworkDocs = await online(url, patchwork.seed, patchwork);
 		await patchworkDocs.sync([doc]);
-		await expect(patchworkDocs.find(doc)).rejects.toThrow("document not found");
+		await expect(patchworkDocs.find(doc)).rejects.toThrow(DocumentNotFound);
 		await patchworkDocs.close();
 	}
 	const outsider = await openPublicHive(settings, app);
@@ -83,7 +83,7 @@ export async function publicAccess(url: string, level: "relay" | "read", app?: P
 	// the fetcher can relay either way: the blobs arrive
 	expect((await storage.loadAllCommits(toSedimentreeId(parseAutomergeUrl(doc).documentId))).length).toBeGreaterThan(0);
 	if (level === "read") expect((await outsiderDocs.find<Text>(doc)).text).toBe("still before");
-	else await expect(outsiderDocs.find(doc)).rejects.toThrow("document not found");
+	else await expect(outsiderDocs.find(doc)).rejects.toThrow(DocumentUnreadable);
 	await Promise.all([docs.close(), outsiderDocs.close()]);
 	await hive.close();
 }
