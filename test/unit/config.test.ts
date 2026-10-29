@@ -36,6 +36,11 @@ describe("config", () => {
 		expect(config.artifactDirectories).toEqual([]);
 	});
 
+	it("says when a directory isn't a pushwork repo", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-norepo-"));
+		await expect(readConfig(dir)).rejects.toThrow(/not a pushwork repo: .* has no \.pushwork\/config\.json/);
+	});
+
 	it("points old configs at migrate", async () => {
 		const root = await withConfig({ version: 5, rootUrl: url, backend: "subduction", shape: "vfs" });
 		await expect(readConfig(root)).rejects.toThrow("run `pushwork migrate`");

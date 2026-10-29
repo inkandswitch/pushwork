@@ -30,6 +30,7 @@ import {
 	type Hive,
 	type Servers,
 	type Settings,
+	decodeEach,
 	lock,
 	noStorage,
 	resolveWith,
@@ -93,7 +94,7 @@ export async function openHive(
 				if (!out) throw new Error(`cannot encrypt ${id}: keyhive does not know it`);
 				return out;
 			},
-			decode: (id, head, blob) => crypt.transformIncoming(ark(id), head, blob),
+			decode: decodeEach((id, head, blob) => crypt.transformIncoming(ark(id), head, blob)),
 		},
 
 		createGroup: access =>

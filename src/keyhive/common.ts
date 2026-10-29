@@ -7,11 +7,11 @@ import type { Codec, Docs } from "../docs.js";
 import type { DocumentId } from "../url.js";
 
 /**
- * The automerge-repo-keyhive a repo uses. 0.5 and 0.6 can't read each other's archives
- * or talk to each other's servers, so each repo records its own and each has its own
- * archive.
+ * The keyhive a repo uses: automerge-repo-keyhive 0.5 or 0.6, or keyline (keyhive 0.6
+ * itself, without ARK). None can read another's archives or talk to another's servers,
+ * so each repo records its own and each has its own archive.
  */
-export const KEYHIVE_VERSIONS = ["0.5", "0.6"] as const;
+export const KEYHIVE_VERSIONS = ["0.5", "0.6", "keyline"] as const;
 export type KeyhiveVersion = (typeof KEYHIVE_VERSIONS)[number];
 /** What new keyhive repos use. */
 export const DEFAULT_KEYHIVE_VERSION: KeyhiveVersion = "0.6";
@@ -27,10 +27,11 @@ export const DEFAULT_SERVER_NAME = "subduction";
 /** The keyhive server of repos from before configs recorded one. */
 export const LEGACY_SERVER_NAME = "keyhive";
 
-export type Servers = Record<string, { url: string; card: string }>;
+/** The sync servers a version knows, by short name, with the cards it ships (if any). */
+export type Servers = Record<string, { url: string; card?: string }>;
 
 // the sync servers ARK knows, by short name, with the cards the package ships
-export const serverTable = (cards: { keyhive: string; subduction: string }): Servers => ({
+export const serverTable = (cards: { keyhive: string; subduction: string }) => ({
 	subduction: { url: "wss://subduction.sync.inkandswitch.com", card: cards.subduction },
 	keyhive: { url: "wss://keyhive.sync.automerge.org", card: cards.keyhive },
 });
@@ -47,11 +48,17 @@ export function resolveWith(servers: Servers, settings: Settings): { url: string
 
 export type AccessLevel = "relay" | "read" | "edit" | "admin";
 
-/** Who a membership change is for: anyone with the URL, or the holder of a contact card (its JSON). */
-export type Grantee = { public: true } | { card: string };
+/** An app's public pair, as the cards (base64) a keyline repo grants to: see keyline/public.ts. */
+export type PublicPair = { readerCard: string; fetcherCard: string };
 
-/** A direct member of a repo's group: its keyhive id (base64), or the public, and its access. */
-export type Member = { id: string; public: boolean; access: string };
+/**
+ * Who a membership change is for: anyone with the URL, or the holder of a contact card (its
+ * JSON, or base64 for keyline). In keyline "anyone" is one app's public pair.
+ */
+export type Grantee = { public: true; pair?: PublicPair } | { card: string };
+
+/** A direct member of a repo's group: its keyhive id (base64), or the public (of `app`, in keyline), and its access. */
+export type Member = { id: string; public: boolean; access: string; app?: string };
 
 export type Hive = {
 	server: string;
@@ -59,7 +66,7 @@ export type Hive = {
 	contactCard(): Promise<string>;
 	codec: Codec;
 	/** A new group for a repo's docs, granting the public and the server the given access. */
-	createGroup(access: { public?: AccessLevel; server: AccessLevel }): Promise<string>;
+	createGroup(access: { public?: AccessLevel; publicPair?: PublicPair; server: AccessLevel }): Promise<string>;
 	/** The group a doc was created in (hex), if this hive knows it. */
 	groupOf(id: DocumentId): Promise<string | undefined>;
 	newId(group: string): () => Promise<DocumentId>;
@@ -73,6 +80,25 @@ export type Hive = {
 	sync(docs: Docs): Promise<void>;
 	close(): Promise<void>;
 };
+
+/**
+ * A codec from one that decodes a blob at a time. Decrypting a blob can reveal its
+ * predecessors' keys, and some blobs only open with those (anything encrypted before this
+ * reader was given access), so the ones that failed are retried while each pass opens more.
+ */
+export const decodeEach =
+	(decode: (id: DocumentId, head: string, blob: Uint8Array) => Promise<Uint8Array | null>): Codec["decode"] =>
+	async (id, blobs) => {
+		const decoded: (Uint8Array | null)[] = blobs.map(() => null);
+		let pending = blobs.map((_, i) => i);
+		while (pending.length) {
+			const results = await Promise.all(pending.map(i => decode(id, ...blobs[i])));
+			const failed = pending.filter((i, k) => (decoded[i] = results[k]) === null);
+			if (failed.length === pending.length) break;
+			pending = failed;
+		}
+		return decoded.filter(blob => blob !== null);
+	};
 
 // the archive file is the only persistence, so ARK's own event storage keeps nothing
 export const noStorage = {

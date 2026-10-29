@@ -17,6 +17,11 @@ import {
 	addContact,
 	listContacts,
 	removeContact,
+	checkAccess,
+	addPublicApp,
+	listPublicApps,
+	newPublicApp,
+	removePublicApp,
 	migrate,
 	track,
 	cutWorkdir,
@@ -149,15 +154,16 @@ program
 	.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 	.option("--keyhive", "Protect the repo with keyhive (only you can read it, unless --public-access says otherwise)")
 	.option("--keyhive-server <server>", "Keyhive server for this repo: a built-in name (keyhive, subduction) or a ws(s):// url")
-	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
+	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url (keyline asks the server for it): a built-in name, JSON or base64, an http(s) url or a file")
 	.addOption(
-		new Option("--keyhive-version <version>", "automerge-repo-keyhive version for this keyhive repo (default 0.6)").choices(
+		new Option("--keyhive-version <version>", "Keyhive version for this keyhive repo: automerge-repo-keyhive 0.5 or 0.6, or keyline (default 0.6)").choices(
 			KEYHIVE_VERSIONS,
 		),
 	)
 	.addOption(
 		new Option("--public-access <level>", "With --keyhive: what anyone may do with the repo").choices(ACCESS_LEVELS),
 	)
+	.option("--public-app <name>", "With --keyhive and keyline: the app whose users count as anyone (default patchwork)")
 	.addOption(
 		new Option("--server-access <level>", "With --keyhive: what the sync server may do (default relay)").choices(
 			ACCESS_LEVELS,
@@ -177,9 +183,10 @@ program
 	.action(async (dir, opts) => {
 		dlog("init dir=%s opts=%o", dir, opts);
 		const root = path.resolve(dir);
-		if (!opts.keyhive && (opts.publicAccess || opts.serverAccess)) {
-			throw new Error("--public-access and --server-access only apply with --keyhive");
+		if (!opts.keyhive && (opts.publicAccess || opts.serverAccess || opts.publicApp)) {
+			throw new Error("--public-access, --public-app and --server-access only apply with --keyhive");
 		}
+		if (opts.publicApp && !opts.publicAccess) throw new Error("--public-app needs --public-access");
 		out.intro("pushwork init");
 		out.task(opts.offline ? "Initializing" : "Connecting to sync server");
 		const info = await init(
@@ -190,7 +197,7 @@ program
 				online: !opts.offline,
 				syncServer: opts.syncServer,
 				keyhive: opts.keyhive
-					? { publicAccess: opts.publicAccess, serverAccess: opts.serverAccess }
+					? { publicAccess: opts.publicAccess, serverAccess: opts.serverAccess, publicApp: opts.publicApp }
 					: undefined,
 				keyhiveServer: opts.keyhiveServer,
 				keyhiveCard: opts.keyhiveCard,
@@ -226,9 +233,9 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 			undefined as string[] | undefined,
 		)
 		.option("--keyhive-server <server>", "For a keyhive repo: its keyhive server, a built-in name (keyhive, subduction) or a ws(s):// url")
-		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
+		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url (keyline asks the server for it): a built-in name, JSON or base64, an http(s) url or a file")
 		.addOption(
-			new Option("--keyhive-version <version>", "For a keyhive repo: its automerge-repo-keyhive version (default 0.6)").choices(
+			new Option("--keyhive-version <version>", "For a keyhive repo: its keyhive version (default 0.6)").choices(
 				KEYHIVE_VERSIONS,
 			),
 		);
@@ -363,10 +370,30 @@ keyhive
 	.command("server")
 	.description("Set the keyhive sync server for new keyhive repos on this machine")
 	.argument("<server>", "A built-in name (keyhive, subduction) or a ws(s):// url")
-	.argument("[card]", "The server's contact card, required with a url: a built-in name, JSON, an http(s) url or a file")
+	.argument(
+		"[card]",
+		"The server's contact card, for a url (a keyline server is asked for its own): a built-in name, JSON or base64, an http(s) url or a file",
+	)
 	.action(async (server, card) => {
 		await setKeyhiveServer(server, card);
 		out.log(`keyhive server set to ${server}`);
+	});
+
+keyhive
+	.command("check")
+	.description("Check what you, or an app's public user, can do with a keyhive repo: pull it, and read it")
+	.argument("<url>", "The repo's automerge: URL")
+	.option("--app <name>", "Check as this app's public user instead of as you (keyline; see `keyhive apps`)")
+	.option("--keyhive-server <server>", "The repo's keyhive server: a built-in name or a ws(s):// url")
+	.option("--keyhive-card <card>", "The keyhive server's contact card, for a url (a keyline server is asked for its own)")
+	.addOption(new Option("--keyhive-version <version>", "The repo's keyhive version (default 0.6)").choices(KEYHIVE_VERSIONS))
+	.action(async (url, _opts, cmd) => {
+		const check = await checkAccess(url as `automerge:${string}`, cmd.optsWithGlobals());
+		out.obj({
+			as: check.as,
+			pulled: `${check.pulled} blob${check.pulled === 1 ? "" : "s"} of the root doc`,
+			verdict: check.readable ? "can read" : check.pulled ? "can pull but not read (relay)" : "can't pull: no access",
+		});
 	});
 
 const GRANT_LEVELS = ["relay", "read", "edit", "admin", "none"] as const;
@@ -379,9 +406,11 @@ keyhive
 			GRANT_LEVELS,
 		),
 	)
-	.action(async level => {
-		await setPublicAccess(process.cwd(), level);
-		out.log(level === "none" ? "public access removed" : `anyone with the URL can now ${level}`);
+	.option("--app <name>", "For a keyline repo: the app whose users count as anyone (default patchwork; see `keyhive apps`)")
+	.action(async (level, opts) => {
+		await setPublicAccess(process.cwd(), level, opts.app);
+		const who = opts.app ? `${opts.app}'s users` : "anyone with the URL";
+		out.log(level === "none" ? `public access removed${opts.app ? ` for ${opts.app}` : ""}` : `${who} can now ${level}`);
 	});
 
 keyhive
@@ -402,11 +431,58 @@ keyhive
 		out.obj(
 			Object.fromEntries(
 				members.map(m => [
-					m.public ? "anyone" : m.you ? "you" : m.server ? "keyhive server" : (m.name ?? m.id),
+					m.public ? (m.app ? `anyone (${m.app})` : "anyone") : m.you ? "you" : m.server ? "keyhive server" : (m.name ?? m.id),
 					m.access,
 				]),
 			),
 		);
+	});
+
+const apps = keyhive
+	.command("apps")
+	.description("Apps whose users a keyline repo can be public to, each through its own public pair");
+
+apps
+	.command("ls")
+	.description("List apps with public pairs: built in, and added on this machine")
+	.action(async () => {
+		const all = await listPublicApps();
+		out.obj(
+			Object.fromEntries(
+				all.map(a => [a.name, `${a.added ? (a.builtIn ? "added (overrides built-in)" : "added") : "built in"}: reader ${a.reader}, fetcher ${a.fetcher}`]),
+			),
+		);
+	});
+
+apps
+	.command("add")
+	.description("Save another app's public pair under a name, or update one with --replace")
+	.argument("<name>", "What to call the app")
+	.argument("<pair>", "Its public pair: JSON, an http(s) url or a file (as `keyhive apps new` prints it)")
+	.option("--replace", "Update an app that already has a pair (repos made public with the old one stay readable only with it)")
+	.action(async (name, pair, opts) => {
+		const app = await addPublicApp(name, pair, { replace: opts.replace });
+		out.log(`saved ${app.name} (reader ${app.reader}, fetcher ${app.fetcher})`);
+	});
+
+apps
+	.command("new")
+	.description("Make a public pair for a new app, save it, and print it (JSON) for the app to ship")
+	.argument("<name>", "What to call the app")
+	.option("--replace", "Replace the pair an app already has")
+	.action(async (name, opts) => {
+		// only the pair goes to stdout, so it can be redirected to a file to ship
+		const { principals } = await newPublicApp(name, { replace: opts.replace });
+		out.log(JSON.stringify(principals, null, 2));
+	});
+
+apps
+	.command("rm")
+	.description("Forget an added app's pair (a built-in app goes back to the pair pushwork ships)")
+	.argument("<name>", "The app's name")
+	.action(async name => {
+		await removePublicApp(name);
+		out.log(`removed ${name}`);
 	});
 
 const contacts = keyhive.command("contacts").description("Keyhive contact cards, by name, for granting access");
@@ -419,6 +495,19 @@ contacts
 	.action(async (name, card) => {
 		const contact = await addContact(name, card);
 		out.log(`saved ${contact.name} (${contact.id})`);
+	});
+
+contacts
+	.command("me")
+	.description("Print your own contact card, for someone to add and grant you access with")
+	.addOption(
+		new Option("--keyhive-version <version>", "Which keyhive identity's card (default 0.6)").choices(KEYHIVE_VERSIONS),
+	)
+	.action(async (_opts, cmd) => {
+		// `keyhive` has its own --keyhive-version, which commander gives the flag to
+		const { keyhiveVersion } = cmd.optsWithGlobals();
+		// only the card goes to stdout, so it can be captured
+		out.log((await keyhiveInfo(keyhiveVersion)).me);
 	});
 
 contacts

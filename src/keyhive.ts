@@ -1,12 +1,15 @@
-// Keyhive, in whichever automerge-repo-keyhive version a repo uses. Each version lives in
-// its own module (keyhive/ark-*.ts) and only the one a repo needs is loaded.
+// Keyhive, in whichever version a repo uses. Each version lives in its own module
+// (keyhive/ark-*.ts for automerge-repo-keyhive, keyhive/keyline.ts for keyhive itself) and
+// only the one a repo needs is opened.
 
+import * as ark from "./keyhive/ark-0.5.js";
 import {
 	DEFAULT_KEYHIVE_VERSION,
 	type Hive,
 	type KeyhiveVersion,
 	type Settings,
 } from "./keyhive/common.js";
+import * as keyline from "./keyhive/keyline.js";
 
 export {
 	type AccessLevel,
@@ -20,8 +23,19 @@ export {
 	isKeyhiveVersion,
 } from "./keyhive/common.js";
 
-// Both versions ship the same built-in servers and cards, and read cards the same way.
-export { SERVERS, cardPeerId, resolveSettings } from "./keyhive/ark-0.5.js";
+// Every version knows the same built-in servers by name; the ARK ones ship their cards.
+export const SERVERS = ark.SERVERS;
+
+/** The peer id a contact card's holder answers to (its key, base64): JSON for ARK, base64 for keyline. */
+export const cardPeerId = (card: string) => (keyline.isCard(card) ? keyline.cardPeerId(card) : ark.cardPeerId(card));
+
+// One machine's settings serve every version, so each ignores a card in the other's format.
+const forArk = (settings: Settings): Settings =>
+	settings.card && keyline.isCard(settings.card) ? { ...settings, card: undefined } : settings;
+
+/** The server url and contact card `settings` name, in its version (ARK's when it has none). */
+export const resolveSettings = (settings: Settings & { version?: KeyhiveVersion }) =>
+	settings.version === "keyline" ? keyline.resolveSettings(settings) : ark.resolveSettings(forArk(settings));
 
 /** Open the keyhive archive in `file` with `version`; see each version's `openHive`. */
 export async function openHive(
@@ -31,6 +45,7 @@ export async function openHive(
 	reader = false,
 	version: KeyhiveVersion = DEFAULT_KEYHIVE_VERSION,
 ): Promise<Hive> {
-	const impl = version === "0.6" ? await import("./keyhive/ark-0.6.js") : await import("./keyhive/ark-0.5.js");
-	return impl.openHive(file, seed, settings, reader);
+	if (version === "keyline") return keyline.openHive(file, seed, settings, reader);
+	const impl = version === "0.6" ? await import("./keyhive/ark-0.6.js") : ark;
+	return impl.openHive(file, seed, forArk(settings), reader);
 }
