@@ -3,7 +3,8 @@
 //
 // Compared with the ARK versions:
 // - contact cards are bytes, so they travel as base64 rather than JSON;
-// - there is no public "world" user, so nothing can be granted to anyone with the URL;
+// - there is no public "world" user, so anyone-with-the-URL access is two principals whose
+//   secrets pushwork ships (./keyline/public.ts), and goes no further than read;
 // - each blob is a keyhive block listing its parents, and decrypting one opens the
 //   ancestors it lists, so a doc's blobs are decoded together.
 
@@ -25,7 +26,8 @@ import {
 } from "@keyhive/keyhive";
 import type { Codec, Docs } from "../docs.js";
 import type { DocumentId } from "../url.js";
-import { type AccessLevel, type Grantee, type Hive, type Servers, type Settings, lock, resolveWith } from "./common.js";
+import { type AccessLevel, type Hive, type PublicPair, type Servers, type Settings, lock, resolveWith } from "./common.js";
+import * as pub from "./keyline/public.js";
 import { type Serial, keylineSync, serial } from "./keyline/sync.js";
 
 // the built-in servers' urls; none ships a Keyline card yet, so each needs one set
@@ -77,9 +79,9 @@ export async function openHive(file: string, seed: Uint8Array, settings: Setting
 
 		createGroup: access =>
 			run(async () => {
-				if (access.public) throw noPublic();
 				const group = await kh.generateGroup([]);
 				await kh.addMember(server, MemberedId.group(group), Power.fromString(access.server));
+				if (access.public) await setPublic(kh, hex(group.toBytes()), access.public, access.publicPair);
 				return hex(group.toBytes());
 			}),
 
@@ -103,19 +105,15 @@ export async function openHive(file: string, seed: Uint8Array, settings: Setting
 			run(async () => (await kh.accessForDoc(new Identifier(signer.verifyingKey), docId(id)))?.atLeast(Power.edit()) ?? false),
 
 		setAccess: (group, who, level) =>
-			run(async () => {
-				const membered = MemberedId.group(groupId(group));
-				const id = await identify(kh, who);
-				const current = await accessOf(kh, group, id);
-				if (current === level) return;
-				if (current) await kh.revokeMember(id, true, membered);
-				if (level !== "none") await kh.addMember(id, membered, Power.fromString(level));
-			}),
+			run(() =>
+				"public" in who ? setPublic(kh, group, level, who.pair) : setMember(kh, group, parseCard(who.card), level),
+			),
 
 		members: group =>
 			run(async () => {
 				const g = await kh.getGroup(groupId(group));
 				if (!g) throw new Error(`keyhive doesn't know group ${group}`);
+				// apps' public pairs are plain members here; pub.labelPublic shows them as the public
 				return (await g.members()).map(m => ({ id: b64(m.who.toBytes()), public: false, access: accessLevel(m.can) }));
 			}),
 
@@ -198,14 +196,53 @@ function codec(kh: Keyhive, run: Serial): Codec {
 	};
 }
 
-const noPublic = () => new Error("keyhive (Keyline) has no public access; grant it to contacts instead");
+/**
+ * A read-only hive for public repos you aren't a member of: it syncs as the public fetcher
+ * (open its docs with `seed`, so subduction connects as the fetcher too) and decrypts as
+ * the public reader.
+ */
+export async function openPublicHive(settings: Settings, app: pub.PublicPrincipals = defaultPublic()) {
+	const { url, card: serverCard } = resolveSettings(settings);
+	const [fetcher, reader] = await Promise.all([pub.openFetcher(app), pub.openReader(app)]);
+	const card = parseCard(serverCard);
+	if (!(await fetcher.hasIndividual(card.individualId))) await fetcher.receiveContactCard(card);
+	const run = serial();
+	let syncer: ReturnType<typeof keylineSync> | undefined;
+	return {
+		server: url,
+		seed: pub.fetcherSeed(app),
+		codec: codec(reader, run),
+		async sync(docs: Docs) {
+			syncer ??= run(() => fetcher.getExistingContactCard()).then(own =>
+				keylineSync({ kh: fetcher, run, node: docs.node, server: card.id.toBytes(), card: own }),
+			);
+			await (await syncer).sync();
+			await run(() => pub.relay(fetcher, reader, app));
+		},
+	};
+}
 
-// the identifier a grant is for, receiving the contact card first if keyhive hasn't seen it
-async function identify(kh: Keyhive, who: Grantee): Promise<Identifier> {
-	if ("public" in who) throw noPublic();
-	const card = parseCard(who.card);
+const defaultPublic = () => pub.BUILT_IN_APPS[pub.DEFAULT_PUBLIC_APP];
+
+// The public, as one app's pair (pushwork's default app's unless given): its reader for
+// read, its fetcher for relay. Edit would need a principal anyone can sign as to hold a
+// key that decrypts, and admin more than that.
+async function setPublic(kh: Keyhive, group: string, level: AccessLevel | "none", pair: PublicPair = pub.pairOf(defaultPublic())) {
+	if (level === "edit" || level === "admin") {
+		throw new Error(`public access in keyline goes up to read, not ${level}; grant ${level} to contacts instead`);
+	}
+	await setMember(kh, group, parseCard(pair.fetcherCard), level === "none" ? "none" : "relay");
+	await setMember(kh, group, parseCard(pair.readerCard), level === "read" ? "read" : "none");
+}
+
+// give `card`'s holder `level` on `group`, replacing what it had; receives the card if new
+async function setMember(kh: Keyhive, group: string, card: ContactCard, level: AccessLevel | "none") {
 	if (!(await kh.hasIndividual(card.individualId))) await kh.receiveContactCard(card);
-	return card.id;
+	const membered = MemberedId.group(groupId(group));
+	const current = await accessOf(kh, group, card.id);
+	if (current === level || (!current && level === "none")) return;
+	if (current) await kh.revokeMember(card.id, true, membered);
+	if (level !== "none") await kh.addMember(card.id, membered, Power.fromString(level));
 }
 
 // `id`'s current direct access to `group`, if it has any

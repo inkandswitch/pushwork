@@ -14,7 +14,8 @@ import {
 } from "./config.js";
 import { Docs, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
-import type { Grantee, Member } from "./keyhive/common.js";
+import type { Grantee, Member, PublicPair } from "./keyhive/common.js";
+import type { PublicPrincipals } from "./keyhive/keyline/public.js";
 import { DEFAULT_KEYHIVE_VERSION, DEFAULT_SERVER_NAME, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
@@ -93,7 +94,7 @@ export type InitOpts = {
 	online?: boolean; // default: true
 	syncServer?: string;
 	/** Protect the repo with keyhive. Without public access, only you can read it. */
-	keyhive?: { publicAccess?: AccessLevel; serverAccess?: AccessLevel };
+	keyhive?: { publicAccess?: AccessLevel; serverAccess?: AccessLevel; publicApp?: string };
 } & KeyhiveServerOpts;
 
 /**
@@ -353,6 +354,111 @@ export async function removeContact(name: string): Promise<void> {
 	await writeContacts(contacts);
 }
 
+// ---- public apps: each app's public pair (keyline), by name; pushwork ships some
+
+const publicAppsFile = () => path.join(pushworkHome(), "public-apps.json");
+
+async function readPublicApps(): Promise<Record<string, PublicPrincipals>> {
+	try {
+		return JSON.parse(await fs.readFile(publicAppsFile(), "utf8"));
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+		throw e;
+	}
+}
+
+async function writePublicApps(apps: Record<string, PublicPrincipals>): Promise<void> {
+	await fs.mkdir(pushworkHome(), { recursive: true });
+	// the pairs' secrets are public by design, but they are still keys: keep the file the user's
+	await fs.writeFile(publicAppsFile(), JSON.stringify(apps, null, 2) + "\n", { mode: 0o600 });
+}
+
+/** Every app with a public pair: the built-in ones, overridden or added to on this machine. */
+async function publicApps(): Promise<Record<string, PublicPrincipals>> {
+	const { BUILT_IN_APPS } = await import("./keyhive/keyline/public.js");
+	return { ...BUILT_IN_APPS, ...(await readPublicApps()) };
+}
+
+export type PublicApp = {
+	name: string;
+	/** Shipped with pushwork, `added` here, or both (an added pair overrides the shipped one). */
+	builtIn: boolean;
+	added: boolean;
+	reader: string;
+	fetcher: string;
+};
+
+async function describeApp(name: string, p: PublicPrincipals): Promise<PublicApp> {
+	const { BUILT_IN_APPS, parseCard } = await import("./keyhive/keyline/public.js");
+	const id = (card: string) => Buffer.from(parseCard(card).id.toBytes()).toString("base64");
+	return {
+		name,
+		builtIn: name in BUILT_IN_APPS,
+		added: name in (await readPublicApps()),
+		reader: id(p.readerCard),
+		fetcher: id(p.fetcherCard),
+	};
+}
+
+export async function listPublicApps(): Promise<PublicApp[]> {
+	const apps = await publicApps();
+	return Promise.all(
+		Object.keys(apps)
+			.sort()
+			.map(name => describeApp(name, apps[name])),
+	);
+}
+
+const replaceHint = (name: string) =>
+	`${name} already has a public pair; --replace updates it (repos made public with the old pair stay readable only with that)`;
+
+/** Save another app's public pair under `name`: JSON, an http(s) url or a file. */
+export async function addPublicApp(name: string, pair: string, { replace = false } = {}): Promise<PublicApp> {
+	const { parsePrincipals } = await import("./keyhive/keyline/public.js");
+	if (!replace && name in (await publicApps())) throw new Error(replaceHint(name));
+	let raw: unknown;
+	try {
+		raw = JSON.parse(await readCard(pair));
+	} catch {
+		throw new Error(`${pair} is not a public pair (expected its JSON, an http(s) url or a file)`);
+	}
+	const principals = await parsePrincipals(raw);
+	await writePublicApps({ ...(await readPublicApps()), [name]: principals });
+	return describeApp(name, principals);
+}
+
+/** Make a new public pair for an app called `name` and save it; the result is what to ship. */
+export async function newPublicApp(
+	name: string,
+	{ replace = false } = {},
+): Promise<{ app: PublicApp; principals: PublicPrincipals }> {
+	const { generatePublicPrincipals } = await import("./keyhive/keyline/public.js");
+	if (!replace && name in (await publicApps())) throw new Error(replaceHint(name));
+	const principals = await generatePublicPrincipals();
+	await writePublicApps({ ...(await readPublicApps()), [name]: principals });
+	return { app: await describeApp(name, principals), principals };
+}
+
+/** Forget an added app's pair; a built-in app goes back to the pair pushwork ships. */
+export async function removePublicApp(name: string): Promise<void> {
+	const apps = await readPublicApps();
+	if (!(name in apps)) {
+		const { BUILT_IN_APPS } = await import("./keyhive/keyline/public.js");
+		throw new Error(name in BUILT_IN_APPS ? `${name} is built in; only added pairs can be removed` : `no public app named ${name}`);
+	}
+	delete apps[name];
+	await writePublicApps(apps);
+}
+
+// the pair to make a repo public to `app`; only keyline has apps
+async function publicPairFor(version: KeyhiveVersion, app: string): Promise<PublicPair> {
+	if (version !== "keyline") throw new Error("public apps are for keyline repos; other versions' public is everyone");
+	const principals = (await publicApps())[app];
+	if (!principals) throw new Error(`no public app named ${app}; see \`pushwork keyhive apps ls\``);
+	const { pairOf } = await import("./keyhive/keyline/public.js");
+	return pairOf(principals);
+}
+
 // ---- access to a keyhive repo
 
 /** Open this keyhive repo online with its group, for changing or reading who can access it. */
@@ -389,8 +495,14 @@ async function setRepoAccess(cwd: string, who: Grantee, level: AccessLevel | "no
 	}
 }
 
-/** What anyone with this keyhive repo's URL may do; "none" takes public access away. */
-export const setPublicAccess = (cwd: string, level: AccessLevel | "none") => setRepoAccess(cwd, { public: true }, level);
+/**
+ * What anyone with this keyhive repo's URL may do; "none" takes public access away. In a
+ * keyline repo "anyone" is one app's users (`app`, by default Patchwork's).
+ */
+export async function setPublicAccess(cwd: string, level: AccessLevel | "none", app?: string): Promise<void> {
+	const pair = app ? await publicPairFor((await recordedKeyhive(await readConfig(path.resolve(cwd)))).version, app) : undefined;
+	await setRepoAccess(cwd, { public: true, pair }, level);
+}
 
 /** What the contact named `name` may do in this keyhive repo; "none" revokes their access. */
 export async function setContactAccess(cwd: string, name: string, level: AccessLevel | "none"): Promise<void> {
@@ -410,7 +522,8 @@ export async function repoAccess(cwd: string): Promise<AccessEntry[]> {
 		const { resolveSettings, cardPeerId } = await import("./keyhive.js");
 		const server = cardPeerId(resolveSettings(await recordedKeyhive(config)).card);
 		const names = new Map((await listContacts()).map(c => [c.id, c.name]));
-		return (await hive.members(group)).map(m => ({
+		const { labelPublic } = await import("./keyhive/keyline/public.js");
+		return labelPublic(await hive.members(group), await publicApps()).map(m => ({
 			...m,
 			name: names.get(m.id),
 			you: m.id === hive.id,
@@ -524,8 +637,10 @@ export async function init(
 	const seed = await loadSeed();
 	const keyhive = opts.keyhive ? await keyhiveSettingsFor(opts) : undefined;
 	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
+	const publicPair = keyhive && opts.keyhive?.publicApp ? await publicPairFor(keyhive.version, opts.keyhive.publicApp) : undefined;
 	const group = await hive?.createGroup({
 		public: opts.keyhive?.publicAccess,
+		publicPair,
 		server: opts.keyhive?.serverAccess ?? "relay",
 	});
 	const server = online ? (opts.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;

@@ -48,11 +48,17 @@ export function resolveWith(servers: Servers, settings: Settings): { url: string
 
 export type AccessLevel = "relay" | "read" | "edit" | "admin";
 
-/** Who a membership change is for: anyone with the URL, or the holder of a contact card (its JSON). */
-export type Grantee = { public: true } | { card: string };
+/** An app's public pair, as the cards (base64) a keyline repo grants to: see keyline/public.ts. */
+export type PublicPair = { readerCard: string; fetcherCard: string };
 
-/** A direct member of a repo's group: its keyhive id (base64), or the public, and its access. */
-export type Member = { id: string; public: boolean; access: string };
+/**
+ * Who a membership change is for: anyone with the URL, or the holder of a contact card (its
+ * JSON, or base64 for keyline). In keyline "anyone" is one app's public pair.
+ */
+export type Grantee = { public: true; pair?: PublicPair } | { card: string };
+
+/** A direct member of a repo's group: its keyhive id (base64), or the public (of `app`, in keyline), and its access. */
+export type Member = { id: string; public: boolean; access: string; app?: string };
 
 export type Hive = {
 	server: string;
@@ -60,7 +66,7 @@ export type Hive = {
 	contactCard(): Promise<string>;
 	codec: Codec;
 	/** A new group for a repo's docs, granting the public and the server the given access. */
-	createGroup(access: { public?: AccessLevel; server: AccessLevel }): Promise<string>;
+	createGroup(access: { public?: AccessLevel; publicPair?: PublicPair; server: AccessLevel }): Promise<string>;
 	/** The group a doc was created in (hex), if this hive knows it. */
 	groupOf(id: DocumentId): Promise<string | undefined>;
 	newId(group: string): () => Promise<DocumentId>;

@@ -9,6 +9,10 @@ import { type Message, decodeMessage, decodeSigned, encodeMessage, encodeSigned 
 import { fetchCard } from "../../src/keyhive/keyline";
 import { parseAutomergeUrl } from "../../src/url";
 import { keylineServerBinary, startKeylineServer } from "../keyline-server";
+import { publicAccess, readerAddedLater } from "../keyline-scenarios";
+import { setHome } from "../home";
+import { BUILT_IN_APPS, generatePublicPrincipals, labelPublic, pairOf } from "../../src/keyhive/keyline/public";
+import { addPublicApp, listPublicApps, newPublicApp, removePublicApp } from "../../src/pushwork";
 
 const bytes = (n: number, fill: number) => new Uint8Array(n).fill(fill);
 const archive = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-keyline-")), "archive");
@@ -82,7 +86,7 @@ describe("keyline hive", () => {
 		await reopened.close();
 	});
 
-	it("sets and revokes access on a group, but has no public access", async () => {
+	it("sets and revokes access on a group, for contacts and the public", async () => {
 		const settings = { server: "ws://127.0.0.1:9", card: await offlineCard() };
 		const hive = await openHive(archive(), seed(), settings, false, "keyline");
 		const other = await openHive(archive(), seed(), settings, false, "keyline");
@@ -98,10 +102,54 @@ describe("keyline hive", () => {
 		expect(await access(other.id)).toBe("edit");
 		await hive.setAccess(group, { card }, "none");
 		expect(await access(other.id)).toBeUndefined();
-		await expect(hive.setAccess(group, { public: true }, "read")).rejects.toThrow(/no public access/);
-		await expect(hive.createGroup({ public: "read", server: "relay" })).rejects.toThrow(/no public access/);
+		const anyone = async (g = group) =>
+			labelPublic(await hive.members(g), BUILT_IN_APPS)
+				.filter(m => m.public)
+				.map(m => `${m.app} ${m.access}`);
+		await hive.setAccess(group, { public: true }, "read");
+		expect(await anyone()).toEqual(["patchwork read"]);
+		await hive.setAccess(group, { public: true }, "relay");
+		expect(await anyone()).toEqual(["patchwork relay"]);
+		await hive.setAccess(group, { public: true }, "none");
+		expect(await anyone()).toEqual([]);
+		await expect(hive.setAccess(group, { public: true }, "edit")).rejects.toThrow(/goes up to read/);
+		const open = await hive.createGroup({ public: "read", server: "relay" });
+		expect(await anyone(open)).toEqual(["patchwork read"]);
+		// another app's pair is granted alongside, and shown under its own name
+		const elsewhere = await generatePublicPrincipals();
+		await hive.setAccess(open, { public: true, pair: pairOf(elsewhere) }, "relay");
+		expect((labelPublic(await hive.members(open), { ...BUILT_IN_APPS, elsewhere })).filter(m => m.public).map(m => `${m.app} ${m.access}`)).toEqual(
+			["patchwork read", "elsewhere relay"],
+		);
 		await hive.close();
 		await other.close();
+	});
+
+	it("keeps other apps' public pairs by name", async () => {
+		const restoreHome = setHome(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-apps-")));
+		try {
+			expect((await listPublicApps()).map(a => [a.name, a.builtIn, a.added])).toEqual([["patchwork", true, false]]);
+			const { principals } = await newPublicApp("mine");
+			expect((await listPublicApps()).map(a => a.name)).toEqual(["mine", "patchwork"]);
+			// another machine adds it from what `new` printed, then updates it
+			const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pushwork-pair-")), "pair.json");
+			fs.writeFileSync(file, JSON.stringify(principals));
+			await expect(addPublicApp("mine", file)).rejects.toThrow(/--replace/);
+			await expect(addPublicApp("patchwork", file)).rejects.toThrow(/--replace/);
+			const theirs = await addPublicApp("theirs", JSON.stringify(principals));
+			expect(theirs.reader).toBe(cardPeerId(principals.readerCard));
+			const updated = await generatePublicPrincipals();
+			expect((await addPublicApp("theirs", JSON.stringify(updated), { replace: true })).reader).toBe(cardPeerId(updated.readerCard));
+			// a pair whose parts don't belong together is refused
+			const forged = { ...updated, fetcherSeed: principals.fetcherSeed };
+			await expect(addPublicApp("forged", JSON.stringify(forged))).rejects.toThrow(/fetcher seed/);
+			await expect(addPublicApp("bad", '{"readerCard":"x"}')).rejects.toThrow(/missing/);
+			await removePublicApp("theirs");
+			await expect(removePublicApp("patchwork")).rejects.toThrow(/built in/);
+			expect((await listPublicApps()).map(a => a.name)).toEqual(["mine", "patchwork"]);
+		} finally {
+			restoreHome();
+		}
 	});
 
 	it("ignores an ARK card left in the shared settings", () => {
@@ -126,44 +174,14 @@ describe.skipIf(!keylineServerBinary)("keyline sync", () => {
 		await docs.close();
 	});
 
-	it("lets a reader added later read what was written before", async () => {
-		const settings = { server: server.url, card: await fetchCard(server.url) };
-		const open = async (key: Uint8Array, hive: Awaited<ReturnType<typeof openHive>>, group?: string) => {
-			const docs = await Docs.open({
-				storage: new MemoryStorage(),
-				signer: MemorySigner.fromBytes(key),
-				server: server.url,
-				codec: hive.codec,
-				newId: group ? hive.newId(group) : undefined,
-			});
-			await hive.sync(docs);
-			return docs;
-		};
+	it("lets a reader added later read what was written before", () => readerAddedLater(server.url));
 
-		const aliceKey = seed();
-		const alice = await openHive(archive(), aliceKey, settings, false, "keyline");
-		const group = await alice.createGroup({ server: "relay" });
-		const aliceDocs = await open(aliceKey, alice, group);
-		const url = await aliceDocs.create({ text: "before" });
-		await aliceDocs.change<{ text: string }>(url, d => {
-			d.text = "still before";
-		});
-		await alice.sync(aliceDocs);
-		expect(await aliceDocs.sync([url])).toMatchObject({ synced: 1, unsynced: [] });
+	it("lets anyone read a repo with public read", () => publicAccess(server.url, "read"));
 
-		const bobKey = seed();
-		const bob = await openHive(archive(), bobKey, settings, false, "keyline");
-		await alice.setAccess(group, { card: await bob.contactCard() }, "read");
-		await alice.sync(aliceDocs);
+	it("lets nobody decrypt a repo with public relay", () => publicAccess(server.url, "relay"));
 
-		const bobDocs = await open(bobKey, bob);
-		const { documentId } = parseAutomergeUrl(url);
-		expect(await bob.groupOf(documentId)).toBe(group);
-		expect(await bob.canWrite(documentId)).toBe(false);
-		await bobDocs.sync([url]);
-		expect((await bobDocs.find<{ text: string }>(url)).text).toBe("still before");
-
-		await Promise.all([aliceDocs.close(), bobDocs.close()]);
-		await Promise.all([alice.close(), bob.close()]);
+	it("lets only the chosen app's users read a repo public to another app", async () => {
+		const other = await generatePublicPrincipals();
+		await publicAccess(server.url, "read", other);
 	});
 });
