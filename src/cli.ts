@@ -149,7 +149,7 @@ program
 	.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 	.option("--keyhive", "Protect the repo with keyhive (only you can read it, unless --public-access says otherwise)")
 	.option("--keyhive-server <server>", "Keyhive server for this repo: a built-in name (keyhive, subduction) or a ws(s):// url")
-	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
+	.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url (keyline asks the server for it): a built-in name, JSON or base64, an http(s) url or a file")
 	.addOption(
 		new Option("--keyhive-version <version>", "Keyhive version for this keyhive repo: automerge-repo-keyhive 0.5 or 0.6, or keyline (default 0.6)").choices(
 			KEYHIVE_VERSIONS,
@@ -226,7 +226,7 @@ const attachCommand = (name: string, description: string, dirArg: string) =>
 			undefined as string[] | undefined,
 		)
 		.option("--keyhive-server <server>", "For a keyhive repo: its keyhive server, a built-in name (keyhive, subduction) or a ws(s):// url")
-		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url: a built-in name, JSON, an http(s) url or a file")
+		.option("--keyhive-card <card>", "The keyhive server's contact card, needed with a url (keyline asks the server for it): a built-in name, JSON or base64, an http(s) url or a file")
 		.addOption(
 			new Option("--keyhive-version <version>", "For a keyhive repo: its keyhive version (default 0.6)").choices(
 				KEYHIVE_VERSIONS,
