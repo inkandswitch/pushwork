@@ -527,7 +527,7 @@ describe("Docs online", () => {
 			server,
 			codec: {
 				encode: async (_id, _head, _parents, bytes) => bytes,
-				decode: async () => null,
+				decode: async () => [],
 			},
 		});
 		expect(await b.sync([url])).toMatchObject({ online: true, synced: 1, unsynced: [] });

@@ -15,7 +15,7 @@ import {
 import { Docs, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
 import type { Grantee, Member } from "./keyhive/common.js";
-import { DEFAULT_KEYHIVE_VERSION, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
+import { DEFAULT_KEYHIVE_VERSION, DEFAULT_SERVER_NAME, LEGACY_KEYHIVE_VERSION, LEGACY_SERVER_NAME } from "./keyhive/common.js";
 import { loadIgnore } from "./ignore.js";
 import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
@@ -184,9 +184,26 @@ async function openHive(seed: Uint8Array, settings: KeyhiveSettings, reader = fa
 // A new repo's keyhive server: the flags, else this machine's default.
 async function keyhiveSettingsFor(opts: KeyhiveServerOpts): Promise<KeyhiveSettings> {
 	const version = opts.keyhiveVersion ?? DEFAULT_KEYHIVE_VERSION;
-	if (opts.keyhiveServer) return { ...(await parseKeyhiveServer(opts.keyhiveServer, opts.keyhiveCard)), version };
-	if (opts.keyhiveCard) throw new Error("--keyhive-card needs --keyhive-server");
-	return { ...(await readKeyhiveSettings()), version };
+	if (opts.keyhiveCard && !opts.keyhiveServer) throw new Error("--keyhive-card needs --keyhive-server");
+	const settings = !opts.keyhiveServer
+		? await readKeyhiveSettings()
+		: version === "keyline" && !opts.keyhiveCard
+			? { server: opts.keyhiveServer }
+			: await parseKeyhiveServer(opts.keyhiveServer, opts.keyhiveCard);
+	return withCard({ ...settings, version });
+}
+
+// A keyline server hands out its own card, so one is asked for when none is set.
+async function withCard(settings: KeyhiveSettings): Promise<KeyhiveSettings> {
+	if (settings.version !== "keyline") return settings;
+	const keyline = await import("./keyhive/keyline.js");
+	try {
+		keyline.resolveSettings(settings);
+		return settings;
+	} catch {
+		const server = settings.server ?? DEFAULT_SERVER_NAME;
+		return { ...settings, card: await keyline.fetchCard(keyline.SERVERS[server]?.url ?? server) };
+	}
 }
 
 // An existing repo's keyhive server and version, as recorded at init or clone. Repos from
@@ -198,7 +215,6 @@ const recordedKeyhive = async (config: PushworkConfig): Promise<KeyhiveSettings>
 });
 
 const keyhiveConfig = async (settings: KeyhiveSettings) => {
-	const { DEFAULT_SERVER_NAME } = await import("./keyhive.js");
 	return {
 		keyhiveServer: settings.server ?? DEFAULT_SERVER_NAME,
 		...(settings.card ? { keyhiveCard: settings.card } : {}),
@@ -221,8 +237,8 @@ export type KeyhiveInfo = {
 
 /** The keyhive server keyhive repos use, and this machine's own contact card in `version`. */
 export async function keyhiveInfo(version: KeyhiveVersion = DEFAULT_KEYHIVE_VERSION): Promise<KeyhiveInfo> {
-	const { SERVERS, DEFAULT_SERVER_NAME, resolveSettings, cardPeerId } = await import("./keyhive.js");
-	const settings = { ...(await readKeyhiveSettings()), version };
+	const { SERVERS, resolveSettings, cardPeerId } = await import("./keyhive.js");
+	const settings = await withCard({ ...(await readKeyhiveSettings()), version });
 	const { url, card } = resolveSettings(settings);
 	const serverName = settings.server ?? DEFAULT_SERVER_NAME;
 	// each contact card carries a fresh share key, so the hive must be saved after making one
@@ -246,7 +262,7 @@ export async function keyhiveInfo(version: KeyhiveVersion = DEFAULT_KEYHIVE_VERS
 
 /**
  * Set the keyhive sync server: a built-in name (or its url), or any ws(s):// url
- * with the server's contact card, given as a built-in name, JSON, an http(s) url
+ * with the server's contact card, given as a built-in name, JSON (base64 for keyline), an http(s) url
  * or a file.
  */
 export async function setKeyhiveServer(server: string, card?: string): Promise<void> {
@@ -274,8 +290,11 @@ async function parseKeyhiveServer(server: string, card?: string): Promise<Settin
 	return { server: url, card: json };
 }
 
+// a card given inline (JSON, or base64 for keyline), at an http(s) url, or in a file
 async function readCard(card: string): Promise<string> {
 	if (card.trimStart().startsWith("{")) return card.trim();
+	const { isCard } = await import("./keyhive/keyline.js");
+	if (isCard(card) && !(await fs.stat(card).catch(() => undefined))) return card.trim();
 	if (/^https?:\/\//.test(card)) {
 		const res = await fetch(card);
 		if (!res.ok) throw new Error(`fetching ${card}: ${res.status} ${res.statusText}`);
@@ -304,7 +323,7 @@ async function writeContacts(contacts: Record<string, string>): Promise<void> {
 
 export type Contact = { name: string; id: string; card: string };
 
-/** Save a contact card under `name`: the card as JSON, an http(s) url or a file. */
+/** Save a contact card under `name`: the card as JSON (base64 for keyline), an http(s) url or a file. */
 export async function addContact(name: string, card: string): Promise<Contact> {
 	const { cardPeerId } = await import("./keyhive.js");
 	const json = await readCard(card);

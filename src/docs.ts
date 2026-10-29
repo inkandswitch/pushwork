@@ -34,7 +34,8 @@ const SEND_SETTLE_MS = 50;
 // keyhive only; plain docs store blobs as they are
 export type Codec = {
 	encode(id: DocumentId, head: string, parents: string[], bytes: Uint8Array): Promise<Uint8Array>;
-	decode(id: DocumentId, head: string, bytes: Uint8Array): Promise<Uint8Array | null>;
+	/** The plaintexts of a doc's stored blobs, given with their heads; ones it can't open are left out. */
+	decode(id: DocumentId, blobs: [head: string, bytes: Uint8Array][]): Promise<Uint8Array[]>;
 };
 
 // storage that remembers, across runs, which fragment heads a server holds (FsStorage does)
@@ -286,23 +287,11 @@ export class Docs {
 		const sid = toSedimentreeId(id);
 		const { storage, codec } = this.options;
 		const [commits, fragments] = await Promise.all([storage.loadAllCommits(sid), storage.loadAllFragments(sid)]);
-		const items = [
-			...commits.map(c => [c.signed.payload.commitId.toHexString(), c.blob] as const),
-			...fragments.map(f => [f.signed.payload.head.toHexString(), f.blob] as const),
+		const items: [string, Uint8Array][] = [
+			...commits.map(c => [c.signed.payload.commitId.toHexString(), c.blob] as [string, Uint8Array]),
+			...fragments.map(f => [f.signed.payload.head.toHexString(), f.blob] as [string, Uint8Array]),
 		];
-		if (!codec) return items.map(([, blob]) => blob);
-		// Decrypting a blob can reveal its predecessors' keys, and some blobs only open with
-		// those (anything encrypted before this reader was given access), so retry the ones
-		// that failed for as long as each pass opens more.
-		const decoded: (Uint8Array | null)[] = items.map(() => null);
-		let pending = items.map((_, i) => i);
-		while (pending.length) {
-			const results = await Promise.all(pending.map(i => codec.decode(id, items[i][0], items[i][1])));
-			const failed = pending.filter((i, k) => (decoded[i] = results[k]) === null);
-			if (failed.length === pending.length) break;
-			pending = failed;
-		}
-		return decoded.filter(blob => blob !== null);
+		return codec ? codec.decode(id, items) : items.map(([, blob]) => blob);
 	}
 
 	private async onDisk(sid: SedimentreeId) {
