@@ -477,6 +477,56 @@ describe.each(BACKENDS)("pushwork — $name backend", ({ flags }) => {
 		);
 
 		it(
+			"merges concurrent edits to different keys of a JSON document",
+			async () => {
+				const a = path.join(workRoot, "a");
+				const b = path.join(workRoot, "b");
+				await fs.mkdir(a);
+				await pushwork(["init", "--json-docs", ...flags], a);
+				const url = (await pushwork(["url"], a)).stdout.trim();
+				await pushwork(["clone", "--json-docs", ...flags, url, b]);
+
+				const model = {
+					"@patchwork": { type: "stock-flow-model" },
+					title: "Housing",
+					variables: { students: { initial: 100 }, rent: { initial: 8 } },
+				};
+				const text = (v: unknown) => JSON.stringify(v, null, 1) + "\n";
+				await fs.writeFile(path.join(a, "model.json"), text(model));
+				// B has no disk copy to take a layout from, so it receives the
+				// document in the default layout: equal values, not bytes.
+				for (let round = 1; round <= 6; round++) {
+					await syncOnce([a, b]);
+					const onB = await readText(path.join(b, "model.json")).catch(() => "");
+					if (onB && JSON.stringify(JSON.parse(onB)) === JSON.stringify(model)) break;
+				}
+
+				const fromA = structuredClone(model);
+				fromA.variables.students.initial = 120;
+				const fromB = structuredClone(model);
+				fromB.variables.rent.initial = 9;
+				await fs.writeFile(path.join(a, "model.json"), text(fromA));
+				await fs.writeFile(path.join(b, "model.json"), text(fromB));
+
+				const merged = text({
+					...model,
+					variables: { students: { initial: 120 }, rent: { initial: 9 } },
+				});
+				let contents: string[] = [];
+				for (let round = 1; round <= 6; round++) {
+					await syncOnce([a, b]);
+					contents = await Promise.all([
+						readText(path.join(a, "model.json")),
+						readText(path.join(b, "model.json")),
+					]);
+					if (contents.every((c) => c === merged)) break;
+				}
+				expect(contents).toEqual([merged, merged]);
+			},
+			180_000,
+		);
+
+		it(
 			"a third clone catches up to the current state",
 			async () => {
 				const { a, b } = await setupPair();

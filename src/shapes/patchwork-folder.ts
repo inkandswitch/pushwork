@@ -79,7 +79,7 @@ async function createFolder(
 	const links: DocLink[] = [];
 	for (const [name, child] of tree.entries) {
 		if (child.kind === "file") {
-			links.push({ name, type: linkFileType(name), url: child.url });
+			links.push({ name, type: child.type ?? linkFileType(name), url: child.url });
 		} else {
 			const sub = await createFolder(repo, child, name);
 			links.push({ name, type: "folder", url: pinUrl(sub) });
@@ -110,7 +110,7 @@ async function syncFolder(
 	for (const [name, child] of desired) {
 		const existing = existingLinks.get(name);
 		if (child.kind === "file") {
-			nextLinks.push({ name, type: linkFileType(name), url: child.url });
+			nextLinks.push({ name, type: child.type ?? linkFileType(name), url: child.url });
 			continue;
 		}
 		// child is a dir. Reuse the existing subfolder doc so its URL stays

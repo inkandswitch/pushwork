@@ -2,15 +2,16 @@
 
 Per-repo configuration lives at `.pushwork/config.json`; CRDT storage lives at `.pushwork/storage/`.
 
-## Current Format (version 4)
+## Current Format (version 6)
 
 ```json
 {
-	"version": 4,
+	"version": 6,
 	"rootUrl": "automerge:...",
 	"backend": "subduction",
 	"shape": "patchwork-folder",
-	"artifactDirectories": ["dist"]
+	"artifactDirectories": ["dist"],
+	"jsonDocuments": false
 }
 ```
 
@@ -21,6 +22,7 @@ Per-repo configuration lives at `.pushwork/config.json`; CRDT storage lives at `
 | `backend` | `"subduction"` (default) or `"legacy"` WebSocket relay |
 | `shape` | Document layout: `"patchwork-folder"`, `"vfs"`, or a custom module path (see [`shapes`](./shapes.md)) |
 | `artifactDirectories` | Frozen subtrees (see [`artifacts`](./artifacts.md)) |
+| `jsonDocuments` | Store new qualifying `.json` files as JSON documents (see [`shapes`](./shapes.md#json-documents)) |
 
 ## Strict Versioning
 
@@ -33,7 +35,7 @@ One normalization does happen on every load: `rootUrl` is heads-stripped. Older 
 `pushwork migrate` walks any older config forward one version at a time:
 
 ```
-"-"  ──►  1  ──►  2  ──►  3  ──►  4
+"-"  ──►  1  ──►  2  ──►  3  ──►  4  ──►  5  ──►  6
 ```
 
 | Version | Shape |
@@ -42,9 +44,11 @@ One normalization does happen on every load: `rootUrl` is heads-stripped. Older 
 | 1 | First pushwork@2 layout, no `version` field: `{rootUrl, backend}`; storage in `.pushwork/storage/` |
 | 2 | Adds `version: 2`, `shape`, `artifactDirectories` |
 | 3 | Adds `branches: boolean` |
-| 4 | Drops `branches` (current) |
+| 4 | Drops `branches` |
+| 5 | Moves CRDT storage from the nodefs chunk tree into one LMDB database (`.pushwork/storage.lmdb`) |
+| 6 | Adds `jsonDocuments: false` (current) |
 
-Each step is a small, pure-ish transform. Only the `"-"` → 1 step touches the filesystem (it relocates the storage directory); the rest reshape JSON.
+Each step is a small, pure-ish transform. Only the `"-"` → 1 and 4 → 5 steps touch the filesystem (they move the storage); the rest reshape JSON.
 
 ## Adding a Version
 

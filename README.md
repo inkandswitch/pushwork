@@ -100,6 +100,7 @@ These apply to every command:
 | --- | --- | --- |
 | `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
 | `--artifact-dir <dir>` | both | Directory whose text content is stored atomically (never character-merged). Repeatable. Defaults to `dist`. |
+| `--json-docs` | both | Store `.json` files whose `"@patchwork".type` isn't `"file"` as Automerge JSON documents instead of text (see [JSON documents](#json-documents)). |
 | `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
 | `--legacy` | both | Alias for `--no-sub`. |
 
@@ -137,15 +138,16 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | `.pushwork/storage/` | Automerge CRDT storage (`NodeFSStorageAdapter`). |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is currently at version `5`:
+`config.json` is currently at version `6`:
 
 ```json
 {
-	"version": 5,
+	"version": 6,
 	"rootUrl": "automerge:2sX...e9",
 	"backend": "subduction",
 	"shape": "vfs",
-	"artifactDirectories": ["dist"]
+	"artifactDirectories": ["dist"],
+	"jsonDocuments": false
 }
 ```
 
@@ -185,6 +187,22 @@ vendored/   -artifact     # negate a default; last matching rule wins
 ```
 
 Each line is `<glob> <attr>...` (blank lines and `#` comments ignored). Patterns are gitignore-style globs; the only attribute today is `artifact` (`-artifact` unsets it). An attributes file may sit in **any directory**: its patterns are relative to its own location and apply only to its subtree, with deeper files overriding shallower ones for the paths they match. When any attributes file is present, its `artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`, and pushwork warns when the two disagree so a stale local config can't silently diverge from the repo.
+
+### JSON documents
+
+With `jsonDocuments` on (`--json-docs` at `init`/`clone`, or `"jsonDocuments": true` in `.pushwork/config.json`), a `.json` file holding an object whose `"@patchwork"` field has a `type` other than `"file"` is stored as that object, not as text. The file _is_ the Patchwork document, and a `patchwork-folder` link carries its type, so Patchwork opens it with the matching tool:
+
+```json
+{
+	"@patchwork": { "type": "stock-flow-model" },
+	"title": "Housing",
+	"variables": { "students": { "initial": 100 } }
+}
+```
+
+Edits are diffed key by key, so concurrent changes to different keys merge. Automerge keeps neither key order nor whitespace, so pushwork compares values rather than bytes, leaves a file alone while its value matches the document, and when it must rewrite one, reuses that file's own indentation and key order. A file received from a peer with no local copy yet is written with two-space indent. If a tracked JSON document's file stops parsing as an object, sync warns and leaves that file unsynced until it does.
+
+The flag decides only how new files are stored: a path already tracked as a JSON document stays one, whoever syncs it. Turning the flag on for an existing repo converts qualifying text files on the next sync, giving them a new document URL.
 
 ## Document shapes
 
@@ -315,6 +333,7 @@ type InitOpts = {
 	backend: Backend
 	shape: string // "vfs" | "patchwork-folder" | module path
 	artifactDirectories?: readonly string[] // default: ["dist"]
+	jsonDocuments?: boolean // default: false
 	online?: boolean // default: true
 }
 

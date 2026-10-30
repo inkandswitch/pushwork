@@ -33,6 +33,9 @@ import { migrate, versionLabel } from "./migrations.js";
 
 const dlog = log("cli");
 
+const JSON_DOCS_HELP =
+	'Store new .json files whose "@patchwork".type isn\'t "file" as Automerge JSON documents instead of text';
+
 const priorWarn = process.listeners("warning");
 process.removeAllListeners("warning");
 process.on("warning", (w) => {
@@ -232,6 +235,7 @@ program
 		collect,
 		undefined as string[] | undefined,
 	)
+	.option("--json-docs", JSON_DOCS_HELP)
 	.action(async (dir, opts) => {
 		dlog("init dir=%s opts=%o", dir, opts);
 		const backend = backendOf(opts);
@@ -239,7 +243,13 @@ program
 		out.intro("pushwork init");
 		out.task("Connecting to sync server");
 		const info = await init(
-			{ dir: root, backend, shape: opts.shape, artifactDirectories: opts.artifactDir },
+			{
+				dir: root,
+				backend,
+				shape: opts.shape,
+				artifactDirectories: opts.artifactDir,
+				jsonDocuments: opts.jsonDocs,
+			},
 			report,
 			warn,
 		);
@@ -274,6 +284,7 @@ program
 		collect,
 		undefined as string[] | undefined,
 	)
+	.option("--json-docs", JSON_DOCS_HELP)
 	.action(async (u, dir, opts) => {
 		dlog("clone url=%s dir=%s opts=%o", u, dir, opts);
 		const backend = backendOf(opts);
@@ -287,6 +298,7 @@ program
 				backend,
 				shape: opts.shape,
 				artifactDirectories: opts.artifactDir,
+				jsonDocuments: opts.jsonDocs,
 				onBranchesDoc: pickBranchInteractively,
 				onStrategyDoc: pickStrategyInteractively,
 			},
@@ -333,7 +345,7 @@ program
 program
 	.command("yoink")
 	.description("Pull a single file doc by URL and write it to disk")
-	.argument("<url>", "automerge: URL of a UnixFileEntry doc")
+	.argument("<url>", "automerge: URL of a UnixFileEntry doc, or a JSON document")
 	.argument("[path]", "Where to write it (defaults to the doc's own name)")
 	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
 	.action(async (u, dest, opts) => {
@@ -347,7 +359,7 @@ program
 	.command("yeet")
 	.description("Push a single file from disk into a file doc by URL")
 	.argument("<path>", "File to read")
-	.argument("<url>", "automerge: URL of the UnixFileEntry doc to overwrite")
+	.argument("<url>", "automerge: URL of the UnixFileEntry doc or JSON document to overwrite")
 	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
 	.action(async (src, u, opts) => {
 		dlog("yeet src=%s url=%s", src, u);

@@ -51,6 +51,17 @@ Content classification (`bytesToContent`):
 
 Text updates go through `Automerge.updateText` so concurrent character-level edits converge; bytes and `ImmutableString` are last-writer-wins.
 
+## JSON Documents
+
+A leaf that isn't a `UnixFileEntry` is a _JSON document_: the file's own object, stored as Automerge maps and lists (`src/shapes/json.ts`). `leafContent` tells the two apart by shape — a doc with `content` and an `@patchwork.type` of `"file"` (or none) is a file entry — so every reader handles both whatever its config says.
+
+The config flag `jsonDocuments` only decides what a _new_ path becomes. A `.json` file qualifies (`jsonDocumentOf`) when it parses to an object whose `@patchwork` is an object with a `type` other than `"file"`. With the flag on, a qualifying path tracked as text is converted: a new JSON document, a new URL.
+
+- **Writes** go through `patchJson`, a structural diff against the doc's current value: removed keys are deleted, strings spliced with `updateText`, arrays keep their common prefix and suffix and pair up the middle. Concurrent edits to different keys merge.
+- **Reads** use the doc's plain JSON value (`jsonValueOf`): text becomes strings, counters numbers, dates ISO strings.
+- **Layout.** Automerge sorts map keys and keeps no whitespace, so the bytes on disk can't be derived from the doc. `formatJson(value, template)` serializes with the indent, line endings, trailing newline and key order of `template` — the file currently on disk — appending keys it doesn't have. With no template it writes two-space indent and a trailing newline.
+- **Link type.** `patchwork-folder` links a JSON document by its `@patchwork.type` (`jsonLinkType`), so Patchwork opens it with the matching tool. `file`, `folder`, `directory` and `branches` are reserved: a doc claiming one is linked by extension, since a `folder` link would be decoded as a subdirectory.
+
 ## Builtin Shapes
 
 ### `patchwork-folder` (default)

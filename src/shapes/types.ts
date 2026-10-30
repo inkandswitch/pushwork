@@ -7,7 +7,7 @@ import type {
 
 export type VfsNode =
 	| { kind: "dir"; entries: Map<string, VfsNode> }
-	| { kind: "file"; url: AutomergeUrl };
+	| { kind: "file"; url: AutomergeUrl; type?: string };
 
 export type UnixFileEntry = {
 	"@patchwork": { type: "file" };
@@ -72,9 +72,10 @@ export function setFileAt(
 	root: VfsNode,
 	path: string[],
 	url: AutomergeUrl,
+	type?: string,
 ): void {
 	if (path.length === 0) throw new Error("setFileAt: empty path");
 	const parent = ensureDirAt(root, path.slice(0, -1));
 	if (parent.kind !== "dir") throw new Error("setFileAt: parent not a dir");
-	parent.entries.set(path[path.length - 1], { kind: "file", url });
+	parent.entries.set(path[path.length - 1], { kind: "file", url, type });
 }

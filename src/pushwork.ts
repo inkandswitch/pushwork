@@ -1,6 +1,7 @@
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
+import * as Automerge from "@automerge/automerge";
 import {
 	isValidAutomergeUrl,
 	type AutomergeUrl,
@@ -43,11 +44,21 @@ import {
 	applyFileEntry,
 	contentToBytes,
 	flattenLeaves,
+	formatJson,
+	isFileEntryDoc,
 	isInArtifactDir,
+	jsonDocumentOf,
+	jsonEquals,
+	jsonLinkType,
+	jsonValueOf,
+	leafContent,
+	leafMatchesDisk,
 	makeFileEntry,
 	mutateFileEntry,
 	newDir,
 	normalizeArtifactDir,
+	parseJsonObject,
+	patchJson,
 	patchworkFolderShape,
 	pinUrl,
 	readFileEntry,
@@ -56,6 +67,8 @@ import {
 	stripHeads,
 	urlHeads,
 	vfsShape,
+	type JsonObject,
+	type LeafContent,
 	type Shape,
 	type UnixFileEntry,
 	type VfsNode,
@@ -77,6 +90,9 @@ const noWarn: Warn = () => {};
 /** Decides whether a repo-relative posix path is an artifact (its text content
  *  stored as an atomic ImmutableString rather than a merge-able CRDT text). */
 type IsArtifact = (posixPath: string) => boolean;
+
+/** A leaf as recorded at its pinned link: the merge base for the next sync. */
+type StoredLeaf = LeafContent & { url: AutomergeUrl };
 
 /**
  * Build the artifact classifier from a walked working tree. The tree's
@@ -120,6 +136,7 @@ export type InitOpts = {
 	backend: Backend;
 	shape: string;
 	artifactDirectories?: readonly string[];
+	jsonDocuments?: boolean; // default: false
 	online?: boolean; // default: true
 };
 
@@ -129,6 +146,7 @@ export type CloneOpts = {
 	backend: Backend;
 	shape: string;
 	artifactDirectories?: readonly string[];
+	jsonDocuments?: boolean; // default: false
 	online?: boolean; // default: true
 	// If the URL turns out to be a legacy "branches" doc, this callback is
 	// invoked with the available branch entries and must return the URL to
@@ -198,7 +216,15 @@ export async function init(
 		const shape = await resolveShape(opts.shape);
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
-		const tree = await pushFiles(repo, fsFiles, undefined, isArtifactPath);
+		const jsonDocuments = opts.jsonDocuments ?? false;
+		const { tree } = await pushFiles(
+			repo,
+			fsFiles,
+			undefined,
+			isArtifactPath,
+			jsonDocuments,
+			warn,
+		);
 		const folderUrl = await shape.encode({
 			repo,
 			tree,
@@ -225,6 +251,7 @@ export async function init(
 			backend: opts.backend,
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
+			jsonDocuments,
 		});
 		await attachConnectMs(sync, connWait);
 		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
@@ -319,6 +346,7 @@ export async function clone(
 			backend: opts.backend,
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
+			jsonDocuments: opts.jsonDocuments ?? false,
 		});
 		await attachConnectMs(sync, connWait);
 		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
@@ -462,9 +490,9 @@ async function openDetachedRepo(
 
 /**
  * Pull a single UnixFileEntry doc from `docUrl` and write its content to a
- * file on disk. Online: fetches the doc from the sync server. `destPath`
- * (relative to the repo root) overrides where it lands; if omitted, the
- * doc's own `name` field is used. Detached — the written file is an ordinary
+ * file on disk; any other doc is written out as JSON. Online: fetches the
+ * doc from the sync server. `destPath` (relative to the repo root) overrides
+ * where it lands; if omitted, a file doc's own `name` field is used. Detached — the written file is an ordinary
  * working-tree file, not linked to `docUrl`; a later `save`/`sync` will track
  * it under a fresh file doc like any other path. Works outside a pushwork repo;
  * `backend` overrides the sync backend (default: the repo's config, else
@@ -484,11 +512,13 @@ export async function yoink(
 
 	const { repo, cleanup } = await openDetachedRepo(root, backend);
 	try {
-		const handle = await repo.find<UnixFileEntry>(docUrl);
-		await waitForSync(handle as DocHandle<unknown>, { idleMs: 1500, maxMs: 15000 });
-		const { bytes, entry } = readFileEntry(handle as DocHandle<unknown>);
+		const handle = await repo.find<unknown>(docUrl);
+		await waitForSync(handle, { idleMs: 1500, maxMs: 15000 });
+		const doc = handle.doc();
+		const file = isFileEntryDoc(doc) ? readFileEntry(handle) : undefined;
+		const bytes = file ? file.bytes : formatJson(jsonValueOf(doc));
 
-		const rel = destPath ?? entry.name;
+		const rel = destPath ?? file?.entry.name;
 		if (!rel) {
 			throw new Error(
 				`doc ${docUrl} has no name field; pass a destination path`,
@@ -509,7 +539,8 @@ export async function yoink(
 /**
  * Push a single file from disk into the UnixFileEntry doc at `docUrl`,
  * mutating it in place (text content merges via Automerge.updateText; binary
- * is last-writer-wins). Online: publishes the change to the sync server so
+ * is last-writer-wins). When `docUrl` is a JSON document, the file must hold
+ * a JSON object, which is patched into the doc key by key. Online: publishes the change to the sync server so
  * peers holding `docUrl` see it. Detached — `srcPath` is read straight off
  * disk and need not be tracked by this repo. Works outside a pushwork repo;
  * `backend` overrides the sync backend (default: the repo's config, else
@@ -543,7 +574,19 @@ export async function yeet(
 			idleMs: 1500,
 			maxMs: 15000,
 		});
-		applyFileEntry(handle, fresh);
+		if (isFileEntryDoc(handle.doc())) {
+			applyFileEntry(handle, fresh);
+		} else {
+			const value = parseJsonObject(bytes);
+			if (!value) {
+				throw new Error(
+					`${docUrl} is a JSON document; ${srcPath} must hold a JSON object`,
+				);
+			}
+			(handle as DocHandle<unknown> as DocHandle<JsonObject>).change(
+				(d: JsonObject) => patchJson(d, value),
+			);
+		}
 		await waitForServerSync(repo, handle as DocHandle<unknown>, resolvedBackend, {
 			idleMs: 1500,
 			maxMs: 15000,
@@ -628,23 +671,21 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 		const title = path.basename(root) || undefined;
 		const oldTree = await shape.decode({ repo, root: folderHandle });
 
-		// For each leaf: read content, create a fresh UnixFileEntry doc.
+		// For each leaf: read content, create a fresh doc of the same kind.
 		const newTree = newDir();
 		for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
 			const bare = stripHeads(fileUrl);
-			const oldFileHandle = await repo.find<UnixFileEntry>(bare);
-			const oldDoc = oldFileHandle.doc();
-			const newFileHandle = repo.create<UnixFileEntry>({
-				"@patchwork": { type: "file" },
-				name: oldDoc.name,
-				extension: oldDoc.extension,
-				mimeType: oldDoc.mimeType,
-				content: oldDoc.content,
-			});
+			const oldDoc = (await repo.find<unknown>(bare)).doc();
+			const newFileHandle = isFileEntryDoc(oldDoc)
+				? repo.create<UnixFileEntry>(copyFileEntry(oldDoc as UnixFileEntry))
+				: repo.create<JsonObject>(
+						Automerge.toJS(oldDoc as Automerge.Doc<JsonObject>),
+					);
 			setFileAt(
 				newTree,
 				posixPath.split("/").filter(Boolean),
 				pinUrl(newFileHandle),
+				jsonLinkType(oldDoc),
 			);
 		}
 
@@ -659,6 +700,14 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 		await safeShutdown(repo);
 	}
 }
+
+const copyFileEntry = (entry: UnixFileEntry): UnixFileEntry => ({
+	"@patchwork": { type: "file" },
+	name: entry.name,
+	extension: entry.extension,
+	mimeType: entry.mimeType,
+	content: entry.content,
+});
 
 export async function save(
 	cwd: string,
@@ -687,7 +736,7 @@ async function commitWorkdir(
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const previousFiles = await readLeaves(repo, previousTree);
 
 		const ig = await loadIgnore(root);
 		report("Scanning working tree");
@@ -699,11 +748,13 @@ async function commitWorkdir(
 		);
 
 		report(online ? "Committing local changes" : "Writing documents");
-		const newTree = await pushFiles(
+		const { tree: newTree, held } = await pushFiles(
 			repo,
 			fsFiles,
 			previousFiles,
 			isArtifactPath,
+			config.jsonDocuments,
+			warn,
 		);
 		const changed = !sameTree(previousTree, newTree);
 		dlog("commit tree changed: %s", changed);
@@ -735,7 +786,7 @@ async function commitWorkdir(
 
 		if (online) report("Writing changes");
 		const finalTree = await shape.decode({ repo, root: folderHandle });
-		await materializeTree(repo, root, finalTree);
+		await materializeTree(repo, root, finalTree, held);
 		await attachConnectMs(sync, connWait);
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
@@ -816,7 +867,7 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const previousFiles = await readLeaves(repo, previousTree);
 
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
@@ -840,7 +891,7 @@ export async function diff(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const previousFiles = await readLeaves(repo, previousTree);
 
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
@@ -851,8 +902,11 @@ export async function diff(
 			const prev = previousFiles.get(p);
 			if (!prev) {
 				out.push({ path: p, kind: "added", after: bytes });
-			} else if (!byteEq(prev.bytes, bytes)) {
-				out.push({ path: p, kind: "modified", before: prev.bytes, after: bytes });
+			} else if (!leafMatchesDisk(prev, bytes)) {
+				// Lay a JSON document out like the disk copy so the diff shows
+				// changed values rather than formatting.
+				const before = prev.value ? formatJson(prev.value, bytes) : prev.bytes;
+				out.push({ path: p, kind: "modified", before, after: bytes });
 			}
 		}
 		for (const [p, prev] of previousFiles) {
@@ -883,7 +937,7 @@ export async function cutWorkdir(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const previousFiles = await readLeaves(repo, previousTree);
 
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
@@ -893,7 +947,7 @@ export async function cutWorkdir(
 			const prev = previousFiles.get(p);
 			if (!prev) {
 				entries.push({ path: p, kind: "added", contentBase64: encodeBytes(bytes) });
-			} else if (!byteEq(prev.bytes, bytes)) {
+			} else if (!leafMatchesDisk(prev, bytes)) {
 				entries.push({
 					path: p,
 					kind: "modified",
@@ -942,7 +996,7 @@ export async function pasteSnarf(
 		const shape = await resolveShape(config.shape);
 		const folderHandle = await repo.find<unknown>(config.rootUrl);
 		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readFileBytes(repo, previousTree);
+		const previousFiles = await readLeaves(repo, previousTree);
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
 		const dirty = computeDiff(previousFiles, fsFiles);
@@ -1024,7 +1078,7 @@ function normalizeDirs(dirs: readonly string[]): string[] {
 }
 
 function computeDiff(
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }>,
+	previous: Map<string, StoredLeaf>,
 	current: Map<string, Uint8Array>,
 ): Diff {
 	const added: string[] = [];
@@ -1033,7 +1087,7 @@ function computeDiff(
 	for (const [p, bytes] of current) {
 		const prev = previous.get(p);
 		if (!prev) added.push(p);
-		else if (!byteEq(prev.bytes, bytes)) modified.push(p);
+		else if (!leafMatchesDisk(prev, bytes)) modified.push(p);
 	}
 	for (const p of previous.keys()) {
 		if (!current.has(p)) deleted.push(p);
@@ -1044,33 +1098,78 @@ function computeDiff(
 	return { added, modified, deleted };
 }
 
+/**
+ * Record the working tree into leaf docs, reconciling each path against its
+ * pinned link in `previous`. Returns the new tree plus the paths `held` at
+ * their old link because their disk copy isn't the JSON object their
+ * document needs; materialize must leave those files alone.
+ *
+ * A path already tracked as a JSON document stays one. Otherwise, with
+ * `jsonDocuments` on, a file that qualifies ({@link jsonDocumentOf}) gets a
+ * new JSON document — for a path tracked as text until now, that replaces
+ * its file doc and URL.
+ */
 async function pushFiles(
 	repo: Repo,
 	fsFiles: Map<string, Uint8Array>,
-	previous: Map<string, { url: AutomergeUrl; bytes: Uint8Array }> | undefined,
+	previous: Map<string, StoredLeaf> | undefined,
 	isArtifactPath: IsArtifact,
-): Promise<VfsNode> {
+	jsonDocuments: boolean,
+	warn: Warn,
+): Promise<{ tree: VfsNode; held: Set<string> }> {
 	const root = newDir();
+	const held = new Set<string>();
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
 	for (const [posixPath, bytes] of fsFiles) {
 		const segments = posixPath.split("/").filter(Boolean);
 		const prev = previous?.get(posixPath);
+		const json =
+			jsonDocuments && !prev?.value
+				? jsonDocumentOf(posixPath, bytes)
+				: undefined;
 
-		let handle: DocHandle<UnixFileEntry>;
-		if (prev) {
+		let handle: DocHandle<unknown>;
+		if (prev?.value) {
+			const value = parseJsonObject(bytes);
+			if (!value) {
+				warn(
+					`${posixPath} is synced as a JSON document but isn't a JSON object on disk; leaving it unsynced until it is`,
+				);
+				held.add(posixPath);
+				setFileAt(root, segments, prev.url, jsonLinkType(prev.value));
+				continue;
+			}
+			handle = await repo.find<unknown>(stripHeads(prev.url));
+			if (jsonEquals(prev.value, value)) {
+				unchanged++;
+			} else {
+				applyJsonEdit(handle as DocHandle<JsonObject>, prev.url, prev.value, value);
+				updated++;
+				dlog("pushFiles updated json %s url=%s", posixPath, handle.url);
+			}
+		} else if (json) {
+			handle = repo.create<JsonObject>(json);
+			created++;
+			dlog(
+				"pushFiles %s json %s url=%s",
+				prev ? "converted" : "created",
+				posixPath,
+				handle.url,
+			);
+		} else if (prev) {
 			// Existing path: mutate the file doc in place. This keeps the file
 			// URL stable across edits and avoids the propagation race where a
 			// brand-new file doc URL is referenced by the folder before its
 			// bytes have reached the server. The link's pinned heads are the
 			// merge base; strip them to get the live, editable doc.
-			handle = await repo.find<UnixFileEntry>(stripHeads(prev.url));
+			handle = await repo.find<unknown>(stripHeads(prev.url));
 			if (byteEq(prev.bytes, bytes)) {
 				unchanged++;
 			} else {
 				applyDiskEdit(
-					handle,
+					handle as DocHandle<UnixFileEntry>,
 					prev,
 					makeFileEntry(posixPath, bytes, isArtifactPath(posixPath)),
 					bytes,
@@ -1092,10 +1191,10 @@ async function pushFiles(
 		// the next sync's merge base. An unchanged path whose doc moved
 		// underneath us (a peer's edit already in local storage) re-pins at
 		// the tip, publishing what we can see.
-		setFileAt(root, segments, pinUrl(handle));
+		setFileAt(root, segments, pinUrl(handle), jsonLinkType(handle.doc()));
 	}
-	dlog("pushFiles done: %d created, %d updated, %d unchanged", created, updated, unchanged);
-	return root;
+	dlog("pushFiles done: %d created, %d updated, %d unchanged, %d held", created, updated, unchanged, held.size);
+	return { tree: root, held };
 }
 
 /**
@@ -1118,7 +1217,7 @@ async function pushFiles(
  */
 function applyDiskEdit(
 	handle: DocHandle<UnixFileEntry>,
-	prev: { url: AutomergeUrl; bytes: Uint8Array },
+	prev: StoredLeaf,
 	fresh: UnixFileEntry,
 	bytes: Uint8Array,
 ): void {
@@ -1133,25 +1232,51 @@ function applyDiskEdit(
 	handle.changeAt(base, (d: UnixFileEntry) => mutateFileEntry(d, fresh));
 }
 
-async function readFileBytes(
+/**
+ * {@link applyDiskEdit} for a JSON document: the same three cases, comparing
+ * values instead of bytes. The patch is computed against the version it is
+ * recorded on (the tip, or the doc at the base heads), so it touches only
+ * the keys the disk edit changed and a concurrent edit elsewhere survives.
+ */
+function applyJsonEdit(
+	handle: DocHandle<JsonObject>,
+	linkUrl: AutomergeUrl,
+	baseValue: JsonObject,
+	value: JsonObject,
+): void {
+	const tip = jsonValueOf(handle.doc());
+	if (jsonEquals(tip, value)) return;
+	const base = urlHeads(linkUrl);
+	if (base === undefined || jsonEquals(tip, baseValue)) {
+		handle.change((d: JsonObject) => patchJson(d, value));
+		return;
+	}
+	dlog("pushFiles merging json %s at base %s", linkUrl, base.join("|"));
+	handle.changeAt(base, (d: JsonObject) => patchJson(d, value));
+}
+
+async function readLeaves(
 	repo: Repo,
 	tree: VfsNode,
-): Promise<Map<string, { url: AutomergeUrl; bytes: Uint8Array }>> {
-	const out = new Map<string, { url: AutomergeUrl; bytes: Uint8Array }>();
+): Promise<Map<string, StoredLeaf>> {
+	const out = new Map<string, StoredLeaf>();
 	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<UnixFileEntry>(fileUrl);
-		out.set(posixPath, {
-			url: fileUrl,
-			bytes: contentToBytes(handle.doc().content),
-		});
+		const handle = await repo.find<unknown>(fileUrl);
+		out.set(posixPath, { url: fileUrl, ...leafContent(handle.doc()) });
 	}
 	return out;
 }
 
+/**
+ * Make the working tree match `tree`. A JSON document is only written when
+ * its value differs from the disk copy, laid out like that copy; `held`
+ * paths are never written.
+ */
 async function materializeTree(
 	repo: Repo,
 	root: string,
 	tree: VfsNode,
+	held: ReadonlySet<string> = new Set(),
 ): Promise<void> {
 	const leaves = flattenLeaves(tree);
 
@@ -1160,11 +1285,11 @@ async function materializeTree(
 	// instead of serializing (benched vs serial and vs the old worker pool in
 	// ADR-031/032). The transport's own receive-credit windowing is the
 	// backpressure; no artificial cap here.
-	const desired = new Map<string, Uint8Array>();
+	const desired = new Map<string, LeafContent>();
 	await Promise.all(
 		[...leaves].map(async ([posixPath, fileUrl]) => {
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
-			desired.set(posixPath, contentToBytes(handle.doc().content));
+			const handle = await repo.find<unknown>(fileUrl);
+			desired.set(posixPath, leafContent(handle.doc()));
 		}),
 	);
 	dlog("materialize desired: %d files", desired.size);
@@ -1182,8 +1307,10 @@ async function materializeTree(
 
 	let written = 0;
 	let removed = 0;
-	for (const [posixPath, bytes] of desired) {
-		if (byteEq(present.get(posixPath), bytes)) continue;
+	for (const [posixPath, leaf] of desired) {
+		const onDisk = present.get(posixPath);
+		if (held.has(posixPath) || leafMatchesDisk(leaf, onDisk)) continue;
+		const bytes = leaf.value ? formatJson(leaf.value, onDisk) : leaf.bytes;
 		await writeFileAtomic(path.join(root, fromPosix(posixPath)), bytes);
 		written++;
 	}

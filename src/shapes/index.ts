@@ -17,3 +17,4 @@ export async function resolveShape(name: ShapeName): Promise<Shape> {
 export { vfsShape, patchworkFolderShape };
 export * from "./types.js";
 export * from "./file.js";
+export * from "./json.js";

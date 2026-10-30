@@ -38,8 +38,11 @@ no snapshot file, and the arrangement self-heals because every sync
 re-anchors the pins to what it wrote to disk.
 
 `pushFiles` reconciles each path as: **base** = the pinned link's content
-(what `readFileBytes` decodes, by construction), **disk** = the working-tree
-bytes, **tip** = the live doc (heads stripped):
+(what `readLeaves` decodes, by construction), **disk** = the working-tree
+bytes, **tip** = the live doc (heads stripped). For a
+[JSON document](./shapes.md#json-documents) "equal" means equal JSON values,
+not bytes, and the edit is a structural `patchJson` rather than
+`applyFileEntry`; the cases are otherwise the same:
 
 | Case | Action |
 | --- | --- |
@@ -50,7 +53,10 @@ bytes, **tip** = the live doc (heads stripped):
 | link has no heads | Pre-fork repo, no base: `applyFileEntry` at the tip (old behaviour). The first sync pins every link, so this runs once per repo. |
 
 Deletes and creates are unchanged: present in base but gone from disk is a
-delete, on disk but absent from base is a create. After the reconcile:
+delete, on disk but absent from base is a create. A JSON document whose disk
+copy doesn't parse as an object is _held_: its link keeps the old pin, sync
+warns, and materialize leaves the file alone, so a half-typed edit is never
+overwritten; the next sync after it parses reconciles against the old pin. After the reconcile:
 encode (re-pin), stamp, one `waitForServerSync`, final decode, materialize —
 leaving base == tip == pin == disk.
 
