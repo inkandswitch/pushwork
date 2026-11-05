@@ -25,7 +25,7 @@ import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
 import { loadSeed, signerFrom } from "./key.js";
 import { log } from "./log.js";
-import { FsStorage, importStore } from "./storage.js";
+import { convertSent, FsStorage, importStore } from "./storage.js";
 import { readUrlAttr, writeUrlAttrs } from "./xattr.js";
 import {
 	encodeHeads,
@@ -900,19 +900,22 @@ export async function migrate(
 
 // Version 6 kept each checkout's documents in its own .pushwork/storage. They're copied into
 // the machine store, the checkout's heads are recorded as they stood there, and the old
-// storage goes into the backup folder. Nothing is fetched or pushed. On failure the
-// checkout is left a version 6 repo, as it was, so migrate can be run again.
+// storage goes into the backup folder as storage-v6. Nothing is fetched or pushed. On
+// failure the checkout is left a version 6 repo, as it was, so migrate can be run again.
 async function migrateStore(root: string, config: PushworkConfig): Promise<RepoSummary> {
 	const legacy = legacyStorageDir(root);
 	const backupDir = path.join(pushworkDir(root), MIGRATION_BACKUP);
-	const backup = path.join(backupDir, "storage");
+	// pushwork 2 kept its documents in .pushwork/storage too, so its backup may hold a storage/ already
+	const backup = path.join(backupDir, "storage-v6");
 	// a checkout at the home directory kept its documents where the machine store is now
 	const inPlace = await sameDir(legacy, storeDir());
 	const unlock = await lockCheckout(root);
 	let madeBackupDir: string | undefined;
 	let moved = false;
 	try {
-		if (!inPlace) await importStore(legacy, await FsStorage.open(storeDir()));
+		const store = await FsStorage.open(storeDir());
+		if (inPlace) await convertSent(legacy, store, { remove: true });
+		else await importStore(legacy, store);
 		const seed = await loadSeed();
 		const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), true) : undefined;
 		let summary: RepoSummary;

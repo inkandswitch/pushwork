@@ -11,7 +11,7 @@ import {
 	SignedLooseCommit,
 	Subduction,
 } from "@automerge/automerge-subduction";
-import { FsStorage, importStore } from "../../src/storage.js";
+import { convertSent, FsStorage, importStore } from "../../src/storage.js";
 
 let root: string;
 const seed = crypto.getRandomValues(new Uint8Array(32));
@@ -195,5 +195,21 @@ describe("FsStorage", () => {
 		expect(await walk(dirB)).toEqual(before);
 		await fs.rm(dirA, { recursive: true, force: true });
 		await fs.rm(dirB, { recursive: true, force: true });
+	});
+
+	it("converts a store's own flat sent records in place, removing them", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-sent-"));
+		const storage = await FsStorage.open(dir);
+		const head = "00" + "d".repeat(62);
+		const flat = path.join(dir, "sent", Buffer.from(idBytes).toString("hex"));
+		await fs.mkdir(path.dirname(flat), { recursive: true });
+		await fs.writeFile(flat, `ws://x\n${head}\n`);
+		await convertSent(dir, storage, { remove: true });
+		expect(await storage.loadSent(sid(), "ws://x")).toEqual([head]);
+		await expect(fs.access(flat)).rejects.toThrow();
+		// with nothing flat left, deleting a document clears its sent records
+		await storage.deleteSedimentreeId(sid());
+		expect(await storage.loadSent(sid(), "ws://x")).toEqual([]);
+		await fs.rm(dir, { recursive: true, force: true });
 	});
 });

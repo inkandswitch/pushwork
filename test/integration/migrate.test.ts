@@ -60,7 +60,7 @@ describe("migrate from version 6", () => {
 		expect(await porcelainStatus()).toBe("");
 		expect(await exists(path.join(pushworkDir(repo), "heads.json"))).toBe(true);
 		expect((await fs.readdir(path.join(h2, ".pushwork", "storage", "trees"))).length).toBeGreaterThan(0);
-		expect(await exists(path.join(pushworkDir(repo), "pushwork_migration_backup_safe_to_delete", "storage"))).toBe(true);
+		expect(await exists(path.join(pushworkDir(repo), "pushwork_migration_backup_safe_to_delete", "storage-v6"))).toBe(true);
 		expect(await exists(path.join(pushworkDir(repo), "storage"))).toBe(false);
 		expect((await readConfigFile(repo)).version).toBe(7);
 		expect((await run(["url"])).stdout.trim()).toBe(url);
@@ -99,6 +99,20 @@ describe("migrate from version 6", () => {
 		expect(await porcelainStatus()).toBe("");
 	});
 
+	it("keeps a pushwork 2 backup's storage alongside the v6 one", async () => {
+		// a v6 repo migrated from pushwork 2, which kept its documents in .pushwork/storage too
+		const old = path.join(pushworkDir(repo), "pushwork_migration_backup_safe_to_delete", "storage");
+		await fs.mkdir(old, { recursive: true });
+		await fs.writeFile(path.join(old, "pushwork2.bin"), "old");
+
+		await run(["migrate"]);
+		expect(await fs.readdir(old)).toEqual(["pushwork2.bin"]);
+		expect(await readText(path.join(old, "pushwork2.bin"))).toBe("old");
+		expect(await exists(path.join(pushworkDir(repo), "pushwork_migration_backup_safe_to_delete", "storage-v6", "trees"))).toBe(true);
+		expect(await exists(path.join(pushworkDir(repo), "storage"))).toBe(false);
+		expect(await porcelainStatus()).toBe("");
+	});
+
 	it("leaves the machine store where it is for a checkout at the home directory", async () => {
 		const home = path.join(work, "home");
 		await fs.mkdir(home);
@@ -107,6 +121,11 @@ describe("migrate from version 6", () => {
 		await pushwork(["init", "--offline"], home, homeEnv(home));
 		const homeUrl = (await pushwork(["url"], home, homeEnv(home))).stdout.trim();
 		await fs.rm(path.join(pushworkDir(home), "heads.json"));
+		// v6 kept what it had sent flat, one file per document with the server on the first line
+		const head = "00" + "c".repeat(62);
+		const flat = path.join(pushworkDir(home), "storage", "sent", "ab".repeat(32));
+		await fs.mkdir(path.dirname(flat), { recursive: true });
+		await fs.writeFile(flat, `ws://x\n${head}\n`);
 		const config = await readConfigFile(home);
 		await fs.writeFile(configFile(home), JSON.stringify({ ...config, version: 6, syncServer: UNREACHABLE }, null, 2));
 
@@ -114,9 +133,13 @@ describe("migrate from version 6", () => {
 		await pushwork(["migrate", "--sync-server", "ws://127.0.0.1:2"], home, homeEnv(home));
 		expect((await readConfigFile(home)).syncServer).toBe("ws://127.0.0.1:2");
 		expect((await fs.readdir(path.join(pushworkDir(home), "storage", "trees"))).length).toBeGreaterThan(0);
-		expect(await exists(path.join(pushworkDir(home), "pushwork_migration_backup_safe_to_delete", "storage"))).toBe(false);
+		expect(await exists(path.join(pushworkDir(home), "pushwork_migration_backup_safe_to_delete", "storage-v6"))).toBe(false);
 		expect(await exists(path.join(pushworkDir(home), "heads.json"))).toBe(true);
 		expect((await readConfigFile(home)).version).toBe(7);
+		expect(await exists(flat)).toBe(false);
+		const servers = await fs.readdir(path.join(pushworkDir(home), "storage", "sent"));
+		expect(servers).toHaveLength(1);
+		expect(await readText(path.join(pushworkDir(home), "storage", "sent", servers[0], "ab".repeat(32)))).toBe(`ws://x\n${head}\n`);
 		expect((await pushwork(["--porcelain", "status"], home, homeEnv(home))).stdout).toBe("");
 		expect((await pushwork(["url"], home, homeEnv(home))).stdout.trim()).toBe(homeUrl);
 	});

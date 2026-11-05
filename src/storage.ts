@@ -290,8 +290,7 @@ export class FsStorage implements SedimentreeStorage {
 	}
 }
 
-// Copy every document of a repo's own store into `to`, and convert its flat sent records
-// (sent/<hex id>, the server on the first line) to the per-server layout.
+// Copy every document of a repo's own store into `to`, and convert its flat sent records.
 export async function importStore(fromRoot: string, to: FsStorage): Promise<{ docs: number }> {
 	const from = await FsStorage.open(fromRoot);
 	const ids = await from.loadAllSedimentreeIds();
@@ -303,6 +302,14 @@ export async function importStore(fromRoot: string, to: FsStorage): Promise<{ do
 			fragments.map(f => ({ fragmentHead: f.signed.payload.head, signedFragment: f.signed, blob: f.blob })),
 		);
 	}
+	await convertSent(fromRoot, to);
+	return { docs: ids.length };
+}
+
+// Version 6 kept sent records flat (sent/<hex id>, the server on the first line); write them
+// into `to` per server. `remove` is for a store converted in place: the flat files go once
+// converted, since they'd sit among the per-server directories.
+export async function convertSent(fromRoot: string, to: FsStorage, { remove = false } = {}): Promise<void> {
 	const sent = path.join(fromRoot, "sent");
 	const entries = await fs.readdir(sent, { withFileTypes: true }).catch(e => {
 		if (e.code === "ENOENT") return [];
@@ -311,8 +318,9 @@ export async function importStore(fromRoot: string, to: FsStorage): Promise<{ do
 	for (const entry of entries) {
 		// directories are already per-server
 		if (!entry.isFile() || !isId(entry.name)) continue;
-		const [server, ...heads] = (await fs.readFile(path.join(sent, entry.name), "utf8")).split("\n").filter(Boolean);
+		const file = path.join(sent, entry.name);
+		const [server, ...heads] = (await fs.readFile(file, "utf8")).split("\n").filter(Boolean);
 		if (server) await to.saveSent(SedimentreeId.fromBytes(new Uint8Array(Buffer.from(entry.name, "hex"))), server, heads.filter(isId));
+		if (remove) await fs.rm(file);
 	}
-	return { docs: ids.length };
 }
