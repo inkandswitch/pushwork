@@ -11,7 +11,7 @@ import {
 	SignedLooseCommit,
 	Subduction,
 } from "@automerge/automerge-subduction";
-import { FsStorage } from "../../src/storage.js";
+import { FsStorage, importStore } from "../../src/storage.js";
 
 let root: string;
 const seed = crypto.getRandomValues(new Uint8Array(32));
@@ -35,11 +35,11 @@ doc = A.change(A.merge(a, b), d => {
 });
 const changes = A.getAllChanges(doc).map(bytes => ({ bytes, ...A.decodeChange(bytes) }));
 
-async function walk(dir: string): Promise<string[]> {
+async function walk(dir: string, base = dir): Promise<string[]> {
 	const out: string[] = [];
 	for (const e of await fs.readdir(dir, { withFileTypes: true })) {
 		const p = path.join(dir, e.name);
-		out.push(...(e.isDirectory() ? await walk(p) : [path.relative(root, p)]));
+		out.push(...(e.isDirectory() ? await walk(p, base) : [path.relative(base, p)]));
 	}
 	return out.sort();
 }
@@ -160,15 +160,40 @@ describe("FsStorage", () => {
 		expect(await storage.containsSedimentreeId(sid())).toBe(false);
 		expect(await storage.loadAllSedimentreeIds()).toHaveLength(0);
 	});
-	it("remembers the fragment heads a server holds, for that server only", async () => {
+	it("remembers the fragment heads each server holds, separately", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-sent-"));
 		const storage = await FsStorage.open(dir);
-		expect(await storage.loadSent(sid(), "ws://a")).toEqual([]);
-		const heads = ["00" + "a".repeat(62), "00" + "b".repeat(62)];
-		await storage.saveSent(sid(), "ws://a", heads);
-		expect(await (await FsStorage.open(dir)).loadSent(sid(), "ws://a")).toEqual(heads);
-		expect(await storage.loadSent(sid(), "ws://b")).toEqual([]);
-		expect(await storage.loadAllSedimentreeIds()).toHaveLength(0);
+		const a = ["00" + "a".repeat(62)];
+		const b = ["00" + "b".repeat(62)];
+		await storage.saveSent(sid(), "ws://a", a);
+		await storage.saveSent(sid(), "ws://b", b);
+		const again = await FsStorage.open(dir);
+		expect(await again.loadSent(sid(), "ws://a")).toEqual(a);
+		expect(await again.loadSent(sid(), "ws://b")).toEqual(b);
+		expect(await again.loadSent(sid(), "ws://c")).toEqual([]);
+		await again.deleteSedimentreeId(sid());
+		expect(await again.loadSent(sid(), "ws://a")).toEqual([]);
 		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("imports a repo store, converting its sent records", async () => {
+		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-from-"));
+		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-to-"));
+		const from = await FsStorage.open(dirA);
+		const node = new Subduction({ signer: MemorySigner.fromBytes(seed), storage: from });
+		await node.storeCommit(sid(), CommitId.fromHexString(changes[0].hash), [], changes[0].bytes);
+		node.free();
+		const head = "00" + "c".repeat(62);
+		await fs.mkdir(path.join(dirA, "sent"), { recursive: true });
+		await fs.writeFile(path.join(dirA, "sent", Buffer.from(idBytes).toString("hex")), `ws://x\n${head}\n`);
+		const to = await FsStorage.open(dirB);
+		expect(await importStore(dirA, to)).toEqual({ docs: 1 });
+		expect(await to.loadAllCommits(sid())).toHaveLength(1);
+		expect(await to.loadSent(sid(), "ws://x")).toEqual([head]);
+		const before = await walk(dirB);
+		expect(await importStore(dirA, to)).toEqual({ docs: 1 });
+		expect(await walk(dirB)).toEqual(before);
+		await fs.rm(dirA, { recursive: true, force: true });
+		await fs.rm(dirB, { recursive: true, force: true });
 	});
 });

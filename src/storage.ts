@@ -17,6 +17,8 @@ import { log } from "./log";
 
 const debug = log("storage");
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+// one directory per server under sent/; a short hash keeps urls out of file names
+const serverKey = (server: string) => hex(blake3(new TextEncoder().encode(server))).slice(0, 16);
 const isId = (name: string) => /^[0-9a-f]{64}$/.test(name);
 
 // Signed<T> is schema(4) | issuer(32) | fields | signature(64); files are named by blake3(schema | fields)
@@ -90,6 +92,8 @@ function verify<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T, 
 const decodeCommit = (meta: Uint8Array) => SignedLooseCommit.tryDecode(meta);
 const decodeFragment = (meta: Uint8Array) => SignedFragment.tryDecode(meta);
 
+const gone = Symbol("gone");
+
 let nonce = 0;
 
 export class FsStorage implements SedimentreeStorage {
@@ -114,13 +118,13 @@ export class FsStorage implements SedimentreeStorage {
 	}
 
 	// outside trees/, so the layout stays the Rust crate's
-	private sentFile(id: SedimentreeId) {
-		return path.join(this.root, "sent", hex(id.toBytes()));
+	private sentFile(id: SedimentreeId, server: string) {
+		return path.join(this.root, "sent", serverKey(server), hex(id.toBytes()));
 	}
 
 	// the fragment heads a server is known to hold (see Docs.layout); the first line is the server
 	async loadSent(id: SedimentreeId, server: string): Promise<string[]> {
-		const text = await fs.readFile(this.sentFile(id), "utf8").catch(e => {
+		const text = await fs.readFile(this.sentFile(id, server), "utf8").catch(e => {
 			if (e.code === "ENOENT") return "";
 			throw e;
 		});
@@ -129,7 +133,7 @@ export class FsStorage implements SedimentreeStorage {
 	}
 
 	async saveSent(id: SedimentreeId, server: string, heads: string[]) {
-		const file = this.sentFile(id);
+		const file = this.sentFile(id, server);
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		const tmp = `${file}.${process.pid}-${nonce++}.tmp`;
 		await writeSynced(tmp, new TextEncoder().encode([server, ...heads].join("\n") + "\n"));
@@ -150,13 +154,19 @@ export class FsStorage implements SedimentreeStorage {
 		await fsyncDir(path.dirname(dir));
 	}
 
-	private async read<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T): Promise<[T, Uint8Array] | null> {
+	// null when there is no valid item; `gone` when compaction deleted it between the listing and the read
+	private async read<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T): Promise<[T, Uint8Array] | null | typeof gone> {
 		const found = await stem(dir);
 		if (found === undefined) return null;
 		const file = path.join(dir, found);
-		const blob = await fs.readFile(`${file}.blob`);
-		const signed = verify(dir, decode, await fs.readFile(`${file}.meta`), blob);
-		return signed && [signed, blob];
+		try {
+			const blob = await fs.readFile(`${file}.blob`);
+			const signed = verify(dir, decode, await fs.readFile(`${file}.meta`), blob);
+			return signed && [signed, blob];
+		} catch (e: any) {
+			if (e.code === "ENOENT") return gone;
+			throw e;
+		}
 	}
 
 	// only ids with a complete pair: an interrupted write leaves an empty directory behind
@@ -168,7 +178,10 @@ export class FsStorage implements SedimentreeStorage {
 
 	private async readAll<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T) {
 		const items = await Promise.all((await names(dir)).filter(isId).map(name => this.read(path.join(dir, name), decode)));
-		return items.filter(item => item !== null);
+		return {
+			found: items.filter(item => item !== null && item !== gone),
+			vanished: items.includes(gone),
+		};
 	}
 
 	private async clear(dir: string) {
@@ -183,7 +196,8 @@ export class FsStorage implements SedimentreeStorage {
 
 	async deleteSedimentreeId(id: SedimentreeId) {
 		await fs.rm(this.tree(id), { recursive: true, force: true });
-		await fs.rm(this.sentFile(id), { force: true });
+		const sent = path.join(this.root, "sent");
+		await Promise.all((await names(sent)).map(server => fs.rm(path.join(sent, server, hex(id.toBytes())), { force: true })));
 	}
 
 	async containsSedimentreeId(id: SedimentreeId) {
@@ -209,7 +223,7 @@ export class FsStorage implements SedimentreeStorage {
 
 	async loadCommit(id: SedimentreeId, commitId: CommitId) {
 		const item = await this.read(path.join(this.commits(id), commitId.toHexString()), decodeCommit);
-		return item && new CommitWithBlob(...item);
+		return item && item !== gone ? new CommitWithBlob(...item) : null;
 	}
 
 	listCommitIds(id: SedimentreeId) {
@@ -217,7 +231,7 @@ export class FsStorage implements SedimentreeStorage {
 	}
 
 	async loadAllCommits(id: SedimentreeId) {
-		return (await this.readAll(this.commits(id), decodeCommit)).map(item => new CommitWithBlob(...item));
+		return (await this.readAll(this.commits(id), decodeCommit)).found.map(item => new CommitWithBlob(...item));
 	}
 
 	async deleteCommit(id: SedimentreeId, commitId: CommitId) {
@@ -236,7 +250,7 @@ export class FsStorage implements SedimentreeStorage {
 
 	async loadFragment(id: SedimentreeId, head: CommitId) {
 		const item = await this.read(path.join(this.fragments(id), head.toHexString()), decodeFragment);
-		return item && new FragmentWithBlob(...item);
+		return item && item !== gone ? new FragmentWithBlob(...item) : null;
 	}
 
 	listFragmentIds(id: SedimentreeId) {
@@ -244,7 +258,11 @@ export class FsStorage implements SedimentreeStorage {
 	}
 
 	async loadAllFragments(id: SedimentreeId) {
-		return (await this.readAll(this.fragments(id), decodeFragment)).map(item => new FragmentWithBlob(...item));
+		const dir = this.fragments(id);
+		let all = await this.readAll(dir, decodeFragment);
+		// a fragment only vanishes once compaction has written the one replacing it, so list again
+		if (all.vanished) all = await this.readAll(dir, decodeFragment);
+		return all.found.map(item => new FragmentWithBlob(...item));
 	}
 
 	async deleteFragment(id: SedimentreeId, head: CommitId) {
@@ -269,4 +287,31 @@ export class FsStorage implements SedimentreeStorage {
 		await this.saveSedimentreeId(id);
 		return items.length;
 	}
+}
+
+// Copy every document of a repo's own store into `to`, and convert its flat sent records
+// (sent/<hex id>, the server on the first line) to the per-server layout.
+export async function importStore(fromRoot: string, to: FsStorage): Promise<{ docs: number }> {
+	const from = await FsStorage.open(fromRoot);
+	const ids = await from.loadAllSedimentreeIds();
+	for (const id of ids) {
+		const [commits, fragments] = await Promise.all([from.loadAllCommits(id), from.loadAllFragments(id)]);
+		await to.saveBatchAll(
+			id,
+			commits.map(c => ({ commitId: c.signed.payload.commitId, signedCommit: c.signed, blob: c.blob })),
+			fragments.map(f => ({ fragmentHead: f.signed.payload.head, signedFragment: f.signed, blob: f.blob })),
+		);
+	}
+	const sent = path.join(fromRoot, "sent");
+	const entries = await fs.readdir(sent, { withFileTypes: true }).catch(e => {
+		if (e.code === "ENOENT") return [];
+		throw e;
+	});
+	for (const entry of entries) {
+		// directories are already per-server
+		if (!entry.isFile() || !isId(entry.name)) continue;
+		const [server, ...heads] = (await fs.readFile(path.join(sent, entry.name), "utf8")).split("\n").filter(Boolean);
+		if (server) await to.saveSent(SedimentreeId.fromBytes(new Uint8Array(Buffer.from(entry.name, "hex"))), server, heads.filter(isId));
+	}
+	return { docs: ids.length };
 }
