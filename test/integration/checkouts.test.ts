@@ -68,6 +68,17 @@ describe("checkouts", () => {
 		expect(await readText(notes(b))).toBe("ONE\ntwo\nTHREE\n");
 	});
 
+	it("save leaves out what another checkout already synced", async () => {
+		await edit(a, 1, "ONE");
+		await pushwork(["sync"], a);
+		await edit(b, 3, "THREE");
+		await pushwork(["save"], b);
+		expect(await line(b, 1)).toBe("one");
+		expect(await porcelainStatus(b)).toBe("");
+		await pushwork(["sync"], b);
+		expect(await readText(notes(b))).toBe("ONE\ntwo\nTHREE\n");
+	});
+
 	it("two checkouts can sync at the same moment", async () => {
 		await edit(a, 1, "ONE");
 		await edit(b, 3, "THREE");
