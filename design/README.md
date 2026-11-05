@@ -21,7 +21,7 @@ block-beta
     Commands["Commands<br/>(init · clone · sync · save · status · diff · yoink · yeet · cut · paste)"]
     Shapes["Shapes<br/>(VfsNode ⇄ Automerge docs)"]
     Docs["Docs<br/>(find · create · change · save · sync · compact)"]
-    Subduction["Subduction<br/>(FsStorage · one server connection)"]
+    Subduction["Subduction<br/>(FsStorage in ~/.pushwork · one server connection)"]
 ```
 
 ## Core Model
@@ -37,6 +37,8 @@ automerge:<root>                      ← the repo's identity
   │     └── file doc "cli.js"  (heads-pinned link)
   └── file doc "README.md"
 ```
+
+Documents live in one store per machine, `~/.pushwork/storage`. Each checkout records the heads it last saw in `.pushwork/heads.json`, so two checkouts of one URL stay independent until one of them syncs.
 
 Sync is a decode → diff → encode cycle:
 

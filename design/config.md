@@ -1,12 +1,12 @@
 # Config
 
-Per-repo configuration lives at `.pushwork/config.json`; document storage lives at `.pushwork/storage/`.
+Per-repo configuration lives at `.pushwork/config.json`. Documents live in one store per machine, `~/.pushwork/storage/`, shared by every checkout. Each checkout keeps `.pushwork/heads.json` and `.pushwork/checkout.lock` of its own.
 
-## Format (version 6)
+## Format (version 7)
 
 ```json
 {
-	"version": 6,
+	"version": 7,
 	"rootUrl": "automerge:...",
 	"shape": "vfs",
 	"artifactDirectories": ["dist"],
@@ -29,9 +29,36 @@ Whether a repo is keyhive-protected follows from its root id: protected ids are 
 
 `readConfig` strips heads from `rootUrl`, because the root is always opened live so sync can change it.
 
+## Checkout state
+
+`.pushwork/heads.json` holds the heads this checkout last saw of each document:
+
+```json
+{ "version": 1, "heads": { "<documentId>": ["<hex>", "..."] } }
+```
+
+It is written to a temporary file and renamed into place, and only after the documents it names are saved to the store. Without it, every document is read live. A corrupt file is an error that says to delete it and run `pushwork sync`.
+
+`.pushwork/checkout.lock` holds the pid of the process using the checkout. A second command fails and names that pid; a lock left by a dead process is taken over. `status`, `diff` and `heads` don't take it; everything else that opens a repo does.
+
 ## Older versions
 
-A config with any other version throws, pointing at `pushwork migrate`. `readOldConfig` reads the root URL, shape and artifact directories from every earlier layout (the original pushwork's `root_directory_url` or `snapshot.json`, and pushwork 2's versions 1–5). `migrate` then:
+A config with any other version throws, pointing at `pushwork migrate`.
+
+### Version 6
+
+`migrate` on a version 6 repo works offline:
+
+1. imports `.pushwork/storage` into `~/.pushwork/storage`, converting the old flat `sent/` files to one directory per server;
+2. writes `heads.json`;
+3. moves the old storage to `.pushwork/pushwork_migration_backup_safe_to_delete/storage-v6`;
+4. writes config version 7.
+
+If any step fails, it rolls back to a working version 6 repo. A version 6 checkout rooted at the home directory, whose `.pushwork/storage` is the machine store, is converted in place. `migrate --sync-server` on a version 6 repo records that server.
+
+### Earlier versions
+
+`readOldConfig` reads the root URL, shape and artifact directories from every earlier layout (the original pushwork's `root_directory_url` or `snapshot.json`, and pushwork 2's versions 1–5). `migrate` then:
 
 1. moves everything in `.pushwork/` to `.pushwork/pushwork_migration_backup_safe_to_delete/`, since the old storage can't be read without automerge-repo;
 2. tracks the root URL, as `pushwork track` does, writing a current config and fetching the tree into fresh storage;

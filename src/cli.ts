@@ -315,7 +315,7 @@ attachCommand(
 
 program
 	.command("migrate")
-	.description("Upgrade a pushwork 2 repo in place (the old .pushwork is kept in .pushwork/pushwork_migration_backup_safe_to_delete)")
+	.description("Upgrade a pushwork 2 or v6 repo in place (the old .pushwork or storage is kept in .pushwork/pushwork_migration_backup_safe_to_delete)")
 	.option("--sync-server <url>", "Sync server for document data, saved in the repo's config")
 	.action(async (opts) => {
 		const root = process.cwd();
