@@ -320,7 +320,7 @@ program
 	.action(async (opts) => {
 		const root = process.cwd();
 		out.intro("pushwork migrate");
-		out.task("Connecting to sync server");
+		out.task("Migrating");
 		const info = await migrate(root, { syncServer: opts.syncServer }, report);
 		out.done();
 		out.obj(summaryRows(root, info, "tracked"));

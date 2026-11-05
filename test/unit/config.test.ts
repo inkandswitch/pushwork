@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { CONFIG_VERSION, readConfig, readOldConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
+import { CONFIG_VERSION, readConfig, readConfigV6, readOldConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
 
 const url = "automerge:qLoujReChD4mrphFKSHcteTf7m";
 
@@ -60,6 +60,7 @@ describe("config", () => {
 			artifactDirectories: ["out"],
 		});
 		expect(await readOldConfig(root)).toEqual({
+			version: 5,
 			rootUrl: url,
 			shape: "patchwork-folder",
 			artifactDirectories: ["out"],
@@ -82,6 +83,20 @@ describe("config", () => {
 			JSON.stringify({ rootDirectoryUrl: url }),
 		);
 		expect((await readOldConfig(root))?.rootUrl).toBe(url);
+	});
+
+	it("reads a v6 config for migrate, checking it as a current one", async () => {
+		const root = await withConfig({ version: 6, rootUrl: url, shape: "vfs", syncServer: "ws://x" });
+		expect((await readOldConfig(root))?.version).toBe(6);
+		expect(await readConfigV6(root)).toEqual({
+			version: CONFIG_VERSION,
+			rootUrl: url,
+			shape: "vfs",
+			artifactDirectories: [],
+			syncServer: "ws://x",
+		});
+		await expect(readConfigV6(await withConfig({ version: 6, rootUrl: url }))).rejects.toThrow("missing shape");
+		await expect(readConfigV6(await withConfig({ version: 5, rootUrl: url, shape: "vfs" }))).rejects.toThrow("version 6");
 	});
 
 	it("has nothing to migrate in a current config", async () => {

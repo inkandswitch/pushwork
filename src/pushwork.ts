@@ -5,8 +5,10 @@ import { MemoryStorage } from "@automerge/automerge-subduction";
 import {
 	CONFIG_VERSION,
 	configExists,
+	legacyStorageDir,
 	pushworkDir,
 	readConfig,
+	readConfigV6,
 	readOldConfig,
 	storeDir,
 	writeConfig,
@@ -23,7 +25,7 @@ import { ATTRIBUTES_FILE, readAttributes } from "./attributes.js";
 import { byteEq, walkDir, writeFileMkdir, type FileTree } from "./fs-tree.js";
 import { loadSeed, signerFrom } from "./key.js";
 import { log } from "./log.js";
-import { FsStorage } from "./storage.js";
+import { FsStorage, importStore } from "./storage.js";
 import { readUrlAttr, writeUrlAttrs } from "./xattr.js";
 import {
 	encodeHeads,
@@ -853,7 +855,9 @@ export const clone = (opts: CloneOpts, report: Reporter = noReport) =>
 export const MIGRATION_BACKUP = "pushwork_migration_backup_safe_to_delete";
 
 /**
- * Upgrade a pushwork 2 repo in place. The old `.pushwork` contents move to
+ * Upgrade an older repo in place. A pushwork 3 repo from before the machine store
+ * (config version 6) moves its documents there, offline; see migrateStore.
+ * For a pushwork 2 repo, the old `.pushwork` contents move to
  * `.pushwork/${MIGRATION_BACKUP}/`, then the root url is tracked afresh.
  * Nothing is pushed: the next `sync` publishes whatever differs, so check `status` first.
  */
@@ -865,6 +869,10 @@ export async function migrate(
 	const root = path.resolve(cwd);
 	const old = await readOldConfig(root);
 	if (!old) throw new Error("this repo is already up to date");
+	if (old.version === 6) {
+		const config = await readConfigV6(root);
+		return migrateStore(root, opts.syncServer ? { ...config, syncServer: opts.syncServer } : config);
+	}
 	const dir = pushworkDir(root);
 	const backup = path.join(dir, MIGRATION_BACKUP);
 	const moved = (await fs.readdir(dir)).filter((name) => name !== MIGRATION_BACKUP);
@@ -889,6 +897,58 @@ export async function migrate(
 		throw e;
 	}
 }
+
+// Version 6 kept each checkout's documents in its own .pushwork/storage. They're copied into
+// the machine store, the checkout's heads are recorded as they stood there, and the old
+// storage goes into the backup folder. Nothing is fetched or pushed. On failure the
+// checkout is left a version 6 repo, as it was, so migrate can be run again.
+async function migrateStore(root: string, config: PushworkConfig): Promise<RepoSummary> {
+	const legacy = legacyStorageDir(root);
+	const backupDir = path.join(pushworkDir(root), MIGRATION_BACKUP);
+	const backup = path.join(backupDir, "storage");
+	// a checkout at the home directory kept its documents where the machine store is now
+	const inPlace = await sameDir(legacy, storeDir());
+	const unlock = await lockCheckout(root);
+	let madeBackupDir: string | undefined;
+	let moved = false;
+	try {
+		if (!inPlace) await importStore(legacy, await FsStorage.open(storeDir()));
+		const seed = await loadSeed();
+		const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), true) : undefined;
+		let summary: RepoSummary;
+		try {
+			const docs = await openDocs(root, seed, undefined, hive);
+			try {
+				const files = await readSaved(docs, await resolveShape(config.shape), config.rootUrl);
+				await saveHeads(root, docs);
+				summary = { url: config.rootUrl, files: files.size, sync: await summarize(docs, config.rootUrl) };
+			} finally {
+				await docs.close();
+			}
+		} finally {
+			await hive?.close();
+		}
+		if (!inPlace) {
+			madeBackupDir = await fs.mkdir(backupDir, { recursive: true });
+			await fs.rename(legacy, backup);
+			moved = true;
+		}
+		await writeConfig(root, { ...config, version: CONFIG_VERSION });
+		return summary;
+	} catch (e) {
+		await fs.rm(headsFile(root), { force: true });
+		if (moved) await fs.rename(backup, legacy);
+		if (madeBackupDir) await fs.rmdir(madeBackupDir);
+		throw e;
+	} finally {
+		await unlock();
+	}
+}
+
+const sameDir = async (a: string, b: string): Promise<boolean> => {
+	const real = (p: string) => fs.realpath(p).catch(() => path.resolve(p));
+	return (await real(a)) === (await real(b));
+};
 
 /** Follow `opts.url` from `opts.dir` without touching the files in it. */
 export const track = (opts: CloneOpts, report: Reporter = noReport) =>

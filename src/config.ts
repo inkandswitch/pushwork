@@ -44,8 +44,8 @@ type OldConfig = {
 
 export type Migratable = { rootUrl: string; shape: string; artifactDirectories?: string[] };
 
-/** What `pushwork migrate` needs from a pre-v6 config, or undefined if it's current. */
-export async function readOldConfig(root: string): Promise<Migratable | undefined> {
+/** What `pushwork migrate` needs from an older config, and its version, or undefined if it's current. */
+export async function readOldConfig(root: string): Promise<(Migratable & { version?: number }) | undefined> {
 	const old: OldConfig = JSON.parse(await fs.readFile(path.join(root, DIR, CONFIG), "utf8"));
 	if (old.version === CONFIG_VERSION) return undefined;
 	const original = old.version === undefined && old.rootUrl === undefined;
@@ -57,6 +57,7 @@ export async function readOldConfig(root: string): Promise<Migratable | undefine
 	const rootUrl = old.rootUrl ?? old.root_directory_url ?? (await snapshotRootUrl(root));
 	if (!rootUrl) throw new Error("old pushwork config has no root url");
 	return {
+		version: old.version,
 		rootUrl,
 		shape: old.shape ?? (original ? "patchwork-folder" : "vfs"),
 		artifactDirectories: old.artifactDirectories ?? old.artifact_directories,
@@ -73,12 +74,14 @@ async function snapshotRootUrl(root: string): Promise<string | undefined> {
 	}
 }
 
-export async function readConfig(root: string): Promise<PushworkConfig> {
-	const text = await fs.readFile(path.join(root, DIR, CONFIG), "utf8").catch(e => {
+const readConfigFile = (root: string): Promise<string> =>
+	fs.readFile(path.join(root, DIR, CONFIG), "utf8").catch(e => {
 		if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
 		throw new Error(`not a pushwork repo: ${root} has no ${DIR}/${CONFIG} (run this inside one, or \`pushwork init\` here)`);
 	});
-	const parsed = JSON.parse(text);
+
+export async function readConfig(root: string): Promise<PushworkConfig> {
+	const parsed = JSON.parse(await readConfigFile(root));
 	if (parsed.version === 6) {
 		throw new Error("pushwork config version 6 is from an older pushwork 3 — run `pushwork migrate`");
 	}
@@ -87,6 +90,17 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 			`pushwork config version ${parsed.version ?? "(none)"} is from pushwork 2 — run \`pushwork migrate\``,
 		);
 	}
+	return checkConfig(parsed);
+}
+
+/** A version 6 config, for `pushwork migrate`; its fields are the same as now. */
+export async function readConfigV6(root: string): Promise<PushworkConfig> {
+	const parsed = JSON.parse(await readConfigFile(root));
+	if (parsed.version !== 6) throw new Error(`expected pushwork config version 6, got ${parsed.version ?? "(none)"}`);
+	return checkConfig(parsed);
+}
+
+function checkConfig(parsed: any): PushworkConfig {
 	if (!parsed.rootUrl) throw new Error("pushwork config missing rootUrl");
 	if (!parsed.shape) throw new Error("pushwork config missing shape");
 	if (parsed.keyhiveVersion !== undefined && !isKeyhiveVersion(parsed.keyhiveVersion)) {
