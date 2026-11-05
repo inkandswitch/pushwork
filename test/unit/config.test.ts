@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { readConfig, readOldConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
+import { CONFIG_VERSION, readConfig, readOldConfig, writeConfig, type PushworkConfig } from "../../src/config.js";
 
 const url = "automerge:qLoujReChD4mrphFKSHcteTf7m";
 
@@ -14,10 +14,10 @@ async function withConfig(config: object): Promise<string> {
 }
 
 describe("config", () => {
-	it("writes and reads v6", async () => {
+	it("writes and reads the current version", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pushwork-config-"));
 		const config: PushworkConfig = {
-			version: 6,
+			version: CONFIG_VERSION,
 			rootUrl: url,
 			shape: "vfs",
 			artifactDirectories: ["dist"],
@@ -30,7 +30,7 @@ describe("config", () => {
 	});
 
 	it("strips heads from the root url", async () => {
-		const root = await withConfig({ version: 6, rootUrl: `${url}#abc`, shape: "vfs" });
+		const root = await withConfig({ version: CONFIG_VERSION, rootUrl: `${url}#abc`, shape: "vfs" });
 		const config = await readConfig(root);
 		expect(config.rootUrl).toBe(url);
 		expect(config.artifactDirectories).toEqual([]);
@@ -44,6 +44,11 @@ describe("config", () => {
 	it("points old configs at migrate", async () => {
 		const root = await withConfig({ version: 5, rootUrl: url, backend: "subduction", shape: "vfs" });
 		await expect(readConfig(root)).rejects.toThrow("run `pushwork migrate`");
+	});
+
+	it("points v6 configs at migrate", async () => {
+		const root = await withConfig({ version: 6, rootUrl: url, shape: "vfs" });
+		await expect(readConfig(root)).rejects.toThrow("config version 6 is from an older pushwork 3 — run `pushwork migrate`");
 	});
 
 	it("reads what migrate needs from a v5 config", async () => {
@@ -79,8 +84,8 @@ describe("config", () => {
 		expect((await readOldConfig(root))?.rootUrl).toBe(url);
 	});
 
-	it("has nothing to migrate in a v6 config", async () => {
-		const root = await withConfig({ version: 6, rootUrl: url, shape: "vfs" });
+	it("has nothing to migrate in a current config", async () => {
+		const root = await withConfig({ version: CONFIG_VERSION, rootUrl: url, shape: "vfs" });
 		expect(await readOldConfig(root)).toBeUndefined();
 	});
 

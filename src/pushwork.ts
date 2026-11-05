@@ -8,10 +8,11 @@ import {
 	pushworkDir,
 	readConfig,
 	readOldConfig,
-	storageDir,
+	storeDir,
 	writeConfig,
 	type PushworkConfig,
 } from "./config.js";
+import { headsFile, lockCheckout, readHeads, writeHeads } from "./checkout.js";
 import { Docs, DocumentUnreadable, type SyncReport } from "./docs.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
 import type { Grantee, Member, PublicPair } from "./keyhive/common.js";
@@ -33,6 +34,7 @@ import {
 	stripHeads,
 	toSedimentreeId,
 	type AutomergeUrl,
+	type DocumentId,
 } from "./url.js";
 import {
 	appendSnarf,
@@ -140,18 +142,20 @@ export type Change = {
 };
 
 async function openDocs(
-	root: string,
+	_root: string, // every checkout opens the one store on this machine
 	seed: Uint8Array,
 	server?: string,
 	hive?: Hive,
 	group?: string,
+	base?: Map<DocumentId, string[]>,
 ): Promise<Docs> {
 	const docs = await Docs.open({
-		storage: await FsStorage.open(storageDir(root)),
+		storage: await FsStorage.open(storeDir()),
 		signer: signerFrom(seed),
 		server,
 		codec: hive?.codec,
 		newId: group ? hive!.newId(group) : undefined,
+		base,
 	});
 	// keyhive talks to its own server when documents sync elsewhere
 	if (hive && docs.online && hive.server !== server) await docs.connect(hive.server);
@@ -534,12 +538,11 @@ export async function checkAccess(url: AutomergeUrl, opts: KeyhiveServerOpts & {
 async function openKeyhiveRepo(cwd: string) {
 	const repo = await openRepo(cwd, { online: true });
 	if (!repo.hive) {
-		await repo.docs.close();
+		await repo.close();
 		throw new Error("not a keyhive repo");
 	}
 	if (!repo.group) {
-		await repo.docs.close();
-		await repo.hive.close();
+		await repo.close();
 		throw new Error("this machine's keyhive doesn't know this repo's group");
 	}
 	return repo as typeof repo & { hive: Hive; group: string };
@@ -547,7 +550,7 @@ async function openKeyhiveRepo(cwd: string) {
 
 // change one membership, then publish it to the keyhive server
 async function setRepoAccess(cwd: string, who: Grantee, level: AccessLevel | "none"): Promise<void> {
-	const { docs, hive, group } = await openKeyhiveRepo(cwd);
+	const { docs, hive, group, close } = await openKeyhiveRepo(cwd);
 	try {
 		if (!docs.online) throw new Error(`could not connect to ${hive.server}: ${docs.report().error}`);
 		await hive.setAccess(group, who, level);
@@ -559,8 +562,7 @@ async function setRepoAccess(cwd: string, who: Grantee, level: AccessLevel | "no
 		}
 		await syncAll(docs, hive);
 	} finally {
-		await docs.close();
-		await hive.close();
+		await close();
 	}
 }
 
@@ -584,7 +586,7 @@ export type AccessEntry = Member & { name?: string; you: boolean; server: boolea
 
 /** Who has access to this keyhive repo, named from contacts where possible. */
 export async function repoAccess(cwd: string): Promise<AccessEntry[]> {
-	const { config, docs, hive, group } = await openKeyhiveRepo(cwd);
+	const { config, docs, hive, group, close } = await openKeyhiveRepo(cwd);
 	try {
 		// pick up membership changes made elsewhere first
 		if (docs.online) await hive.sync(docs);
@@ -599,8 +601,7 @@ export async function repoAccess(cwd: string): Promise<AccessEntry[]> {
 			server: m.id === server,
 		}));
 	} finally {
-		await docs.close();
-		await hive.close();
+		await close();
 	}
 }
 
@@ -609,16 +610,38 @@ async function writeKeyhiveSettings(settings: Settings): Promise<void> {
 	await fs.writeFile(settingsFile(), JSON.stringify(settings, null, 2) + "\n");
 }
 
-// a reader (status, diff, cut...) changes no docs, so it leaves the keyhive archive alone
-async function openRepo(cwd: string, { online = false, reader = false } = {}) {
+// A reader (status, diff, cut...) changes no docs, so it leaves the keyhive archive alone.
+// All but status, diff and heads hold the checkout's lock, which close releases.
+async function openRepo(cwd: string, { online = false, reader = false, lock = true } = {}) {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
-	const seed = await loadSeed();
-	const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), reader) : undefined;
-	const server = online ? (config.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
-	const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
-	const docs = await openDocs(root, seed, server, hive, group);
-	return { root, config, docs, hive, group };
+	const unlock = lock ? await lockCheckout(root) : async () => {};
+	let hive: Hive | undefined;
+	try {
+		const seed = await loadSeed();
+		const base = await readHeads(root);
+		hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), reader) : undefined;
+		const server = online ? (config.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
+		const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
+		const docs = await openDocs(root, seed, server, hive, group, base);
+		const opened = hive;
+		const close = async () => {
+			try {
+				await docs.close();
+				await opened?.close();
+			} finally {
+				await unlock();
+			}
+		};
+		return { root, config, docs, hive, group, close };
+	} catch (e) {
+		try {
+			await hive?.close();
+		} finally {
+			await unlock();
+		}
+		throw e;
+	}
 }
 
 // In a keyhive repo, only those with edit access (and the group, to add docs to) write.
@@ -635,12 +658,8 @@ async function syncAll(docs: Docs, hive?: Hive): Promise<void> {
 }
 
 // The tree as last saved, with every file's bytes. Offline; the caller calls close.
-async function loadSavedTree(cwd: string) {
-	const { root, config, docs, hive } = await openRepo(cwd, { reader: true });
-	const close = async () => {
-		await docs.close();
-		await hive?.close();
-	};
+async function loadSavedTree(cwd: string, { lock = true } = {}) {
+	const { root, config, docs, close } = await openRepo(cwd, { reader: true, lock });
 	try {
 		const shape = await resolveShape(config.shape);
 		const files = await readSaved(docs, shape, config.rootUrl);
@@ -649,6 +668,12 @@ async function loadSavedTree(cwd: string) {
 		await close();
 		throw e;
 	}
+}
+
+// the store first, so heads.json never names a change the store doesn't hold
+async function saveHeads(root: string, docs: Docs): Promise<void> {
+	await docs.save();
+	await writeHeads(root, docs.checkoutHeads());
 }
 
 async function summarize(docs: Docs, url: AutomergeUrl): Promise<SyncSummary> {
@@ -734,6 +759,7 @@ export async function init(
 			...(keyhive ? await keyhiveConfig(keyhive) : {}),
 		});
 		await writeUrlAttrs(root, await readSaved(docs, shape, url));
+		await saveHeads(root, docs);
 		return { url, files: fsFiles.size, sync: await summarize(docs, url) };
 	} finally {
 		await docs.close();
@@ -757,61 +783,67 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 	}
 	await fs.mkdir(pushworkDir(root), { recursive: true });
 
-	const seed = await loadSeed();
-	if (!isKeyhive(url) && (opts.keyhiveServer || opts.keyhiveCard || opts.keyhiveVersion)) {
-		throw new Error("--keyhive-server, --keyhive-card and --keyhive-version only apply to keyhive repos");
-	}
-	const keyhive = isKeyhive(url) ? await keyhiveSettingsFor(opts) : undefined;
-	const hive = keyhive ? await openHive(seed, keyhive) : undefined;
-	const server = opts.syncServer ?? hive?.server ?? DEFAULT_SERVER;
-	const docs = await openDocs(root, seed, server, hive);
+	const unlock = await lockCheckout(root);
 	try {
-		if (!docs.online) {
-			throw new Error(`could not connect to ${server}: ${docs.report().error}`);
+		const seed = await loadSeed();
+		if (!isKeyhive(url) && (opts.keyhiveServer || opts.keyhiveCard || opts.keyhiveVersion)) {
+			throw new Error("--keyhive-server, --keyhive-card and --keyhive-version only apply to keyhive repos");
 		}
-		report("Fetching repository");
-		await hive?.sync(docs);
-		if (hive) {
-			const found = await docs.find(url).then(
-				() => undefined,
-				(e: unknown) => e,
-			);
-			if (found instanceof DocumentUnreadable) {
-				throw new Error(`${url} is a keyhive repo you can pull but not read: you have relay access at most, so its contents can't be decrypted here`);
+		const keyhive = isKeyhive(url) ? await keyhiveSettingsFor(opts) : undefined;
+		const hive = keyhive ? await openHive(seed, keyhive) : undefined;
+		const server = opts.syncServer ?? hive?.server ?? DEFAULT_SERVER;
+		const docs = await openDocs(root, seed, server, hive);
+		try {
+			if (!docs.online) {
+				throw new Error(`could not connect to ${server}: ${docs.report().error}`);
 			}
-			if (found) throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
-		}
-		const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
-		report("Downloading files");
-		const remote = await readSaved(docs, shape, url);
-		const files = remote.size;
-		if (mode === "clone") {
-			await materialize(root, remote);
-		} else if (mode === "merge") {
-			const present = await walk(root);
-			for (const [posixPath, { bytes }] of remote) {
-				if (present.has(posixPath)) continue;
-				await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
+			report("Fetching repository");
+			await hive?.sync(docs);
+			if (hive) {
+				const found = await docs.find(url).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+				if (found instanceof DocumentUnreadable) {
+					throw new Error(`${url} is a keyhive repo you can pull but not read: you have relay access at most, so its contents can't be decrypted here`);
+				}
+				if (found) throw new Error(`${url} is a keyhive repo you don't have access to (or it doesn't exist)`);
 			}
-		}
+			const { shape, shapeName } = await resolveCloneShape(docs, url, root, opts);
+			report("Downloading files");
+			const remote = await readSaved(docs, shape, url);
+			await saveHeads(root, docs);
+			const files = remote.size;
+			if (mode === "clone") {
+				await materialize(root, remote);
+			} else if (mode === "merge") {
+				const present = await walk(root);
+				for (const [posixPath, { bytes }] of remote) {
+					if (present.has(posixPath)) continue;
+					await writeFileMkdir(path.join(root, fromPosix(posixPath)), bytes);
+				}
+			}
 
-		// If the repo carries its own artifact attributes, config.json defers to them.
-		const attrs = await readAttributes(root);
-		const artifactDirs = attrs?.hasArtifactRules
-			? []
-			: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
-		await writeConfig(root, {
-			version: CONFIG_VERSION,
-			rootUrl: url,
-			shape: shapeName,
-			artifactDirectories: artifactDirs,
-			...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
-			...(keyhive ? await keyhiveConfig(keyhive) : {}),
-		});
-		return { url, files, sync: await summarize(docs, url) };
+			// If the repo carries its own artifact attributes, config.json defers to them.
+			const attrs = await readAttributes(root);
+			const artifactDirs = attrs?.hasArtifactRules
+				? []
+				: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
+			await writeConfig(root, {
+				version: CONFIG_VERSION,
+				rootUrl: url,
+				shape: shapeName,
+				artifactDirectories: artifactDirs,
+				...(opts.syncServer ? { syncServer: opts.syncServer } : {}),
+				...(keyhive ? await keyhiveConfig(keyhive) : {}),
+			});
+			return { url, files, sync: await summarize(docs, url) };
+		} finally {
+			await docs.close();
+			await hive?.close();
+		}
 	} finally {
-		await docs.close();
-		await hive?.close();
+		await unlock();
 	}
 }
 
@@ -851,7 +883,7 @@ export async function migrate(
 			report,
 		);
 	} catch (e) {
-		await fs.rm(storageDir(root), { recursive: true, force: true });
+		await fs.rm(headsFile(root), { force: true });
 		for (const name of moved) await fs.rename(path.join(backup, name), path.join(dir, name));
 		await fs.rmdir(backup);
 		throw e;
@@ -872,6 +904,7 @@ export async function merge(
 	report: Reporter = noReport,
 	warn: Warn = noWarn,
 ): Promise<RepoSummary> {
+	// attach lets go of the checkout's lock before commitWorkdir takes it again
 	const { url, files } = await attach(opts, "merge", report);
 	const sync = await commitWorkdir(path.resolve(opts.dir), true, report, warn);
 	return { url, files, sync };
@@ -1027,16 +1060,16 @@ export async function sync(
 	warn: Warn = noWarn,
 ): Promise<SyncSummary> {
 	if (!opts.nuclear) return commitWorkdir(cwd, true, report, warn);
-	const { root, config, docs, hive, group } = await openRepo(cwd, { online: true });
+	const { root, config, docs, hive, group, close } = await openRepo(cwd, { online: true });
 	try {
 		report("Recreating documents");
 		await nuclearize(docs, root, config, hive, group, warn);
+		await saveHeads(root, docs);
 		if (docs.online) report("Publishing to sync server");
 		await syncAll(docs, hive);
 		return await summarize(docs, config.rootUrl);
 	} finally {
-		await docs.close();
-		await hive?.close();
+		await close();
 	}
 }
 
@@ -1045,12 +1078,12 @@ export async function sync(
  * Anyone holding an old file URL keeps it; this repo stops referencing it.
  */
 export async function nuclearizeRepo(cwd: string, warn: Warn = noWarn): Promise<void> {
-	const { root, config, docs, hive, group } = await openRepo(cwd);
+	const { root, config, docs, hive, group, close } = await openRepo(cwd);
 	try {
 		await nuclearize(docs, root, config, hive, group, warn);
+		await saveHeads(root, docs);
 	} finally {
-		await docs.close();
-		await hive?.close();
+		await close();
 	}
 }
 
@@ -1090,7 +1123,7 @@ async function commitWorkdir(
 	report: Reporter,
 	warn: Warn,
 ): Promise<SyncSummary> {
-	const { root, config, docs, hive, group } = await openRepo(cwd, { online });
+	const { root, config, docs, hive, group, close } = await openRepo(cwd, { online });
 	dlog("commit online=%s root=%s", online, root);
 	try {
 		const isArtifact = await resolveIsArtifact(root, config.artifactDirectories, warn);
@@ -1113,6 +1146,8 @@ async function commitWorkdir(
 		if (docs.online) {
 			report("Syncing with server");
 			await syncAll(docs, hive);
+			// this checkout has now seen what the sync brought; pins and the tree follow it
+			docs.advance();
 			if (writable && [...fsFiles.keys()].some(isArtifact)) {
 				const moved = await refreshPins(docs, rootUrl, shape, isArtifact);
 				if (moved.length) await docs.sync(moved);
@@ -1120,10 +1155,10 @@ async function commitWorkdir(
 			report("Writing changes");
 		}
 		await materialize(root, await readSaved(docs, shape, rootUrl));
+		await saveHeads(root, docs);
 		return await summarize(docs, rootUrl);
 	} finally {
-		await docs.close();
-		await hive?.close();
+		await close();
 	}
 }
 
@@ -1138,7 +1173,7 @@ export type HeadsEntry = {
  * path exactly or as a folder prefix; "/" shows only the root doc.
  */
 export async function heads(cwd: string, pathspec?: string): Promise<HeadsEntry[]> {
-	const { config, docs, files, close } = await loadSavedTree(cwd);
+	const { config, docs, files, close } = await loadSavedTree(cwd, { lock: false });
 	try {
 		const entries: HeadsEntry[] = [];
 		const add = async (p: string, url: AutomergeUrl) => {
@@ -1162,8 +1197,8 @@ function matchesPathspec(p: string, spec?: string): boolean {
 }
 
 // Working-tree changes against the saved tree. Offline.
-async function workdirChanges(cwd: string) {
-	const saved = await loadSavedTree(cwd);
+async function workdirChanges(cwd: string, { lock = true } = {}) {
+	const saved = await loadSavedTree(cwd, { lock });
 	try {
 		const current = await walk(saved.root);
 		const moved = await findMoves(saved.root, saved.files, current);
@@ -1175,7 +1210,7 @@ async function workdirChanges(cwd: string) {
 }
 
 export async function status(cwd: string): Promise<{ diff: Diff }> {
-	const { changes, close } = await workdirChanges(cwd);
+	const { changes, close } = await workdirChanges(cwd, { lock: false });
 	await close();
 	const of = (kind: Change["kind"]) => changes.filter((c) => c.kind === kind);
 	const paths = (kind: Change["kind"]) => of(kind).map((c) => c.path);
@@ -1190,7 +1225,7 @@ export async function status(cwd: string): Promise<{ diff: Diff }> {
 }
 
 export async function diff(cwd: string, limitToPath?: string): Promise<Change[]> {
-	const { changes, close } = await workdirChanges(cwd);
+	const { changes, close } = await workdirChanges(cwd, { lock: false });
 	await close();
 	return limitToPath ? changes.filter((c) => c.path === limitToPath || c.from === limitToPath) : changes;
 }
@@ -1231,35 +1266,39 @@ export async function pasteSnarf(
 	selector?: string,
 ): Promise<{ id: number; entries: number; name?: string }> {
 	const { root, changes, close } = await workdirChanges(cwd);
-	await close();
-	if (changes.length > 0) {
-		throw new Error(
-			"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
-		);
-	}
-	const snarf = await takeSnarf(root, selector);
-	if (!snarf) {
-		throw new Error(selector ? `no snarf matches "${selector}"` : "nothing to paste: no snarfs");
-	}
-	for (const entry of snarf.entries) {
-		const rel = fromPosix(entry.path);
-		if (entry.kind === "deleted") {
-			await fs.rm(path.join(root, rel), { force: true });
-			await pruneEmptyDirs(root, path.dirname(rel));
-			continue;
+	// the checkout stays locked until the snarf is on disk
+	try {
+		if (changes.length > 0) {
+			throw new Error(
+				"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
+			);
 		}
-		// a rename is replayed with one, so the file takes its url xattr along
-		if (entry.kind === "renamed" && entry.from) {
-			const from = fromPosix(entry.from);
-			await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
-			await fs.rename(path.join(root, from), path.join(root, rel)).catch(() => {});
-			await pruneEmptyDirs(root, path.dirname(from));
+		const snarf = await takeSnarf(root, selector);
+		if (!snarf) {
+			throw new Error(selector ? `no snarf matches "${selector}"` : "nothing to paste: no snarfs");
 		}
-		if (entry.contentBase64 != null) {
-			await writeFileMkdir(path.join(root, rel), decodeBytes(entry.contentBase64));
+		for (const entry of snarf.entries) {
+			const rel = fromPosix(entry.path);
+			if (entry.kind === "deleted") {
+				await fs.rm(path.join(root, rel), { force: true });
+				await pruneEmptyDirs(root, path.dirname(rel));
+				continue;
+			}
+			// a rename is replayed with one, so the file takes its url xattr along
+			if (entry.kind === "renamed" && entry.from) {
+				const from = fromPosix(entry.from);
+				await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+				await fs.rename(path.join(root, from), path.join(root, rel)).catch(() => {});
+				await pruneEmptyDirs(root, path.dirname(from));
+			}
+			if (entry.contentBase64 != null) {
+				await writeFileMkdir(path.join(root, rel), decodeBytes(entry.contentBase64));
+			}
 		}
+		return { id: snarf.id, name: snarf.name, entries: snarf.entries.length };
+	} finally {
+		await close();
 	}
-	return { id: snarf.id, name: snarf.name, entries: snarf.entries.length };
 }
 
 export async function showSnarfs(cwd: string): Promise<Snarf[]> {

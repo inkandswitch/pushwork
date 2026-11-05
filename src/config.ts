@@ -1,9 +1,10 @@
 import * as fs from "fs/promises";
+import * as os from "os";
 import * as path from "path";
 import { type KeyhiveVersion, isKeyhiveVersion } from "./keyhive/common.js";
 import { stripHeads, type AutomergeUrl } from "./url.js";
 
-export const CONFIG_VERSION = 6;
+export const CONFIG_VERSION = 7;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;
@@ -24,7 +25,10 @@ const CONFIG = "config.json";
 const STORAGE = "storage";
 
 export const pushworkDir = (root: string) => path.join(root, DIR);
-export const storageDir = (root: string) => path.join(root, DIR, STORAGE);
+// where version 6 kept a checkout's documents; only `pushwork migrate` reads it now
+export const legacyStorageDir = (root: string) => path.join(root, DIR, STORAGE);
+/** Every checkout's documents, one store per machine. */
+export const storeDir = () => path.join(os.homedir(), DIR, STORAGE);
 
 // fields of the configs written by pushwork 1 and 2
 type OldConfig = {
@@ -75,6 +79,9 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		throw new Error(`not a pushwork repo: ${root} has no ${DIR}/${CONFIG} (run this inside one, or \`pushwork init\` here)`);
 	});
 	const parsed = JSON.parse(text);
+	if (parsed.version === 6) {
+		throw new Error("pushwork config version 6 is from an older pushwork 3 — run `pushwork migrate`");
+	}
 	if (parsed.version !== CONFIG_VERSION) {
 		throw new Error(
 			`pushwork config version ${parsed.version ?? "(none)"} is from pushwork 2 — run \`pushwork migrate\``,

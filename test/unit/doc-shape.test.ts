@@ -15,7 +15,8 @@ import {
 	type AutomergeUrl,
 	type UnixFileEntry,
 } from "../../src/index.js";
-import { readConfig, storageDir } from "../../src/config.js";
+import { readHeads } from "../../src/checkout.js";
+import { readConfig, storeDir } from "../../src/config.js";
 import { Docs } from "../../src/docs.js";
 import { FsStorage } from "../../src/storage.js";
 import { exists } from "../cli";
@@ -25,7 +26,11 @@ type Link = { name: string; type: string; url: AutomergeUrl };
 type FolderDoc = { docs: Link[] };
 
 async function withDocs<T>(root: string, fn: (docs: Docs) => Promise<T>): Promise<T> {
-	const docs = await Docs.open({ storage: await FsStorage.open(storageDir(root)), signer: MemorySigner.generate() });
+	const docs = await Docs.open({
+		storage: await FsStorage.open(storeDir()),
+		signer: MemorySigner.generate(),
+		base: await readHeads(root),
+	});
 	try {
 		return await fn(docs);
 	} finally {
