@@ -60,11 +60,11 @@ Reads go commits first, then fragments. Compaction in another process can delete
 
 `FsStorage` also keeps `sent/<server-hash>/<hex id>` for each server: the fragment heads that server holds as loose commits.
 
+The current server doesn't compact, so after a client compacts, the next sync may receive the old loose commits again. The result is still correct; it costs bandwidth on documents with long histories.
+
 ## The allowlist
 
 The store holds every document on the machine, and a connected server could ask for any of them. Each `Docs` node runs a deny-by-default Subduction policy (`src/allowlist.ts`): a peer may fetch or push a document only if this run started a sync of that document with that peer. Ephemeral messages are denied. For this reason pushwork never calls anything that talks to every connected peer; `test/unit/no-broadcast.test.ts` bans those calls.
-
-The current server doesn't compact, so after a client compacts, the next sync may receive the old loose commits again. The result is still correct; it costs bandwidth on documents with long histories.
 
 ## Offline commands
 
