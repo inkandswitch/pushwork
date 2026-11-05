@@ -53,6 +53,8 @@ export type DocsOptions = {
 	server?: string;
 	codec?: Codec;
 	newId?: () => Promise<DocumentId>;
+	// the heads this checkout last saw of each doc, which it reads and writes at
+	base?: Map<DocumentId, string[]>;
 };
 
 export type SyncReport = {
@@ -63,11 +65,13 @@ export type SyncReport = {
 	unsynced: AutomergeUrl[];
 };
 
-type Entry = { doc: A.Doc<unknown>; dirty: boolean; touched: boolean };
+// doc is everything the store holds; base, when set, is where this checkout reads and writes
+type Entry = { doc: A.Doc<unknown>; dirty: boolean; touched: boolean; base?: string[] };
 type Result = { ok: boolean; received: boolean; error?: string };
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const bare = (id: DocumentId) => stringifyAutomergeUrl(id);
+const sameHeads = (a: string[], b: string[]) => a.length === b.length && a.every(h => b.includes(h));
 
 function concat(chunks: Uint8Array[]): Uint8Array {
 	const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
@@ -117,6 +121,14 @@ export class DocumentUnreadable extends Error {
 	}
 }
 
+/** The heads this checkout last saw of a document aren't stored here, or on the server. */
+export class MissingBase extends Error {
+	constructor(readonly id: DocumentId) {
+		super(`this checkout's saved state for ${bare(id)} is missing from ~/.pushwork/storage; \`pushwork sync\` fetches it if the server has it`);
+		this.name = "MissingBase";
+	}
+}
+
 // The handshake runs off the node, so one that times out leaves the node free to be freed.
 async function connect(node: Subduction, signer: Signer, server: string): Promise<Connection> {
 	const start = performance.now();
@@ -143,6 +155,8 @@ export class Docs {
 	// docs with a fragment held back until its head reaches the server
 	private waiting = new Set<DocumentId>();
 	private limit = limiter(16);
+	// once set, every doc reads and writes live, and options.base is spent
+	private advanced = false;
 
 	private constructor(
 		readonly node: Subduction,
@@ -183,7 +197,11 @@ export class Docs {
 	async find<T>(url: AutomergeUrl): Promise<A.Doc<T>> {
 		const { documentId, heads } = parseAutomergeUrl(url);
 		const entry = await this.entry(documentId);
-		if (!heads) return entry.doc as A.Doc<T>;
+		if (!heads) {
+			const { base } = entry;
+			if (!base || sameHeads(base, A.getHeads(entry.doc))) return entry.doc as A.Doc<T>;
+			return A.view(entry.doc, base) as A.Doc<T>;
+		}
 		if (!A.hasHeads(entry.doc, heads) && this.online && !this.results.has(documentId)) {
 			await this.syncDoc(documentId);
 		}
@@ -200,7 +218,7 @@ export class Docs {
 		return bare(id);
 	}
 
-	/** Add an empty change to a document, so it has one encrypted under the current keys. */
+	/** Add an empty change to a document, so it has one encrypted under the current keys. It goes on at live, so the base stays. */
 	async touch(url: AutomergeUrl): Promise<void> {
 		const entry = await this.entry(parseAutomergeUrl(url).documentId);
 		entry.doc = A.emptyChange(entry.doc);
@@ -211,6 +229,16 @@ export class Docs {
 		const { documentId, heads } = parseAutomergeUrl(url);
 		if (heads) throw new Error(`cannot change a pinned url: ${url}`);
 		const entry = await this.entry(documentId);
+		// at the base, so a stale checkout's edits merge with what it hasn't seen instead of undoing it
+		if (entry.base) {
+			const { newDoc, newHeads } = A.changeAt(entry.doc as A.Doc<T>, entry.base, fn);
+			entry.doc = newDoc;
+			if (newHeads) {
+				entry.base = newHeads;
+				entry.dirty = true;
+			}
+			return;
+		}
 		const before = A.getHeads(entry.doc).join();
 		entry.doc = A.change(entry.doc as A.Doc<T>, fn);
 		if (A.getHeads(entry.doc).join() !== before) entry.dirty = true;
@@ -222,7 +250,19 @@ export class Docs {
 
 	async pin(url: AutomergeUrl): Promise<AutomergeUrl> {
 		const { documentId } = parseAutomergeUrl(url);
-		return stringifyAutomergeUrl(documentId, A.getHeads((await this.entry(documentId)).doc));
+		const entry = await this.entry(documentId);
+		return stringifyAutomergeUrl(documentId, entry.base ?? A.getHeads(entry.doc));
+	}
+
+	/** Move every loaded doc's base to its live heads; docs loaded from now on read live. */
+	advance(): void {
+		this.advanced = true;
+		for (const entry of this.entries.values()) entry.base = A.getHeads(entry.doc);
+	}
+
+	/** Each loaded doc's base, or its live heads when it has none: what this checkout has seen. */
+	checkoutHeads(): Map<DocumentId, string[]> {
+		return new Map([...this.entries].map(([id, e]) => [id, e.base ?? A.getHeads(e.doc)]));
 	}
 
 	urls(): AutomergeUrl[] {
@@ -292,8 +332,10 @@ export class Docs {
 	}
 
 	private async load(id: DocumentId): Promise<Entry> {
+		const base = this.advanced ? undefined : this.options.base?.get(id);
+		const missing = (doc?: A.Doc<unknown>) => !doc || (base !== undefined && !A.hasHeads(doc, base));
 		let doc = await this.read(id);
-		if (!doc && this.online) {
+		if (missing(doc) && this.online) {
 			await this.syncDoc(id);
 			doc = await this.read(id);
 		}
@@ -302,7 +344,8 @@ export class Docs {
 			const blobs = commits.length + fragments.length;
 			throw blobs ? new DocumentUnreadable(id, blobs) : new DocumentNotFound(id);
 		}
-		const entry = { doc, dirty: false, touched: this.results.get(id)?.received ?? false };
+		if (missing(doc)) throw new MissingBase(id);
+		const entry = { doc, dirty: false, touched: this.results.get(id)?.received ?? false, base };
 		this.entries.set(id, entry);
 		return entry;
 	}
@@ -317,7 +360,9 @@ export class Docs {
 	private async blobs(id: DocumentId): Promise<Uint8Array[]> {
 		const sid = toSedimentreeId(id);
 		const { storage, codec } = this.options;
-		const [commits, fragments] = await Promise.all([storage.loadAllCommits(sid), storage.loadAllFragments(sid)]);
+		// commits first: compaction only deletes a commit once the fragment covering it is stored
+		const commits = await storage.loadAllCommits(sid);
+		const fragments = await storage.loadAllFragments(sid);
 		const items: [string, Uint8Array][] = [
 			...commits.map(c => [c.signed.payload.commitId.toHexString(), c.blob] as [string, Uint8Array]),
 			...fragments.map(f => [f.signed.payload.head.toHexString(), f.blob] as [string, Uint8Array]),

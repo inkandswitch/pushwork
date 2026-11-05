@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as A from "@automerge/automerge";
 import { CommitId, MemorySigner, MemoryStorage, type Policy, type SedimentreeStorage } from "@automerge/automerge-subduction";
-import { Docs, type DocsOptions } from "../../src/docs.js";
+import { Docs, MissingBase, type DocsOptions } from "../../src/docs.js";
 import { FsStorage } from "../../src/storage.js";
 import { newDocumentId, parseAutomergeUrl, stringifyAutomergeUrl, toSedimentreeId, type AutomergeUrl } from "../../src/url.js";
 import { startServer } from "../server.js";
@@ -532,5 +532,183 @@ describe("Docs online", () => {
 		});
 		expect(await b.sync([url])).toMatchObject({ online: true, synced: 1, unsynced: [] });
 		await b.close();
+	});
+});
+
+describe("Docs base", () => {
+	type Doc = { a: number; b?: number };
+
+	// a doc with two changes on disk: h1 sets a to 1, h2 sets it to 2
+	async function twoChanges() {
+		const dir = await tmp();
+		const docs = await open({ storage: await FsStorage.open(dir) });
+		const url = await docs.create<Doc>({ a: 0 });
+		await docs.change<Doc>(url, d => {
+			d.a = 1;
+		});
+		const h1 = await docs.heads(url);
+		await docs.change<Doc>(url, d => {
+			d.a = 2;
+		});
+		const h2 = await docs.heads(url);
+		await docs.close();
+		const id = parseAutomergeUrl(url).documentId;
+		const reopen = async (base?: Map<typeof id, string[]>, o: Partial<DocsOptions> = {}) =>
+			open({ storage: await FsStorage.open(dir), base, ...o });
+		return { url, id, h1, h2, reopen };
+	}
+
+	it("find shows the document at its base", async () => {
+		const { url, id, h1, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		expect(await docs.find<Doc>(url)).toEqual({ a: 1 });
+		expect(await docs.heads(url)).toEqual(h1);
+		await docs.close();
+	});
+
+	it("change writes at the base and moves it", async () => {
+		const { url, id, h1, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		await docs.change<Doc>(url, d => {
+			d.b = 1;
+		});
+		expect(await docs.find<Doc>(url)).toEqual({ a: 1, b: 1 });
+		const heads = await docs.heads(url);
+		expect(heads).toHaveLength(1);
+		docs.advance();
+		const live = await docs.find<Doc>(url);
+		expect(A.inspectChange(live, heads[0])!.deps).toEqual(h1);
+		expect(live).toEqual({ a: 2, b: 1 });
+		await docs.close();
+	});
+
+	it("advance moves every base to live", async () => {
+		const { url, id, h1, h2, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		await docs.change<Doc>(url, d => {
+			d.b = 1;
+		});
+		const [made] = await docs.heads(url);
+		docs.advance();
+		expect([...(await docs.heads(url))].sort()).toEqual([made, ...h2].sort());
+		await docs.close();
+
+		// documents loaded after advance ignore the base they were given
+		const later = await reopen(new Map([[id, h1]]));
+		later.advance();
+		expect(await later.find<Doc>(url)).toEqual({ a: 2, b: 1 });
+		await later.close();
+	});
+
+	it("a document missing from the map reads live", async () => {
+		const { url, h2, reopen } = await twoChanges();
+		const docs = await reopen(new Map());
+		expect(await docs.find<Doc>(url)).toEqual({ a: 2 });
+		expect(await docs.heads(url)).toEqual(h2);
+		await docs.close();
+	});
+
+	it("find returns the live document itself when base is live", async () => {
+		const { url, id, h2, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h2]]));
+		const doc = await docs.find<Doc>(url);
+		expect(await docs.find<Doc>(url)).toBe(doc);
+		const plain = await reopen();
+		const live = await plain.find<Doc>(url);
+		expect(doc).toEqual(live);
+		expect(A.getHeads(doc)).toEqual(A.getHeads(live));
+		await plain.close();
+		await docs.close();
+	});
+
+	it("a missing base head fails offline", async () => {
+		const { url, id, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, ["ab".repeat(32)]]]));
+		await expect(docs.find(url)).rejects.toBeInstanceOf(MissingBase);
+		await expect(docs.find(url)).rejects.toThrow(/missing from ~\/\.pushwork\/storage/);
+		await docs.close();
+	});
+
+	it("pin uses the base", async () => {
+		const { url, id, h1, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		expect(parseAutomergeUrl(await docs.pin(url)).heads).toEqual(h1);
+		await docs.close();
+	});
+
+	it("touch adds its change at live and leaves the base", async () => {
+		const { url, id, h1, h2, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		await docs.touch(url);
+		expect(await docs.heads(url)).toEqual(h1);
+		docs.advance();
+		const [touched] = await docs.heads(url);
+		expect(A.inspectChange(await docs.find(url), touched)!.deps).toEqual(h2);
+		await docs.close();
+	});
+
+	it("checkoutHeads reports base, or live heads without one", async () => {
+		const { url, id, h1, reopen } = await twoChanges();
+		const docs = await reopen(new Map([[id, h1]]));
+		await docs.find(url);
+		const made = await docs.create<Doc>({ a: 5 });
+		const madeId = parseAutomergeUrl(made).documentId;
+		expect(docs.checkoutHeads()).toEqual(
+			new Map([
+				[id, h1],
+				[madeId, await docs.heads(made)],
+			]),
+		);
+		docs.advance();
+		expect(docs.checkoutHeads().get(id)).toEqual(await docs.heads(url));
+		expect(docs.checkoutHeads().get(id)).toHaveLength(1);
+		await docs.close();
+	});
+
+	it("keeps the base when a sync brings changes in", async () => {
+		const server = inject("server");
+		const { url, id, h2, reopen } = await twoChanges();
+		const pusher = await reopen(undefined, { server });
+		expect(await pusher.sync([url])).toMatchObject({ synced: 1, unsynced: [] });
+		await pusher.close();
+
+		const other = await open({ server });
+		await other.find(url);
+		await other.change<Doc>(url, d => {
+			d.a = 3;
+		});
+		await other.sync([url]);
+		await other.close();
+
+		const docs = await reopen(new Map([[id, h2]]), { server });
+		expect(await docs.find<Doc>(url)).toEqual({ a: 2 });
+		expect(await docs.sync([url])).toMatchObject({ synced: 1, unsynced: [] });
+		expect(await docs.find<Doc>(url)).toEqual({ a: 2 });
+		expect(await docs.heads(url)).toEqual(h2);
+		docs.advance();
+		expect(await docs.find<Doc>(url)).toEqual({ a: 3 });
+		await docs.close();
+	});
+
+	it("fetches a base it doesn't have when online", async () => {
+		const server = inject("server");
+		const { url, id, reopen } = await twoChanges();
+		const pusher = await reopen(undefined, { server });
+		await pusher.sync([url]);
+		await pusher.close();
+
+		const other = await open({ server });
+		await other.find(url);
+		await other.change<Doc>(url, d => {
+			d.a = 3;
+		});
+		const h3 = await other.heads(url);
+		await other.sync([url]);
+		await other.close();
+
+		const docs = await reopen(new Map([[id, h3]]), { server });
+		expect(await docs.find<Doc>(url)).toEqual({ a: 3 });
+		expect(await docs.heads(url)).toEqual(h3);
+		await docs.close();
 	});
 });
