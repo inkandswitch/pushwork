@@ -1,0 +1,794 @@
+<title>pushwork machine store</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Merriweather+Sans:wght@300;400;600&display=swap">
+<style>
+/* Layout: one reading column of sheets on a grey page; figures sit inside sheets on the page ground. Tokens from the Patchwork write-ups design system. */
+:root {
+	--page: #f9fafb; --paper: #ffffff; --chrome: #f3f4f6;
+	--ink: #374151; --strong: #111827; --soft: #5f6672; --rule: #e5e7eb;
+	--accent: #2563eb;
+	--added: #dcfce7; --on-added: #166534;
+	--removed: #fee2e2; --on-removed: #991b1b;
+	--highlight: #fef9c3; --on-highlight: #374151;
+	--serif: Merriweather, Georgia, "Times New Roman", serif;
+	--sans: "Merriweather Sans", "Helvetica Neue", Arial, sans-serif;
+	--ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+	--shadow-sm: 0 1px 2px rgba(17,24,39,0.06);
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--page: #111318; --paper: #1a1d23; --chrome: #23272f;
+		--ink: #d1d5db; --strong: #f3f4f6; --soft: #9ca3af; --rule: #2f343d;
+		--accent: #60a5fa;
+		--added: #133b24; --on-added: #86efac;
+		--removed: #3f1d1d; --on-removed: #fca5a5;
+		--highlight: #3d3510; --on-highlight: #f3f4f6;
+		--shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--page: #111318; --paper: #1a1d23; --chrome: #23272f;
+	--ink: #d1d5db; --strong: #f3f4f6; --soft: #9ca3af; --rule: #2f343d;
+	--accent: #60a5fa;
+	--added: #133b24; --on-added: #86efac;
+	--removed: #3f1d1d; --on-removed: #fca5a5;
+	--highlight: #3d3510; --on-highlight: #f3f4f6;
+	--shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+	color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+	background: var(--page); color: var(--ink);
+	font-family: var(--serif); font-size: 16.5px; line-height: 1.75;
+	padding-left: max(16px, env(safe-area-inset-left, 0px));
+	padding-right: max(16px, env(safe-area-inset-right, 0px));
+	padding-block: 40px 64px;
+}
+.wrap { max-width: 820px; margin: 0 auto; display: grid; gap: 20px; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header { display: grid; gap: 10px; padding-block: 8px 12px; }
+.label { font-family: var(--ui); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--soft); }
+h1 { font-family: var(--sans); font-weight: 300; font-size: clamp(32px, 6vw, 44px); line-height: 1.18; letter-spacing: -0.01em; color: var(--strong); margin: 0; text-wrap: balance; }
+.lede { font-size: 18px; line-height: 1.75; max-width: 62ch; margin: 0; }
+.byline { font-family: var(--ui); font-size: 13px; color: var(--soft); display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.pill { font-family: var(--ui); font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--highlight); color: var(--on-highlight); }
+
+.sheet { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; box-shadow: var(--shadow-sm); padding: 28px clamp(18px, 5vw, 44px); display: grid; gap: 14px; min-width: 0; }
+.sheet > * { min-width: 0; }
+h2 { font-family: var(--sans); font-weight: 400; font-size: 24px; line-height: 32px; color: var(--strong); margin: 0; text-wrap: balance; }
+h3 { font-family: var(--sans); font-weight: 600; font-size: 16.5px; line-height: 1.5; color: var(--strong); margin: 8px 0 0; }
+p, ul, ol { margin: 0; max-width: 66ch; }
+ul, ol { padding-left: 1.3em; display: grid; gap: 6px; }
+code { font-family: var(--mono); font-size: 13.5px; background: var(--chrome); border-radius: 3px; padding: 1px 4px; color: var(--strong); }
+.ref { font-family: var(--mono); font-size: 12px; color: var(--soft); white-space: nowrap; }
+.mine { background: var(--highlight); color: var(--on-highlight); border-radius: 3px; padding: 0 3px; }
+
+.callout { background: var(--chrome); border-radius: 8px; padding: 14px 18px; font-size: 15.5px; display: grid; gap: 8px; }
+.callout strong { color: var(--strong); }
+
+.tablebox { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-family: var(--ui); font-size: 13.5px; line-height: 1.55; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { background: var(--chrome); color: var(--strong); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td code { font-size: 12.5px; }
+
+.steps { list-style: none; padding: 0; counter-reset: step; display: grid; gap: 0; max-width: none; }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 34px 1fr; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.steps li:last-child { border-bottom: 0; }
+.steps li::before { content: counter(step); font-family: var(--ui); font-weight: 600; font-size: 13px; color: var(--strong); background: var(--chrome); border-radius: 999px; width: 26px; height: 26px; display: grid; place-items: center; margin-top: 2px; }
+
+/* figures */
+.figure { background: var(--page); border: 1px solid var(--rule); border-radius: 8px; display: grid; gap: 0; overflow: hidden; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--rule); background: var(--chrome); font-family: var(--ui); font-size: 13px; }
+.controls .spacer { flex: 1; }
+.fig-body { padding: 14px; display: grid; gap: 14px; min-width: 0; }
+.caption { font-family: var(--ui); font-size: 13px; line-height: 1.55; color: var(--soft); padding: 0 14px 14px; }
+button { font-family: var(--ui); font-size: 13px; color: var(--strong); background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover { border-color: var(--soft); }
+button:active { transform: translateY(1px); }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--paper); }
+.seg button { border: 0; border-radius: 0; border-right: 1px solid var(--rule); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--strong); color: var(--paper); }
+input[type="range"] { accent-color: var(--accent); }
+
+/* fig: architecture */
+.arch { display: grid; gap: 10px; font-family: var(--ui); font-size: 13px; }
+.arch-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) minmax(0, 1fr); gap: 8px; align-items: center; }
+.box { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 9px; min-width: 0; overflow-wrap: anywhere; }
+.box.thin { background: transparent; border-style: dashed; color: var(--soft); }
+.box b { color: var(--strong); font-weight: 600; }
+.conn { font-family: var(--mono); font-size: 12px; color: var(--strong); }
+.daemon { background: var(--paper); border: 1px solid var(--soft); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+.stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.stat { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 12px; min-width: 120px; flex: 1; }
+.stat .n { font-family: var(--sans); font-weight: 300; font-size: 30px; line-height: 1.15; color: var(--strong); font-variant-numeric: tabular-nums; }
+.stat .l { font-family: var(--ui); font-size: 12px; color: var(--soft); }
+
+/* fig: checkouts */
+.dag { overflow-x: auto; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; }
+.dag svg { display: block; }
+.cos { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.co { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; min-width: 0; font-family: var(--ui); font-size: 13px; }
+.co h4 { margin: 0; font-family: var(--ui); font-size: 13px; font-weight: 600; color: var(--strong); display: flex; justify-content: space-between; gap: 8px; }
+.co .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.file { font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.file div { padding: 3px 8px; border-bottom: 1px solid var(--rule); overflow-wrap: anywhere; }
+.file div:last-child { border-bottom: 0; }
+.file .mod { background: var(--highlight); color: var(--on-highlight); }
+.file .rev { background: var(--removed); color: var(--on-removed); }
+.status { font-size: 12.5px; color: var(--soft); }
+.status .bad { color: var(--on-removed); background: var(--removed); border-radius: 3px; padding: 0 4px; }
+.status .ok { color: var(--on-added); background: var(--added); border-radius: 3px; padding: 0 4px; }
+.log { font-family: var(--ui); font-size: 12.5px; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; display: grid; gap: 3px; max-height: 150px; overflow-y: auto; }
+.log .bad { color: var(--on-removed); }
+
+/* fig: isolation */
+.iso { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; font-family: var(--ui); font-size: 12.5px; }
+.col { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 10px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.col h4 { margin: 0 0 2px; font-size: 12px; font-weight: 600; color: var(--strong); text-transform: uppercase; letter-spacing: 0.06em; }
+.chip { font-family: var(--mono); font-size: 11.5px; border: 1px solid var(--rule); border-radius: 4px; padding: 2px 6px; overflow-wrap: anywhere; }
+.chip.leak { background: var(--removed); color: var(--on-removed); border-color: transparent; }
+.chip.ok { background: var(--added); color: var(--on-added); border-color: transparent; }
+.empty { color: var(--soft); font-style: italic; }
+
+/* fig: migration */
+.mig { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; font-family: var(--ui); font-size: 12.5px; }
+.tree { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.7; white-space: pre; overflow-x: auto; color: var(--ink); }
+.tree .hl { background: var(--highlight); color: var(--on-highlight); }
+.tree .gone { color: var(--soft); text-decoration: line-through; }
+.migtext { font-family: var(--ui); font-size: 13.5px; color: var(--ink); }
+
+@media (max-width: 560px) {
+	.arch-row { grid-template-columns: 1fr; }
+	.iso { grid-template-columns: 1fr; }
+	.mig { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } button:active { transform: none; } }
+</style>
+
+<div class="wrap">
+<header>
+	<div class="label">pushwork · design spec · project 1 of 2</div>
+	<h1>One store per machine</h1>
+	<p class="lede">pushwork moves every document into one store at <code>~/.pushwork/storage</code>. Each checkout keeps only a record of the heads it last saw. This is the groundwork for a background daemon that keeps one connection open per sync server.</p>
+	<div class="byline"><span>chee</span><span>5 November 2026</span><span class="pill">draft for review</span><span>branch <code>pushwork-server</code></span></div>
+</header>
+
+<section class="sheet" id="where">
+	<h2>Where this fits</h2>
+	<p>The goal is a background process that keeps a long-running connection open to each sync server, restarts itself when it falls over, and is checked by every command, so networked commands stop opening a connection each time.</p>
+	<p>A Subduction connection belongs to a node, and a node belongs to one storage. Today every repo has its own storage in <code>.pushwork/storage</code>, so a daemon could only share a connection per <em>repo</em>, not per <em>server</em>. To share connections per server, the storage has to move out of the repos first. The work splits into two projects, each with its own spec and plan:</p>
+	<ol>
+		<li><strong>Machine-wide store</strong> (this spec). One store, per-checkout heads, server isolation. The CLI still runs every command in its own process.</li>
+		<li><strong>Daemon</strong> (next spec). One process holds the store, one Subduction node, a connection per sync server and the open keyhive archives. The CLI becomes a thin client that starts it, checks its version and health, and restarts it.</li>
+	</ol>
+
+	<div class="figure" id="fig-arch">
+		<div class="controls">
+			<div class="seg" role="group" aria-label="Architecture">
+				<button type="button" data-arch="today" aria-pressed="true">Today</button>
+				<button type="button" data-arch="p1" aria-pressed="false">After project 1</button>
+				<button type="button" data-arch="p2" aria-pressed="false">After project 2</button>
+			</div>
+			<span class="spacer"></span>
+			<label for="arch-n">Commands run</label>
+			<input type="range" id="arch-n" min="1" max="8" value="4">
+			<output id="arch-n-out" for="arch-n">4</output>
+		</div>
+		<div class="fig-body">
+			<div class="arch" id="arch-rows"></div>
+			<div class="stats" id="arch-stats"></div>
+		</div>
+		<div class="caption">Commands alternate between repo P, which syncs with server X, and repo Q, which syncs with server Y. Move the slider to see what each architecture costs as commands pile up. Keyhive repos and <code>Docs.pull()</code> each open an extra connection per command today; the count includes neither.</div>
+	</div>
+</section>
+
+<section class="sheet" id="store">
+	<h2>The store</h2>
+	<p>Every document lives in <code>~/.pushwork/storage</code>, in the same <code>FsStorage</code> layout as today (<span class="ref">src/storage.ts</span>). <code>.pushwork/storage</code> goes away.</p>
+	<p>The <code>sent/</code> records (the fragment heads a server is known to hold) already name their server, but there is one file per document, so a second server overwrites the first. They become <code>sent/&lt;server-hash&gt;/&lt;doc-id&gt;</code>, so one document can be tracked against several servers.</p>
+	<p>The store only grows. Deleting a checkout leaves its documents behind. A <code>pushwork gc</code> is out of scope.</p>
+</section>
+
+<section class="sheet" id="heads">
+	<h2>Each checkout keeps its own heads</h2>
+	<p>Today a repo's saved state is whatever is in its own storage: <code>readSaved</code> decodes the live documents (<span class="ref">src/pushwork.ts:1331</span>). With a shared store, two checkouts of the same URL on one machine would share that state. When one syncs, the other's working tree stops matching, its <code>status</code> shows the change as a local revert, and its next <code>sync</code> pushes the revert.</p>
+	<p>So each checkout gets <code>.pushwork/heads.json</code>, mapping every document id it uses (root, folders, files) to the heads it last saw. It works like git's index: the store holds every version, and this file says which version is this checkout's.</p>
+
+	<div class="figure" id="fig-co">
+		<div class="controls">
+			<div class="seg" role="group" aria-label="Store model">
+				<button type="button" data-mode="naive" aria-pressed="false">Shared store, no heads.json</button>
+				<button type="button" data-mode="heads" aria-pressed="true">With heads.json</button>
+			</div>
+			<span class="spacer"></span>
+			<button type="button" id="co-remote">Someone elsewhere pushes</button>
+			<button type="button" id="co-reset">Reset</button>
+		</div>
+		<div class="fig-body">
+			<div class="dag" id="co-dag" aria-label="Change history in the store"></div>
+			<div class="cos" id="co-cos"></div>
+			<div class="log" id="co-log" aria-live="polite"></div>
+		</div>
+		<div class="caption">Two checkouts, A and B, of the same three-line file on one machine. Try: <em>A: edit "sync"</em>, then <em>A: sync</em>, then look at B in each mode. Then <em>B: sync</em>. Filled circles are A's commits, hollow ones B's, grey ones the original and edits from elsewhere. Dashed means it's on the server but not yet in the store. Red marks a commit that undoes someone's edit. The model merges whole lines; Automerge merges characters, so real concurrent edits to one line keep both.</div>
+	</div>
+
+	<h3>How <code>Docs</code> uses the map</h3>
+	<p><code>Docs</code> opens with the map as its <em>base</em>. Shapes don't change; they only see <code>find</code> and <code>change</code>.</p>
+	<ul>
+		<li><code>find(url)</code> returns <code>A.view(doc, base)</code> for a document in the map, and the live document otherwise (new docs, or ones just fetched).</li>
+		<li><code>change(url, fn)</code> calls <code>A.changeAt(doc, base, fn)</code> and moves that document's base to the new change's heads. An edit made against an old base merges with other checkouts' edits as a concurrent change. <code>updateText</code> diffs against the text at base, so a stale checkout never reverts newer edits.</li>
+		<li><code>heads()</code> and <code>pin()</code> read the base, so <code>pushwork heads</code> and artifact pins show this checkout's view.</li>
+		<li><code>advance()</code> moves every base to the live heads. It is the "merge in everyone else" step.</li>
+	</ul>
+	<p>With one checkout per URL, base always equals live heads and <code>changeAt</code> behaves exactly like <code>change</code>, so the common case doesn't change.</p>
+
+	<h3>What each command does with it</h3>
+	<div class="tablebox"><table>
+		<thead><tr><th>Command</th><th>Reads</th><th>Then</th></tr></thead>
+		<tbody>
+			<tr><td><code>status</code>, <code>diff</code>, <code>cut</code>, <code>heads</code></td><td>base</td><td>Changes nothing.</td></tr>
+			<tr><td><code>save</code></td><td>base</td><td>Commits at base and writes <code>heads.json</code>. Doesn't pull in other checkouts' changes: like the server, the store is something you merge from on <code>sync</code>.</td></tr>
+			<tr><td><code>sync</code></td><td>base</td><td>Commits at base, syncs, calls <code>advance()</code>, writes the merged tree to disk, writes <code>heads.json</code>.</td></tr>
+			<tr><td><code>clone</code>, <code>track</code>, <code>init</code>, <code>merge</code></td><td>live</td><td>Records the live heads.</td></tr>
+		</tbody>
+	</table></div>
+	<p>If a base head is missing from the store (for example, after someone deleted <code>~/.pushwork/storage</code>), <code>sync</code> fetches from the server first, and other commands fail with a message that says so. That's no worse than deleting <code>.pushwork/storage</code> today.</p>
+</section>
+
+<section class="sheet" id="isolation">
+	<h2>Keeping documents off the wrong server</h2>
+	<p>A node connected to server X now sees every document on the machine. Subduction's default policy allows everything, so X could fetch documents that belong to a repo synced with Y. Each <code>Docs</code> node gets a deny-by-default <code>Policy</code> built on one rule:</p>
+	<div class="callout"><strong>A peer may exchange a document with us only if this run started a sync of that document with that peer.</strong></div>
+	<ul>
+		<li><code>Docs.syncDoc</code> records <code>(peer, document)</code> in an allowlist before it calls <code>syncWithPeer</code>.</li>
+		<li><code>authorizeFetch</code> and <code>filterAuthorizedFetch</code> let a peer read only allowlisted documents.</li>
+		<li><code>authorizePut</code> lets a peer write only allowlisted documents, so a server can't drop unrelated documents into the store.</li>
+		<li>Ephemeral subscribe and publish are denied; pushwork doesn't use them. Keyhive frames go through the frame handler, which is separate.</li>
+		<li>Documents keyhive syncs (group and membership docs) join the same allowlist. They get no separate exception.</li>
+		<li>An ESLint <code>no-restricted-properties</code> rule bans <code>syncWithAllPeers</code>, <code>fullSyncWithPeer</code>, <code>fullSyncWithAllPeers</code> and the <code>add*</code> calls in <code>src/</code>. Each of them talks to every connected peer: harmless today, a leak once the daemon is connected to several servers.</li>
+	</ul>
+
+	<div class="figure" id="fig-iso">
+		<div class="controls">
+			<div class="seg" role="group" aria-label="Policy">
+				<button type="button" data-policy="allow" aria-pressed="false">Allow all (Subduction default)</button>
+				<button type="button" data-policy="list" aria-pressed="true">Allowlist</button>
+			</div>
+			<span class="spacer"></span>
+			<button type="button" id="iso-reset">Reset</button>
+		</div>
+		<div class="controls">
+			<button type="button" id="iso-px">Sync repo P with X</button>
+			<button type="button" id="iso-qy">Sync repo Q with Y</button>
+			<button type="button" id="iso-grab">X asks for everything</button>
+			<button type="button" id="iso-push">Y pushes a stray doc</button>
+		</div>
+		<div class="fig-body">
+			<div class="iso" id="iso-cols"></div>
+			<div class="log" id="iso-log" aria-live="polite"></div>
+		</div>
+		<div class="caption">Repo P syncs with server X, repo Q with server Y, and <code>shared.png</code> is linked from both. A red chip is a document on a server it doesn't belong to. Try <em>X asks for everything</em> under each policy.</div>
+	</div>
+
+	<p>A document reaches a server only when you sync a repo that links to it from that server. A file linked into two repos on two servers goes to both, which is what linking it means. When you switch a repo's <code>syncServer</code>, its next sync goes to the new server and nowhere else.</p>
+	<p><span class="mine">Not yet verified:</span> whether the policy hooks fire for data <em>we</em> send during a sync <em>we</em> start. The allowlist covers either case, and a test pins it down (see Testing).</p>
+</section>
+
+<section class="sheet" id="concurrency">
+	<h2>Concurrent commands</h2>
+	<p>Until the daemon exists, several <code>pushwork</code> processes can share the store at once.</p>
+	<div class="tablebox"><table>
+		<thead><tr><th>Concern</th><th>Approach</th></tr></thead>
+		<tbody>
+			<tr><td>Two processes writing the store</td><td>Already safe. <code>FsStorage</code> writes are content-addressed, and each blob is renamed into place before its meta.</td></tr>
+			<tr><td>Compaction deleting a blob another process is reading</td><td>Compaction deletes only once a fragment covering the blob is on disk. A read that finds a file gone lists the document again and retries once, and the retry finds the fragment. No store-wide lock.</td></tr>
+			<tr><td>Two commands in one checkout</td><td>A new <code>.pushwork/lock</code>, created exclusively and holding the pid. A lock left by a dead process is taken over; otherwise the command fails with "another pushwork is running here (pid N)". Nothing prevents this today, so it's also a small fix in its own right.</td></tr>
+			<tr><td><code>heads.json</code></td><td>Written to a temporary file, then renamed into place.</td></tr>
+			<tr><td><code>sent/</code> races between two processes syncing one document with one server</td><td>Accepted. A lost record only keeps a fragment as loose commits for longer, which costs bandwidth but not correctness.</td></tr>
+		</tbody>
+	</table></div>
+	<p>Project 2 inherits two things: the allowlist becomes per peer across every running command in one node, and keyhive's single frame-handler slot (<code>registerFrameHandler</code>) needs a dispatcher, because keyline claims and releases it per command (<span class="ref">src/keyhive/keyline/sync.ts:114</span>).</p>
+</section>
+
+<section class="sheet" id="migration">
+	<h2>Migration</h2>
+	<p>The config version goes to 7. No fields change; the version moves because <code>.pushwork/</code> means something different (no <code>storage/</code>, a new <code>heads.json</code>). Strict versioning stays: a v6 repo is refused with a message pointing at <code>pushwork migrate</code>. The current message says "from pushwork 2" (<span class="ref">src/config.ts:80</span>) and gets fixed for v6.</p>
+
+	<div class="figure" id="fig-mig">
+		<div class="controls">
+			<button type="button" id="mig-prev">Back</button>
+			<button type="button" id="mig-next">Next step</button>
+			<span class="spacer"></span>
+			<button type="button" id="mig-fail">Fail at this step</button>
+		</div>
+		<div class="fig-body">
+			<div class="migtext" id="mig-text"></div>
+			<div class="mig">
+				<div class="tree" id="mig-repo"></div>
+				<div class="tree" id="mig-home"></div>
+			</div>
+		</div>
+		<div class="caption">Step through <code>pushwork migrate</code> on a v6 checkout, offline. Highlighted lines are what the current step writes. <em>Fail at this step</em> shows what is left on disk if it stops there.</div>
+	</div>
+
+	<ol class="steps">
+		<li><div>Lock the checkout.</div></li>
+		<li><div>Copy each document from <code>.pushwork/storage</code> into the machine store with <code>saveBatchAll</code>, skipping any already there. Going through the storage API rather than copying files means a half-finished migration can't leave a partial pair behind.</div></li>
+		<li><div>Convert the old <code>sent/</code> files, which record their server on the first line, into the per-server layout.</div></li>
+		<li><div>Decode the tree at its live heads and write <code>heads.json</code> with every document's current heads.</div></li>
+		<li><div>Move the old <code>storage/</code> into <code>.pushwork/pushwork_migration_backup_safe_to_delete/</code>, as <code>migrate</code> already does.</div></li>
+		<li><div>Write the v7 config.</div></li>
+	</ol>
+	<p>If anything fails, the config stays at v6 and the old storage stays in place. Copies that already reached the machine store are harmless, because they're content-addressed. Repos older than v6 keep the existing path (<code>attach("track")</code>), which now writes into the machine store and records heads without extra work.</p>
+	<p>The changeset is a major bump, because existing repos have to run <code>pushwork migrate</code>. <span class="mine">Open:</span> fold this into the 3.0 prerelease instead.</p>
+	<p><code>design/sync.md</code>, <code>design/config.md</code> and the layer diagram in <code>design/README.md</code> get updated to describe the machine store and checkout heads.</p>
+</section>
+
+<section class="sheet" id="testing">
+	<h2>Testing</h2>
+	<p><span class="ref">test/server.ts</span> already runs a local Subduction server and accepts a <code>Policy</code>, so all of this runs without the network. The existing suites must pass unchanged; they already isolate <code>~/.pushwork</code> with <code>setHome</code>.</p>
+	<div class="tablebox"><table>
+		<thead><tr><th>Level</th><th>What it checks</th></tr></thead>
+		<tbody>
+			<tr><td>unit, <code>docs</code></td><td><code>find</code> returns the view at base; <code>change</code> goes through <code>changeAt</code> and moves base; <code>advance</code> moves to live; a document missing from the map reads live; a missing base head gives a clear error.</td></tr>
+			<tr><td>unit, <code>storage</code></td><td><code>sent</code> is kept per server, so two servers don't overwrite each other; a read that finds a blob deleted mid-read retries and succeeds.</td></tr>
+			<tr><td>unit, isolation</td><td>Two local servers and a document synced with A: B can't fetch it, and a put from B is refused. Also settles whether the hooks fire for outbound data.</td></tr>
+			<tr><td>integration, two checkouts</td><td>Two clones of one URL under one <code>HOME</code>. A edits and syncs: B's <code>status</code> stays clean. B edits another part of the same file and syncs: both edits survive, and both checkouts end up with the same bytes after syncing.</td></tr>
+			<tr><td>integration, <code>save</code></td><td><code>save</code> in B doesn't pull in A's changes; B's next <code>sync</code> does.</td></tr>
+			<tr><td>integration, migrate</td><td>A v6 fixture (built by <code>init</code>, then rewritten into the v6 layout) migrates offline; <code>status</code> is clean afterwards; a forced failure partway through leaves a working v6 repo.</td></tr>
+			<tr><td>integration, lock</td><td>A second command in one checkout fails with the pid; a stale lock is taken over.</td></tr>
+		</tbody>
+	</table></div>
+</section>
+
+<section class="sheet" id="out">
+	<h2>Out of scope</h2>
+	<ul>
+		<li><strong>The daemon.</strong> Project 2, with its own spec.</li>
+		<li><strong><code>push</code></strong>: send local changes without touching the working tree. Deferred. The protocol has one-way <code>LooseCommit</code> and <code>Fragment</code> messages, but the 0.16.1 bindings expose them only as unacknowledged pushes to subscribers. Questions for Brooke: can a JS call push to one peer without reconciling, and does the server acknowledge a put or report a refused one?</li>
+		<li><strong><code>pull</code></strong>: fetch, <code>advance()</code>, write to disk. Easy on top of this, but not asked for.</li>
+		<li><strong><code>pushwork gc</code></strong> for documents no checkout uses.</li>
+	</ul>
+</section>
+</div>
+
+<script>
+// ---------- figure: architecture ----------
+(() => {
+	const rows = document.getElementById("arch-rows");
+	const stats = document.getElementById("arch-stats");
+	const slider = document.getElementById("arch-n");
+	const out = document.getElementById("arch-n-out");
+	const buttons = document.querySelectorAll("#fig-arch [data-arch]");
+	let arch = "today";
+	const repoOf = i => (i % 2 === 0 ? { repo: "P", server: "X" } : { repo: "Q", server: "Y" });
+	function render() {
+		const n = Number(slider.value);
+		out.textContent = String(n);
+		let html = "";
+		if (arch === "p2") {
+			for (let i = 0; i < n; i++) {
+				const { repo } = repoOf(i);
+				html += `<div class="arch-row"><div class="box"><b>pushwork sync</b> · repo ${repo}</div><div class="box thin">thin client: asks the daemon over a local socket</div><div class="box thin">no connection</div></div>`;
+			}
+			html += `<div class="daemon"><div><b>pushwork daemon</b> · started by the first command, checked by every one after</div>
+				<div class="arch-row"><div class="box"><b>one node</b>, keyhive archives open</div><div class="box"><b>~/.pushwork/storage</b> + each checkout's heads.json</div><div class="box"><span class="conn">→ X</span> · <span class="conn">→ Y</span><br>opened once</div></div></div>`;
+		} else {
+			for (let i = 0; i < n; i++) {
+				const { repo, server } = repoOf(i);
+				const store = arch === "today" ? `${repo}/.pushwork/storage` : `~/.pushwork/storage (shared)`;
+				html += `<div class="arch-row"><div class="box"><b>pushwork sync</b> · repo ${repo}<br>loads WASM, opens a node</div><div class="box">${store}</div><div class="box"><span class="conn">→ ${server}</span> new connection</div></div>`;
+			}
+		}
+		rows.innerHTML = html;
+		const repos = Math.min(n, 2);
+		const servers = Math.min(n, 2);
+		const s =
+			arch === "today"
+				? [n, repos, n]
+				: arch === "p1"
+					? [n, 1, n]
+					: [servers, 1, 1];
+		const labels = ["connections opened", "document stores", "node + WASM startups"];
+		stats.innerHTML = s.map((v, i) => `<div class="stat"><div class="n">${v}</div><div class="l">${labels[i]}</div></div>`).join("");
+	}
+	buttons.forEach(b =>
+		b.addEventListener("click", () => {
+			arch = b.dataset.arch;
+			buttons.forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+			render();
+		}),
+	);
+	slider.addEventListener("input", render);
+	render();
+})();
+
+// ---------- figure: two checkouts ----------
+(() => {
+	const LABELS = ["title", "sync", "store"];
+	const INIT = ["title: pushwork", "sync: a connection per command", "store: one per repo"];
+	const dagEl = document.getElementById("co-dag");
+	const cosEl = document.getElementById("co-cos");
+	const logEl = document.getElementById("co-log");
+	const modeButtons = document.querySelectorAll("#fig-co [data-mode]");
+	let mode = "heads";
+	let S;
+
+	function reset() {
+		S = {
+			changes: [{ id: 0, deps: [], sets: { 0: INIT[0], 1: INIT[1], 2: INIT[2] }, by: "init", revert: false }],
+			store: new Set([0]),
+			server: new Set([0]),
+			co: { A: { base: [0], wt: INIT.slice() }, B: { base: [0], wt: INIT.slice() } },
+			n: { A: 0, B: 0, R: 0 },
+			log: [{ text: "A and B cloned the same URL. Both are clean.", bad: false }],
+		};
+	}
+
+	const byId = id => S.changes[id];
+	function ancestors(heads) {
+		const seen = new Set();
+		const stack = heads.slice();
+		while (stack.length) {
+			const id = stack.pop();
+			if (seen.has(id)) continue;
+			seen.add(id);
+			for (const d of byId(id).deps) stack.push(d);
+		}
+		return seen;
+	}
+	function headsOf(set) {
+		const referenced = new Set();
+		for (const id of set) for (const d of byId(id).deps) if (set.has(d)) referenced.add(d);
+		return [...set].filter(id => !referenced.has(id)).sort((a, b) => a - b);
+	}
+	// later changes win on the same line, a stand-in for Automerge's deterministic merge
+	function view(heads) {
+		const anc = ancestors(heads);
+		const lines = [];
+		for (const c of S.changes) if (anc.has(c.id)) for (const k in c.sets) lines[k] = c.sets[k];
+		return lines;
+	}
+	function pastValues(heads, line) {
+		const anc = ancestors(heads);
+		const vals = new Set();
+		for (const c of S.changes) if (anc.has(c.id) && line in c.sets) vals.add(c.sets[line]);
+		return vals;
+	}
+	const base = x => (mode === "heads" ? S.co[x].base : headsOf(S.store));
+	// a line whose working value is one the line used to have, but no longer does: saving it undoes an edit
+	function diff(x) {
+		const b = base(x);
+		const v = view(b);
+		const wt = S.co[x].wt;
+		const out = [];
+		for (let i = 0; i < wt.length; i++) {
+			if (wt[i] !== v[i]) out.push({ line: i, value: wt[i], revert: pastValues(b, i).has(wt[i]) });
+		}
+		return out;
+	}
+	function log(text, bad = false) {
+		S.log.push({ text, bad });
+	}
+	function commit(x) {
+		const d = diff(x);
+		if (!d.length) return null;
+		const sets = {};
+		for (const e of d) sets[e.line] = e.value;
+		const c = { id: S.changes.length, deps: base(x).slice(), sets, by: x, revert: d.some(e => e.revert) };
+		S.changes.push(c);
+		S.store.add(c.id);
+		if (mode === "heads") S.co[x].base = [c.id];
+		return c;
+	}
+	function edit(x, line) {
+		S.n[x]++;
+		S.co[x].wt[line] = `${LABELS[line]}: ${x}'s edit ${S.n[x]}`;
+		log(`${x} edited the "${LABELS[line]}" line on disk.`);
+	}
+	function save(x) {
+		const c = commit(x);
+		if (!c) return log(`${x} saved: nothing to save.`);
+		log(`${x} saved: commit c${c.id}, made at ${x}'s base. ${x}'s files don't change.`);
+		if (c.revert) log(`c${c.id} undoes another checkout's edit.`, true);
+	}
+	function sync(x) {
+		const c = commit(x);
+		for (const id of S.store) S.server.add(id);
+		for (const id of S.server) S.store.add(id);
+		const live = headsOf(S.store);
+		if (mode === "heads") S.co[x].base = live;
+		S.co[x].wt = view(live);
+		log(`${x} synced${c ? `, committing c${c.id}` : ""}, merged everything in the store, and wrote it to disk.`);
+		if (c && c.revert) log(`c${c.id} undoes another checkout's edit, and now it's on the server.`, true);
+	}
+	function remote() {
+		S.n.R++;
+		const c = { id: S.changes.length, deps: headsOf(S.server), sets: { 2: `store: elsewhere's edit ${S.n.R}` }, by: "R", revert: false };
+		S.changes.push(c);
+		S.server.add(c.id);
+		log(`Someone on another machine pushed c${c.id}. It's on the server, not in the store yet.`);
+	}
+
+	const css = name => `var(--${name})`;
+	function renderDag() {
+		const LANE = { A: 30, init: 72, R: 72, B: 114 };
+		const STEP = 58;
+		const W = Math.max(360, S.changes.length * STEP + 80);
+		const H = 150;
+		const x = id => 40 + id * STEP;
+		const y = id => LANE[byId(id).by];
+		let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Commits in the store and their parents">`;
+		svg += `<text x="8" y="${LANE.A + 4}" font-family="system-ui" font-size="11" fill="${css("soft")}">A</text>`;
+		svg += `<text x="8" y="${LANE.B + 4}" font-family="system-ui" font-size="11" fill="${css("soft")}">B</text>`;
+		for (const c of S.changes)
+			for (const d of c.deps)
+				svg += `<line x1="${x(d)}" y1="${y(d)}" x2="${x(c.id)}" y2="${y(c.id)}" stroke="${css("soft")}" stroke-width="1.2"/>`;
+		for (const c of S.changes) {
+			const inStore = S.store.has(c.id);
+			let fill = css("chrome");
+			let stroke = css("soft");
+			if (c.by === "A") { fill = css("strong"); stroke = css("strong"); }
+			if (c.by === "B") { fill = css("paper"); stroke = css("strong"); }
+			if (c.revert) { fill = css("removed"); stroke = css("on-removed"); }
+			const dash = inStore ? "" : ` stroke-dasharray="3 2"`;
+			svg += `<circle cx="${x(c.id)}" cy="${y(c.id)}" r="9" fill="${fill}" stroke="${stroke}" stroke-width="1.6"${dash}/>`;
+			svg += `<text x="${x(c.id)}" y="${y(c.id) + 24}" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="10" fill="${css("soft")}">c${c.id}</text>`;
+		}
+		// where each checkout's base points
+		const tags = [];
+		for (const who of ["A", "B"]) for (const h of base(who)) tags.push({ who, h });
+		const byHead = new Map();
+		for (const t of tags) byHead.set(t.h, [...(byHead.get(t.h) ?? []), t.who]);
+		for (const [h, whos] of byHead) {
+			const label = `base: ${whos.join(", ")}`;
+			const w = label.length * 6.2 + 10;
+			const ty = y(h) - 26;
+			svg += `<rect x="${x(h) - w / 2}" y="${ty - 11}" width="${w}" height="16" rx="3" fill="${css("highlight")}"/>`;
+			svg += `<text x="${x(h)}" y="${ty + 1}" text-anchor="middle" font-family="system-ui" font-size="10.5" fill="${css("on-highlight")}">${label}</text>`;
+		}
+		svg += `</svg>`;
+		dagEl.innerHTML = svg;
+	}
+	function renderCheckouts() {
+		cosEl.innerHTML = ["A", "B"]
+			.map(who => {
+				const d = diff(who);
+				const byLine = new Map(d.map(e => [e.line, e]));
+				const file = S.co[who].wt
+					.map((line, i) => {
+						const e = byLine.get(i);
+						const cls = e ? (e.revert ? "rev" : "mod") : "";
+						return `<div class="${cls}">${line}</div>`;
+					})
+					.join("");
+				const status = d.length
+					? d
+							.map(e =>
+								e.revert
+									? `<span class="bad">modified: "${LABELS[e.line]}", would undo an edit</span>`
+									: `modified: "${LABELS[e.line]}"`,
+							)
+							.join("<br>")
+					: `<span class="ok">clean</span>`;
+				return `<div class="co">
+					<h4><span>checkout ${who}</span><span class="ref">base ${base(who).map(h => "c" + h).join(" ")}</span></h4>
+					<div class="file" aria-label="notes.md in checkout ${who}">${file}</div>
+					<div class="status">status: ${status}</div>
+					<div class="btns">
+						<button type="button" data-act="edit" data-who="${who}" data-line="1">${who}: edit "sync"</button>
+						<button type="button" data-act="edit" data-who="${who}" data-line="0">${who}: edit "title"</button>
+						<button type="button" data-act="save" data-who="${who}">${who}: save</button>
+						<button type="button" data-act="sync" data-who="${who}">${who}: sync</button>
+					</div>
+				</div>`;
+			})
+			.join("");
+	}
+	function renderLog() {
+		logEl.innerHTML = S.log
+			.slice(-8)
+			.map(l => `<div class="${l.bad ? "bad" : ""}">${l.bad ? "⚠ " : ""}${l.text}</div>`)
+			.join("");
+		logEl.scrollTop = logEl.scrollHeight;
+	}
+	function render() {
+		renderDag();
+		renderCheckouts();
+		renderLog();
+	}
+	cosEl.addEventListener("click", e => {
+		const b = e.target.closest("button[data-act]");
+		if (!b) return;
+		const who = b.dataset.who;
+		if (b.dataset.act === "edit") edit(who, Number(b.dataset.line));
+		if (b.dataset.act === "save") save(who);
+		if (b.dataset.act === "sync") sync(who);
+		render();
+	});
+	document.getElementById("co-remote").addEventListener("click", () => {
+		remote();
+		render();
+	});
+	document.getElementById("co-reset").addEventListener("click", () => {
+		reset();
+		render();
+	});
+	modeButtons.forEach(b =>
+		b.addEventListener("click", () => {
+			mode = b.dataset.mode;
+			modeButtons.forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+			reset();
+			log(mode === "heads" ? "Each checkout keeps its own base in heads.json." : "No heads.json: both checkouts read the store's live heads.");
+			render();
+		}),
+	);
+	reset();
+	render();
+})();
+
+// ---------- figure: server isolation ----------
+(() => {
+	const DOCS = [
+		{ id: "P/root", repos: ["P"] },
+		{ id: "P/notes.md", repos: ["P"] },
+		{ id: "Q/root", repos: ["Q"] },
+		{ id: "Q/private.md", repos: ["Q"] },
+		{ id: "shared.png", repos: ["P", "Q"] },
+	];
+	const HOME = { P: "X", Q: "Y" };
+	const belongs = (doc, server) => doc.repos.some(r => HOME[r] === server);
+	const colsEl = document.getElementById("iso-cols");
+	const logEl = document.getElementById("iso-log");
+	const buttons = document.querySelectorAll("#fig-iso [data-policy]");
+	let policy = "list";
+	let S;
+	function reset() {
+		S = {
+			store: DOCS.map(d => ({ ...d })),
+			held: { X: new Set(), Y: new Set() },
+			allowed: new Set(),
+			log: [{ text: "Five documents in the store. Neither server holds anything yet.", bad: false }],
+		};
+	}
+	const log = (text, bad = false) => S.log.push({ text, bad });
+	function syncRepo(repo) {
+		const server = HOME[repo];
+		const docs = S.store.filter(d => d.repos.includes(repo));
+		for (const d of docs) {
+			S.allowed.add(`${server}|${d.id}`);
+			S.held[server].add(d.id);
+		}
+		log(`Synced repo ${repo} with ${server}: ${docs.length} documents, each added to ${server}'s allowlist first.`);
+	}
+	function grab() {
+		const got = [];
+		const denied = [];
+		for (const d of S.store) {
+			if (policy === "allow" || S.allowed.has(`X|${d.id}`)) got.push(d);
+			else denied.push(d);
+		}
+		for (const d of got) S.held.X.add(d.id);
+		const leaks = got.filter(d => !belongs(d, "X"));
+		if (leaks.length) log(`X fetched ${got.length} documents, including ${leaks.map(d => d.id).join(", ")}, which belong to Y.`, true);
+		else log(`X fetched ${got.length} documents. Refused: ${denied.map(d => d.id).join(", ") || "none"}.`);
+	}
+	function push() {
+		const id = `Y/stray-${S.store.length}`;
+		if (policy === "allow") {
+			S.store.push({ id, repos: [], stray: true });
+			log(`Y pushed ${id} and it landed in the store.`, true);
+		} else {
+			log(`Y tried to push ${id}. Refused: no sync of it with Y was started.`);
+		}
+	}
+	function chip(doc, server) {
+		const cls = server ? (belongs(doc, server) ? "ok" : "leak") : doc.stray ? "leak" : "";
+		return `<div class="chip ${cls}">${doc.id}</div>`;
+	}
+	function render() {
+		const find = id => S.store.find(d => d.id === id) ?? { id, repos: [] };
+		const server = s => {
+			const ids = [...S.held[s]];
+			return `<div class="col"><h4>Server ${s}</h4>${ids.length ? ids.map(id => chip(find(id), s)).join("") : `<div class="empty">nothing yet</div>`}</div>`;
+		};
+		const store = `<div class="col"><h4>~/.pushwork/storage</h4>${S.store.map(d => chip(d)).join("")}</div>`;
+		colsEl.innerHTML = server("X") + store + server("Y");
+		logEl.innerHTML = S.log
+			.slice(-6)
+			.map(l => `<div class="${l.bad ? "bad" : ""}">${l.bad ? "⚠ " : ""}${l.text}</div>`)
+			.join("");
+		logEl.scrollTop = logEl.scrollHeight;
+	}
+	const on = (id, fn) => document.getElementById(id).addEventListener("click", () => { fn(); render(); });
+	on("iso-px", () => syncRepo("P"));
+	on("iso-qy", () => syncRepo("Q"));
+	on("iso-grab", grab);
+	on("iso-push", push);
+	on("iso-reset", reset);
+	buttons.forEach(b =>
+		b.addEventListener("click", () => {
+			policy = b.dataset.policy;
+			buttons.forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+			reset();
+			render();
+		}),
+	);
+	reset();
+	render();
+})();
+
+// ---------- figure: migration ----------
+(() => {
+	const textEl = document.getElementById("mig-text");
+	const repoEl = document.getElementById("mig-repo");
+	const homeEl = document.getElementById("mig-home");
+	// what each step leaves on disk once it has finished
+	const STEPS = [
+		{ text: "A v6 checkout before migrating. Its documents live inside the repo.", repo: { cfg: 6, storage: true, lock: false, heads: false, backup: false }, home: { trees: false, sent: false } },
+		{ text: "1. Lock the checkout, so no other pushwork runs here meanwhile.", repo: { cfg: 6, storage: true, lock: true, heads: false, backup: false }, home: { trees: false, sent: false }, hl: ["lock"] },
+		{ text: "2. Copy every document into the machine store with saveBatchAll, skipping ones already there.", repo: { cfg: 6, storage: true, lock: true, heads: false, backup: false }, home: { trees: true, sent: false }, hl: ["trees"] },
+		{ text: "3. Convert sent/ records into the per-server layout.", repo: { cfg: 6, storage: true, lock: true, heads: false, backup: false }, home: { trees: true, sent: true }, hl: ["sent"] },
+		{ text: "4. Decode the tree at its live heads and write heads.json.", repo: { cfg: 6, storage: true, lock: true, heads: true, backup: false }, home: { trees: true, sent: true }, hl: ["heads"] },
+		{ text: "5. Move the old storage into the migration backup folder.", repo: { cfg: 6, storage: false, lock: true, heads: true, backup: true }, home: { trees: true, sent: true }, hl: ["backup"] },
+		{ text: "6. Write the v7 config and release the lock. Done: status is clean, nothing was fetched or pushed.", repo: { cfg: 7, storage: false, lock: false, heads: true, backup: true }, home: { trees: true, sent: true }, hl: ["cfg"] },
+	];
+	let i = 0;
+	let failed = false;
+	const line = (on, hl, gone, text) => (on ? `<span class="${hl ? "hl" : gone ? "gone" : ""}">${text}</span>\n` : "");
+	function render() {
+		const st = STEPS[i];
+		const hl = new Set(failed ? [] : (st.hl ?? []));
+		let r = st.repo;
+		let h = st.home;
+		let text = st.text;
+		if (failed && i > 0) {
+			// a failure undoes the repo side; the store keeps harmless, content-addressed copies
+			r = { cfg: 6, storage: true, lock: false, heads: false, backup: false };
+			text = `Failed during step ${i}. The checkout is a working v6 repo again: config at 6, storage in place, heads.json removed, lock released. ${h.trees ? "Copies already in the machine store stay; they're content-addressed, so they're harmless." : "Nothing reached the machine store."}`;
+		}
+		textEl.textContent = text;
+		repoEl.innerHTML =
+			`myrepo/\n  .pushwork/\n` +
+			line(true, hl.has("cfg"), false, `    config.json   (version ${r.cfg})`) +
+			line(r.storage, false, false, `    storage/trees/…`) +
+			line(r.storage, false, false, `    storage/sent/…`) +
+			line(r.lock, hl.has("lock"), false, `    lock          (pid 4242)`) +
+			line(r.heads, hl.has("heads"), false, `    heads.json`) +
+			line(r.backup, hl.has("backup"), false, `    pushwork_migration_backup_safe_to_delete/storage/…`) +
+			`  src/ …`;
+		homeEl.innerHTML =
+			`~/.pushwork/\n  key\n  storage/\n` +
+			line(h.trees, hl.has("trees"), false, `    trees/…        (this repo's documents)`) +
+			line(h.sent, hl.has("sent"), false, `    sent/&lt;server-hash&gt;/…`) +
+			(h.trees || h.sent ? "" : `    (other repos' documents)\n`);
+		document.getElementById("mig-prev").disabled = i === 0 && !failed;
+		document.getElementById("mig-next").disabled = i === STEPS.length - 1 || failed;
+		document.getElementById("mig-fail").disabled = i === 0 || i === STEPS.length - 1 || failed;
+	}
+	document.getElementById("mig-next").addEventListener("click", () => {
+		if (i < STEPS.length - 1) i++;
+		render();
+	});
+	document.getElementById("mig-prev").addEventListener("click", () => {
+		if (failed) failed = false;
+		else if (i > 0) i--;
+		render();
+	});
+	document.getElementById("mig-fail").addEventListener("click", () => {
+		failed = true;
+		render();
+	});
+	render();
+})();
+</script>
