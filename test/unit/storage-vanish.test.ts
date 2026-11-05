@@ -7,7 +7,12 @@ import { CommitId, MemorySigner, SedimentreeId, Subduction } from "@automerge/au
 import { FsStorage } from "../../src/storage.js";
 
 // inert until a test arms it: fails the first read of a matching path, like a file compacted away
-const vanish = vi.hoisted(() => ({ suffix: null as string | null }));
+const vanish = vi.hoisted(() => ({
+	suffix: null as string | null,
+	// when this directory is listed, remove it first (then run `after`), like compaction winning the race
+	dir: null as string | null,
+	after: null as (() => Promise<void>) | null,
+}));
 
 vi.mock("fs/promises", async importOriginal => {
 	const real = await importOriginal<typeof import("fs/promises")>();
@@ -18,7 +23,16 @@ vi.mock("fs/promises", async importOriginal => {
 		}
 		return (real.readFile as any)(file, ...rest);
 	}) as typeof real.readFile;
-	return { ...real, readFile };
+	const readdir = (async (dir: any, ...rest: any[]) => {
+		if (vanish.dir !== null && String(dir) === vanish.dir) {
+			const after = vanish.after;
+			vanish.dir = vanish.after = null;
+			await real.rm(dir, { recursive: true, force: true });
+			await after?.();
+		}
+		return (real.readdir as any)(dir, ...rest);
+	}) as typeof real.readdir;
+	return { ...real, readFile, readdir };
 });
 
 const seed = crypto.getRandomValues(new Uint8Array(32));
@@ -45,7 +59,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-	vanish.suffix = null;
+	vanish.suffix = vanish.dir = vanish.after = null;
 });
 
 afterAll(async () => {
@@ -67,5 +81,27 @@ describe("FsStorage when a blob vanishes", () => {
 		node.free();
 		vanish.suffix = ".blob";
 		expect(await storage.loadAllFragments(sid)).toHaveLength(2);
+	});
+
+	it("lists fragments again when one's whole directory vanishes mid-read", async () => {
+		await storage.deleteAllFragments(sid);
+		const third = A.change(A.clone(other), d => {
+			d.m = 2;
+		});
+		const node = new Subduction({ signer: MemorySigner.fromBytes(seed), storage });
+		await node.storeFragment(sid, CommitId.fromHexString(A.getHeads(doc)[0]), [], [], A.save(doc));
+		await node.storeFragment(sid, CommitId.fromHexString(A.getHeads(other)[0]), [], [], A.save(other));
+		const bytes = sid.toBytes();
+		const hexOf = (b: Uint8Array) => Buffer.from(b).toString("hex");
+		const fragments = path.join(dir, "trees", hexOf(bytes.subarray(0, 2)), hexOf(bytes.subarray(2)), "fragments");
+		vanish.dir = path.join(fragments, A.getHeads(doc)[0]);
+		// compaction removes the listed fragment after writing the one replacing it
+		vanish.after = () => node.storeFragment(sid, CommitId.fromHexString(A.getHeads(third)[0]), [], [], A.save(third));
+		const loaded = await storage.loadAllFragments(sid);
+		node.free();
+		expect(loaded).toHaveLength(2);
+		expect(loaded.map(f => f.signed.payload.head.toHexString()).sort()).toEqual(
+			[A.getHeads(other)[0], A.getHeads(third)[0]].sort(),
+		);
 	});
 });

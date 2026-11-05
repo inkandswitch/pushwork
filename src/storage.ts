@@ -157,7 +157,8 @@ export class FsStorage implements SedimentreeStorage {
 	// null when there is no valid item; `gone` when compaction deleted it between the listing and the read
 	private async read<T extends Signed>(dir: string, decode: (meta: Uint8Array) => T): Promise<[T, Uint8Array] | null | typeof gone> {
 		const found = await stem(dir);
-		if (found === undefined) return null;
+		// a missing directory was removed under us; an existing one without a pair is an interrupted write
+		if (found === undefined) return (await size(dir)) < 0 ? gone : null;
 		const file = path.join(dir, found);
 		try {
 			const blob = await fs.readFile(`${file}.blob`);
