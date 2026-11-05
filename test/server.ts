@@ -42,7 +42,7 @@ function transport(ws: WebSocket, stalled: () => boolean): Transport {
 
 // A Subduction sync server on an ephemeral port, backed by memory. After stall() it
 // keeps its connections open but never answers.
-export async function startServer(policy?: Policy): Promise<{ url: string; stall(): void; close(): Promise<void> }> {
+export async function startServer(policy?: Policy): Promise<{ url: string; node: Subduction; stall(): void; close(): Promise<void> }> {
 	setSubductionLogLevel("error");
 	const node = new Subduction({ signer: MemorySigner.generate(), storage: new MemoryStorage(), policy });
 	const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -57,6 +57,7 @@ export async function startServer(policy?: Policy): Promise<{ url: string; stall
 	});
 	return {
 		url: `ws://${host}`,
+		node,
 		stall: () => {
 			stalled = true;
 		},

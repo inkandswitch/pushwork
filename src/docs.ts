@@ -15,6 +15,7 @@ import {
 	type SedimentreeStorage,
 	type Signer,
 } from "@automerge/automerge-subduction";
+import { Allowlist } from "./allowlist";
 import { log } from "./log";
 import {
 	newDocumentId,
@@ -147,12 +148,19 @@ export class Docs {
 		readonly node: Subduction,
 		private options: DocsOptions,
 		private connection: Connection,
+		private allowlist: Allowlist,
 	) {}
 
 	static async open(options: DocsOptions): Promise<Docs> {
 		if (!/subduction/.test(process.env.DEBUG ?? "")) setSubductionLogLevel("error");
-		const node = new Subduction({ signer: options.signer, storage: options.storage });
-		return new Docs(node, options, options.server ? await connect(node, options.signer, options.server) : {});
+		const allowlist = new Allowlist();
+		const node = new Subduction({
+			signer: options.signer,
+			storage: options.storage,
+			policy: allowlist.policy(),
+			ephemeralPolicy: allowlist.ephemeralPolicy(),
+		});
+		return new Docs(node, options, options.server ? await connect(node, options.signer, options.server) : {}, allowlist);
 	}
 
 	/** Automerge's updateText, for use inside `change` by code (such as a custom shape) that can't import pushwork's Automerge. */
@@ -391,6 +399,7 @@ export class Docs {
 	private syncDoc(id: DocumentId): Promise<Result> {
 		return this.limit(async () => {
 			const sid = toSedimentreeId(id);
+			this.allowlist.allow(this.peer!, sid);
 			let result: Result = { ok: false, received: false };
 			let wait = SEND_SETTLE_MS;
 			let pulled = false;
