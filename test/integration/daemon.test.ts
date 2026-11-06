@@ -228,7 +228,8 @@ describe("daemon", () => {
 		// a shape module runs in the daemon, and can throw where nothing catches it
 		const boom = path.join(work, "boom.js");
 		await fs.writeFile(boom, 'setTimeout(() => { throw new Error("boom from a shape"); }); export default {};\n');
-		await expect(run(["shape", "install", "--name", "boom", boom])).rejects.toThrow("not a shape");
+		// not a shape, or, if the throw comes first, the daemon stopped
+		await expect(run(["shape", "install", "--name", "boom", boom])).rejects.toThrow(/not a shape|daemon stopped/);
 		expect(await until(() => !alive(pid), 10_000)).toBe(true);
 		expect(await readText(path.join(home, ".pushwork", "daemon.log"))).toMatch(/^\d{4}-\S+ uncaught exception: Error: boom from a shape$/m);
 	});
