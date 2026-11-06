@@ -103,18 +103,25 @@ describe("RpcPeer", () => {
 		const on = (e: unknown) => seen.push(e)
 		process.on("unhandledRejection", on)
 		try {
-			let release!: () => void
-			const gate = new Promise<void>(r => (release = r))
-			const { client } = await pair(async (_m, args) => {
-				await gate
-				void (args[0] as () => Promise<void>)()
-				return "done"
+			let stub!: () => Promise<void>
+			let gotStub!: () => void
+			const have = new Promise<void>(r => (gotStub = r))
+			const { host, client } = await pair(async (_m, args) => {
+				stub = args[0] as () => Promise<void>
+				gotStub()
+				return "ok"
 			})
-			void client.call("go", [async () => {}]).catch(() => {})
+			await client.call("go", [async () => {}])
+			await have
+			const hostClosed = new Promise<void>(r => host.onClose(r))
 			client.close()
-			release()
-			await new Promise(r => setTimeout(r, 50))
+			await hostClosed
+			// unawaited, as the daemon calls progress callbacks
+			void stub()
+			await new Promise(r => setImmediate(r))
+			await new Promise(r => setImmediate(r))
 			expect(seen).toEqual([])
+			await expect(stub()).rejects.toThrow("connection closed")
 		} finally {
 			process.off("unhandledRejection", on)
 		}
