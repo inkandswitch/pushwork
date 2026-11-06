@@ -1,6 +1,7 @@
 import * as A from "@automerge/automerge";
 import {
 	BlobMeta,
+	type AuthenticatedWebSocket,
 	CommitId,
 	CommitInput,
 	Fragment,
@@ -140,15 +141,32 @@ export async function connect(node: Subduction, signer: Signer, server: string):
 	const timeout = new Promise<never>((_, reject) =>
 		setTimeout(() => reject(new Error(`timed out connecting to ${server}`)), TIMEOUT_MS).unref(),
 	);
+	let discover: Promise<AuthenticatedWebSocket> | undefined;
 	try {
-		const ws = await Promise.race([SubductionWebSocket.tryDiscover(new URL(server), signer), timeout]);
+		discover = SubductionWebSocket.tryDiscover(new URL(server), signer);
+		const ws = await Promise.race([discover, timeout]);
+		discover = undefined;
 		const peer = ws.peerId; // toTransport consumes ws
 		await node.addConnection(ws.toTransport());
 		return { peer, connectMs: Math.round(performance.now() - start) };
 	} catch (e) {
+		if (discover) hangUpLate(discover, signer);
 		debug("offline: %s", message(e));
 		return { error: message(e) };
 	}
+}
+
+// A socket that opens after the timeout would stay open as long as the process does, which
+// in a daemon is a long time. Only a node can close one.
+function hangUpLate(discover: Promise<AuthenticatedWebSocket>, signer: Signer): void {
+	discover
+		.then(async ws => {
+			const scratch = new Subduction({ signer, storage: new MemoryStorage() });
+			await scratch.addConnection(ws.toTransport());
+			await scratch.disconnectAll();
+			scratch.free();
+		})
+		.catch(() => {});
 }
 
 export class Docs {
