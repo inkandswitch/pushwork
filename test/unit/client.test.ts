@@ -154,6 +154,8 @@ describe("a daemon that doesn't answer", () => {
 		await new Promise<void>(resolve => daemon.listen(sock, resolve));
 		pid = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120_000)"], { stdio: "ignore" });
 		await new Promise(resolve => pid.once("spawn", resolve));
+		// the socket's directory is in it but on Windows, where the socket is a pipe
+		fs.mkdirSync(path.dirname(pidFile(home)), { recursive: true });
 		fs.writeFileSync(pidFile(home), String(pid.pid));
 	});
 

@@ -184,7 +184,9 @@ describe("daemon", () => {
 		await init.exited;
 		// after 10 seconds the daemon gives up on the server, and would go on to publish offline
 		const log = path.join(home, ".pushwork", "daemon.log");
-		expect(await until(async () => (await readText(log)).includes(`init in ${await fs.realpath(repo)}`), 30_000)).toBe(true);
+		// by its name: on Windows the caller's directory may be spelled another way (8.3 short names)
+		const ended = new RegExp(`init in .*\\b${path.basename(repo)}(: | failed)`);
+		expect(await until(async () => ended.test(await readText(log)), 30_000)).toBe(true);
 		for (const file of ["config.json", "heads.json", "checkout.lock"]) {
 			expect(await exists(path.join(repo, ".pushwork", file))).toBe(false);
 		}
