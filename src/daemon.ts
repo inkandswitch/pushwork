@@ -5,7 +5,7 @@ import * as fsp from "fs/promises";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import { storeDir } from "./config.js";
+import { daemonPidFile, storeDir } from "./config.js";
 import { Hub, currentHub, markDaemon, setHub } from "./hub.js";
 import { loadSeed, signerFrom } from "./key.js";
 import { lock, lockHolder } from "./lock.js";
@@ -67,7 +67,7 @@ const WAIT_MS = 60_000;
 const GRACE_MS = 10_000;
 
 const daemonDir = (home: string) => path.join(home, ".pushwork");
-export const pidFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.pid");
+export const pidFile = daemonPidFile;
 export const logFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.log");
 /** What the daemon is running (see Busy). */
 export const busyFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.busy");

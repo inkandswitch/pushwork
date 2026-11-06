@@ -3,8 +3,8 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
-import { pushworkDir } from "./config.js";
-import { lock } from "./lock.js";
+import { daemonPidFile, pushworkDir } from "./config.js";
+import { lock, lockHolder } from "./lock.js";
 import type { DocumentId } from "./url.js";
 
 const VERSION = 1;
@@ -48,5 +48,24 @@ export async function writeHeads(root: string, heads: Map<DocumentId, string[]>)
 	await fs.rename(tmp, file);
 }
 
-/** Hold `.pushwork/checkout.lock` until the returned function is called. */
-export const lockCheckout = (root: string): Promise<() => Promise<void>> => lock(path.join(pushworkDir(root), "checkout"));
+/**
+ * Hold `.pushwork/checkout.lock` until the returned function is called. Held by the daemon, it
+ * says so: the lock is the daemon's while it runs a command here, from any terminal.
+ */
+export async function lockCheckout(root: string): Promise<() => Promise<void>> {
+	const file = path.join(pushworkDir(root), "checkout");
+	try {
+		return await lock(file);
+	} catch (e) {
+		// lock() says "in use" with a plain Error; anything with a code is a real failure
+		if ((e as NodeJS.ErrnoException).code) throw e;
+		const holder = await lockHolder(file);
+		const daemon = Number(await fs.readFile(daemonPidFile(), "utf8").catch(() => "")) || 0;
+		if (holder !== 0 && holder === daemon) {
+			throw new Error(
+				`the pushwork daemon (pid ${holder}) is still running a command in this checkout; wait for it, or run \`pushwork daemon stop\``,
+			);
+		}
+		throw e;
+	}
+}

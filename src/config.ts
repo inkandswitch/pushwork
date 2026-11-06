@@ -29,6 +29,8 @@ export const pushworkDir = (root: string) => path.join(root, DIR);
 export const legacyStorageDir = (root: string) => path.join(root, DIR, STORAGE);
 /** Every checkout's documents, one store per machine. */
 export const storeDir = () => path.join(os.homedir(), DIR, STORAGE);
+/** The running daemon's pid (see src/daemon.ts). */
+export const daemonPidFile = (home = os.homedir()) => path.join(home, DIR, "daemon.pid");
 
 // fields of the configs written by pushwork 1 and 2
 type OldConfig = {
