@@ -120,7 +120,8 @@ function usesApi(command: Named): boolean {
 
 async function chooseApi(daemon: boolean): Promise<Api> {
 	if (!daemon) {
-		await stopDaemon();
+		// one we can't trust the socket of can't be stopped either
+		await stopDaemon().catch(e => dlog("stopping the daemon: %s", e instanceof Error ? e.message : e));
 		return pushwork;
 	}
 	try {

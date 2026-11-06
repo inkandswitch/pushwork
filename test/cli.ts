@@ -14,7 +14,7 @@ const homes = new Set<string>();
 // Run the built CLI (dist/ is built by global-setup). Commands run in the home's daemon; one
 // that fell back to running in the CLI fails, so the suite really tests the daemon.
 export async function pushwork(args: string[], cwd?: string, env?: NodeJS.ProcessEnv) {
-	if (env?.HOME && env.HOME !== process.env.HOME) homes.add(env.HOME);
+	if (env?.HOME && env.HOME !== process.env.HOME && args[0] !== "daemon") homes.add(env.HOME);
 	const result = await run("node", [CLI, ...args], {
 		cwd,
 		env: { ...process.env, ...env, FORCE_COLOR: "0", NO_COLOR: "1" },
@@ -32,8 +32,9 @@ export async function pushwork(args: string[], cwd?: string, env?: NodeJS.Proces
 
 /** Stop the daemons of the homes commands ran in, other than the suite's. */
 export async function stopDaemons(): Promise<void> {
-	for (const home of homes) await pushwork(["daemon", "stop"], undefined, homeEnv(home));
+	const stopping = [...homes];
 	homes.clear();
+	for (const home of stopping) await pushwork(["daemon", "stop"], undefined, homeEnv(home));
 }
 
 export const readText = (p: string) => fs.readFile(p, "utf8");

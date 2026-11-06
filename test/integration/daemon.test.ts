@@ -1,5 +1,5 @@
 // Commands run in a daemon per home, which keeps its server connections open between them.
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import * as fs from "fs/promises";
 import * as net from "net";
 import * as path from "path";
@@ -11,8 +11,9 @@ import { exists, pushwork, readText, stopDaemons } from "../cli";
 import { homeEnv } from "../home";
 import { startServer } from "../server";
 
-const DAEMON_JS = path.join(__dirname, "..", "..", "dist", "daemon.js");
-const CLI = path.join(__dirname, "..", "..", "dist", "cli.js");
+const ROOT = path.join(__dirname, "..", "..");
+const DIST = path.join(ROOT, "dist");
+const CLI = path.join(DIST, "cli.js");
 const SLAY = path.join(__dirname, "..", "..", "examples", "shapes", "slay.js");
 // nothing listens here, so a migrate that reached for the server would fail
 const UNREACHABLE = "ws://127.0.0.1:1";
@@ -93,18 +94,87 @@ describe("daemon", () => {
 	});
 
 	it("a newer daemon build restarts it", async () => {
-		await run(["init", "--offline"]);
-		const pid = await daemonPid();
-		const { atime, mtime } = await fs.stat(DAEMON_JS);
+		// a copy of dist/ beside it, so ../package.json and ../node_modules still resolve, and
+		// the daemons of the rest of the suite, which run dist/ itself, aren't disturbed
+		const copy = path.join(ROOT, `dist-test-${path.basename(work)}`);
+		await fs.cp(DIST, copy, { recursive: true });
+		const copied = async (args: string[]) => {
+			const { stdout, stderr } = await promisify(execFile)("node", [path.join(copy, "cli.js"), ...args], {
+				cwd: repo,
+				env: { ...process.env, ...env, NO_COLOR: "1" },
+			});
+			expect(stdout + stderr).not.toContain("couldn't start the pushwork daemon");
+		};
 		try {
-			await fs.utimes(DAEMON_JS, atime, new Date(mtime.getTime() + 60_000));
-			await run(["status"]);
+			await copied(["init", "--offline"]);
+			const pid = await daemonPid();
+			const daemonJs = path.join(copy, "daemon.js");
+			const { atime, mtime } = await fs.stat(daemonJs);
+			await fs.utimes(daemonJs, atime, new Date(mtime.getTime() + 60_000));
+			await copied(["status"]);
 			const next = await daemonPid();
 			expect(next).not.toBe(pid);
 			expect(alive(pid)).toBe(false);
+			expect(alive(next)).toBe(true);
+			await copied(["daemon", "stop"]);
 		} finally {
-			await fs.utimes(DAEMON_JS, atime, mtime);
+			await fs.rm(copy, { recursive: true, force: true });
 		}
+	});
+
+	it("two daemons started at once over a dead one's socket: one serves, and stays", async () => {
+		await run(["init", "--offline"]);
+		const dead = await daemonPid();
+		process.kill(dead, "SIGKILL");
+		expect(await until(() => !alive(dead), 5000)).toBe(true);
+		// what a crash leaves: the lock, the pid file, and (but for a named pipe) the socket
+		expect(await exists(path.join(home, ".pushwork", "daemon.lock"))).toBe(true);
+		if (process.platform !== "win32") expect(await exists(socketPath(home))).toBe(true);
+
+		const daemons = [0, 1].map(() =>
+			spawn(process.execPath, [CLI, "daemon", "run"], { env: { ...process.env, ...env }, stdio: "ignore" }),
+		);
+		const exits = daemons.map(d => new Promise(resolve => d.once("exit", resolve)));
+		// the other gives up on the lock as soon as the first answers
+		await Promise.race([...exits, new Promise(resolve => setTimeout(resolve, 15_000))]);
+		const running = daemons.filter(d => d.exitCode === null && d.signalCode === null);
+		expect(running).toHaveLength(1);
+		const pid = running[0].pid!;
+		expect(await until(async () => (await daemonPid().catch(() => 0)) === pid, 10_000)).toBe(true);
+
+		await run(["status"]);
+		await run(["status"]);
+		expect(await daemonPid()).toBe(pid);
+		expect(alive(pid)).toBe(true);
+	});
+
+	it.skipIf(process.platform === "win32")("keeps its socket where only its user can reach it", async () => {
+		// a short home, so the socket is in its .pushwork/run rather than /tmp
+		const short = await fs.mkdtemp("/tmp/pw-");
+		const shortEnv = homeEnv(short);
+		try {
+			const runDir = path.join(short, ".pushwork", "run");
+			// left loose: the daemon tightens it
+			await fs.mkdir(runDir, { recursive: true });
+			await fs.chmod(runDir, 0o755);
+			expect(socketPath(short)).toBe(path.join(runDir, "daemon.sock"));
+			await pushwork(["init", "--offline"], repo, shortEnv);
+			expect((await fs.stat(runDir)).mode & 0o777).toBe(0o700);
+			expect((await fs.stat(socketPath(short))).mode & 0o777).toBe(0o600);
+		} finally {
+			await stopDaemons();
+			await fs.rm(short, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("keeps a long home's socket in a private directory in /tmp", async () => {
+		const long = path.join(work, "h".repeat(100));
+		await fs.mkdir(long);
+		await pushwork(["init", "--offline"], repo, homeEnv(long));
+		const sock = socketPath(long);
+		expect(sock.startsWith(`/tmp/pushwork-${process.getuid!()}/`)).toBe(true);
+		expect((await fs.stat(path.dirname(sock))).mode & 0o777).toBe(0o700);
+		expect((await fs.stat(sock)).mode & 0o777).toBe(0o600);
 	});
 
 	it("--no-daemon stops a running daemon and works without one", async () => {

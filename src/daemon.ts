@@ -8,6 +8,7 @@ import * as path from "path";
 import { storeDir } from "./config.js";
 import { Hub, currentHub, setHub } from "./hub.js";
 import { loadSeed, signerFrom } from "./key.js";
+import { lock } from "./lock.js";
 import * as pushwork from "./pushwork.js";
 import { RpcPeer } from "./rpc.js";
 import { FsStorage } from "./storage.js";
@@ -57,8 +58,8 @@ export type Command = (typeof COMMANDS)[number];
 export const HELLO_MS = 2000;
 const IDLE_MS = 10 * 60_000;
 const HOME_CHECK_MS = 30_000;
-// how long a new daemon waits for one on its way out to let go of the socket
-const CLAIM_MS = 60_000;
+// how long a new daemon waits for the lock while the daemon holding it is on its way out
+const CLAIM_MS = 20_000;
 // how long a stopping daemon waits for connected clients that aren't running a command to hang up
 const GRACE_MS = 10_000;
 
@@ -68,10 +69,13 @@ export const logFile = (home = os.homedir()) => path.join(daemonDir(home), "daem
 
 const hash = (home: string) => createHash("sha256").update(home).digest("hex").slice(0, 12);
 
-/** Where the daemon for `home` listens: a socket in its .pushwork, unless that path is too long for one. */
+/**
+ * Where the daemon for `home` listens: a socket in .pushwork/run, a directory only its owner
+ * can use, unless that path is too long for a socket.
+ */
 export function socketPath(home = os.homedir()): string {
 	if (process.platform === "win32") return `\\\\.\\pipe\\pushwork-${hash(home)}`;
-	const sock = path.join(daemonDir(home), "daemon.sock");
+	const sock = path.join(daemonDir(home), "run", "daemon.sock");
 	if (Buffer.byteLength(sock) <= 100) return sock;
 	return path.join("/tmp", `pushwork-${process.getuid!()}`, `${hash(home)}.sock`);
 }
@@ -81,9 +85,31 @@ export function daemonVersion(): string {
 	return `${versions.pushwork}+${fs.statSync(__filename).mtimeMs}`;
 }
 
+/**
+ * Whoever can connect to the socket runs commands as this user, so the directory it's in must
+ * be this user's own, and private. Throws if it belongs to someone else. With `fix`, it's made,
+ * or tightened, if need be; without, says whether it's missing, private or loose.
+ */
+export async function privateDir(dir: string, { fix = false } = {}): Promise<"missing" | "private" | "loose"> {
+	if (process.platform === "win32") return "private";
+	if (fix) await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+	const st = await fsp.lstat(dir).catch(e => {
+		if (e.code === "ENOENT") return undefined;
+		throw e;
+	});
+	if (!st) return "missing";
+	if (!st.isDirectory()) throw new Error(`${dir} isn't a directory`);
+	if (st.uid !== process.getuid!()) throw new Error(`${dir} belongs to someone else`);
+	if ((st.mode & 0o077) === 0) return "private";
+	if (!fix) return "loose";
+	await fsp.chmod(dir, 0o700);
+	return "private";
+}
+
 export type Hello = { version: string; pid: number; stopping: boolean };
 export type Status = { pid: number; version: string; startedAt: number; servers: { server: string; peer: string }[] };
-export type Probe = { state: "up"; peer: RpcPeer; hello: Hello } | { state: "hung" } | { state: "down" };
+/** up: it answered; down: nothing listens; silent: something took the connection but didn't answer. */
+export type Probe = { state: "up"; peer: RpcPeer; hello: Hello } | { state: "silent" } | { state: "down" };
 
 const TIMEOUT = Symbol("timeout");
 const within = <T>(p: Promise<T>, ms: number) =>
@@ -97,20 +123,22 @@ const within = <T>(p: Promise<T>, ms: number) =>
 
 export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** Say hello to the daemon at `sock`: down if nothing listens, hung if it doesn't answer in time. */
+/** Say hello to the daemon at `sock`, within HELLO_MS. */
 export async function probe(sock = socketPath()): Promise<Probe> {
 	const deadline = Date.now() + HELLO_MS;
 	const socket = net.connect(sock);
 	const connected = await within(
-		new Promise<boolean>(resolve => {
+		new Promise<NodeJS.ErrnoException | true>(resolve => {
 			socket.once("connect", () => resolve(true));
-			socket.once("error", () => resolve(false));
+			socket.once("error", resolve);
 		}),
 		HELLO_MS,
 	);
 	if (connected !== true) {
 		socket.destroy();
-		return { state: connected === false ? "down" : "hung" };
+		// only these say nobody is there: anything else may be a daemon too busy to answer
+		const gone = connected !== TIMEOUT && (connected.code === "ECONNREFUSED" || connected.code === "ENOENT");
+		return { state: gone ? "down" : "silent" };
 	}
 	const peer = new RpcPeer(socket);
 	const hello = await within(
@@ -122,8 +150,7 @@ export async function probe(sock = socketPath()): Promise<Probe> {
 	);
 	if (hello === TIMEOUT || hello === undefined) {
 		peer.close();
-		// a daemon that closed on us is on its way out, not stuck
-		return { state: hello === TIMEOUT ? "hung" : "down" };
+		return { state: "silent" };
 	}
 	return { state: "up", peer, hello };
 }
@@ -134,18 +161,42 @@ const callerCwd = new AsyncLocalStorage<string | undefined>();
 const log = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-async function privateDir(dir: string): Promise<void> {
-	await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-	const st = await fsp.stat(dir);
-	if (st.uid !== process.getuid!() || (st.mode & 0o077) !== 0) {
-		throw new Error(`${dir} must be a directory only you can use`);
+/**
+ * The lock only one daemon per home holds, for its whole life: only the holder removes the
+ * socket and listens. Undefined if another daemon is serving. One on its way out is waited
+ * for; a lock whose holder is alive but has had no socket for CLAIM_MS (its pid reused by
+ * another process after a crash, say) is taken over.
+ */
+async function claimLock(home: string): Promise<(() => Promise<void>) | undefined> {
+	const file = path.join(daemonDir(home), "daemon");
+	const deadline = Date.now() + CLAIM_MS;
+	for (;;) {
+		try {
+			return await lock(file);
+		} catch (e) {
+			// lock() says "in use" with a plain Error; anything with a code is a real failure
+			if ((e as NodeJS.ErrnoException).code) throw e;
+		}
+		const other = await probe(socketPath(home));
+		if (other.state === "up") {
+			other.peer.close();
+			if (!other.hello.stopping) return undefined;
+		}
+		if (Date.now() > deadline) {
+			if (other.state !== "down") return undefined;
+			log(`taking over ${file}.lock, whose holder isn't serving`);
+			await fsp.rm(`${file}.lock`, { force: true });
+			continue;
+		}
+		await sleep(200);
 	}
 }
 
-// Listen on sock, unless a daemon is already serving there; wait for one that's stopping.
-async function claim(server: net.Server, sock: string): Promise<boolean> {
-	const deadline = Date.now() + CLAIM_MS;
-	for (;;) {
+// Listen on sock, which this daemon's lock makes its own.
+async function listen(server: net.Server, sock: string): Promise<void> {
+	if (process.platform !== "win32") await fsp.rm(sock, { force: true });
+	// a named pipe outlives its daemon by a moment
+	for (let tries = 0; ; tries++) {
 		const err = await new Promise<NodeJS.ErrnoException | undefined>(resolve => {
 			const failed = (e: NodeJS.ErrnoException) => resolve(e);
 			server.once("error", failed);
@@ -154,20 +205,11 @@ async function claim(server: net.Server, sock: string): Promise<boolean> {
 				resolve(undefined);
 			});
 		});
-		if (!err) return true;
-		if (err.code !== "EADDRINUSE") throw err;
-		const other = await probe(sock);
-		if (other.state === "up") {
-			other.peer.close();
-			if (!other.hello.stopping) return false;
-		} else if (other.state === "down" && process.platform !== "win32") {
-			// left behind by a daemon that died
-			await fsp.rm(sock, { force: true });
-			continue;
-		}
-		if (Date.now() > deadline) throw new Error(`${sock} is still in use`);
+		if (!err) break;
+		if (err.code !== "EADDRINUSE" || tries >= 50) throw err;
 		await sleep(100);
 	}
+	if (process.platform !== "win32") await fsp.chmod(sock, 0o600);
 }
 
 /**
@@ -180,7 +222,23 @@ export async function runDaemon(): Promise<void> {
 	const dir = daemonDir(home);
 	await fsp.mkdir(dir, { recursive: true });
 	const sock = socketPath(home);
-	if (process.platform !== "win32" && path.dirname(sock) !== dir) await privateDir(path.dirname(sock));
+	await privateDir(path.dirname(sock), { fix: true });
+	const unlock = await claimLock(home);
+	if (!unlock) {
+		log("another daemon is serving this home");
+		return;
+	}
+	try {
+		await serve(home, sock);
+	} finally {
+		await unlock();
+	}
+}
+
+async function serve(home: string, sock: string): Promise<void> {
+	const dir = daemonDir(home);
+	// clients open the log to append, so only the daemon that won the lock starts it afresh
+	await fsp.truncate(logFile(home), 0).catch(() => {});
 
 	const version = daemonVersion();
 	const startedAt = Date.now();
@@ -303,27 +361,19 @@ export async function runDaemon(): Promise<void> {
 		peers.add(peer);
 		peer.onClose(() => peers.delete(peer));
 	});
-	if (!(await claim(server, sock))) {
-		log("another daemon is serving this home");
-		return;
-	}
+	await listen(server, sock);
 	await fsp.writeFile(pidFile(home), String(process.pid));
 	log(`pushwork daemon ${version} (pid ${process.pid}) listening on ${sock}`);
 
 	const ownCwd = process.cwd.bind(process);
 	process.cwd = () => callerCwd.getStore() ?? ownCwd();
 	process.on("unhandledRejection", e => log(`unhandled rejection: ${errorText(e)}`));
+	// what a client sends one that stopped answering: finish what it's running, as for stop
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 	process.on("SIGINT", () => void shutdown("SIGINT"));
 
 	const homeCheck = setInterval(() => {
-		if (!fs.existsSync(dir)) return void shutdown(`${dir} is gone`);
-		// two daemons that started at once over a dead one's socket: the one whose pid isn't in the file lost
-		let owner = "";
-		try {
-			owner = fs.readFileSync(pidFile(home), "utf8").trim();
-		} catch {}
-		if (owner && owner !== String(process.pid)) void shutdown(`pid ${owner} took over`);
+		if (!fs.existsSync(dir)) void shutdown(`${dir} is gone`);
 	}, HOME_CHECK_MS);
 	armIdle();
 
@@ -341,8 +391,7 @@ export async function runDaemon(): Promise<void> {
 		server.close();
 		for (const peer of peers) peer.close();
 		await closeHub();
-		const owner = await fsp.readFile(pidFile(home), "utf8").catch(() => "");
-		if (owner.trim() === String(process.pid)) await fsp.rm(pidFile(home), { force: true });
+		await fsp.rm(pidFile(home), { force: true });
 		log("stopped");
 		finish();
 	}

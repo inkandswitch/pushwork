@@ -8,6 +8,8 @@ pnpm-debug.log*
 # Build outputs
 dist/
 dist-bench/
+# copies of dist/ made by test/integration/daemon.test.ts
+dist-test-*/
 build/
 *.tsbuildinfo
 

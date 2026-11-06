@@ -2,10 +2,13 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
-import { pushwork, readText, userFiles } from "../cli";
+import { pushwork, readText, stopDaemons, userFiles } from "../cli";
 import { homeEnv } from "../home";
 
 tmp.setGracefulCleanup();
+
+// the stranger's home has its own daemon
+afterEach(() => stopDaemons());
 
 async function setup() {
 	const work = tmp.dirSync({ unsafeCleanup: true }).name;

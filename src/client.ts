@@ -6,12 +6,15 @@ import * as path from "path";
 import {
 	COMMANDS,
 	daemonVersion,
+	HELLO_MS,
 	logFile,
 	pidFile,
+	privateDir,
 	probe,
 	sleep,
 	socketPath,
 	type Command,
+	type Probe,
 	type Status,
 } from "./daemon.js";
 import { log } from "./log.js";
@@ -24,7 +27,7 @@ const dlog = log("client");
 export type Api = Pick<typeof pushwork, Command>;
 
 const START_MS = 10_000;
-// how long `daemon stop` lets running commands finish before killing the daemon
+// how long `daemon stop` lets running commands finish before terminating the daemon
 const STOP_MS = 60_000;
 
 const alive = (pid: number) => {
@@ -59,20 +62,41 @@ async function readPid(): Promise<number> {
 	return Number(await fs.promises.readFile(pidFile(), "utf8").catch(() => "")) || 0;
 }
 
-async function kill(pid: number): Promise<void> {
+// Ask a daemon that stopped answering to finish up and go (it drains on SIGTERM as on stop); kill it if it won't.
+async function terminate(pid: number): Promise<void> {
 	if (!alive(pid)) return;
-	dlog("killing daemon pid %d", pid);
+	dlog("terminating daemon pid %d", pid);
+	try {
+		process.kill(pid, "SIGTERM");
+	} catch {}
+	if (await until(() => !alive(pid), 2000)) return;
 	try {
 		process.kill(pid, "SIGKILL");
 	} catch {}
 	await until(() => !alive(pid), 5000);
 }
 
+/**
+ * Hello to this home's daemon. Only through a socket directory that's the user's own and
+ * private: whoever could put a socket there would run our commands. One belonging to someone
+ * else throws; a loose one counts as no daemon, so a new one is started, which tightens it and
+ * replaces the socket. Silent only after three tries over about six seconds: a busy daemon
+ * isn't a hung one.
+ */
+export async function reachable(sock = socketPath()): Promise<Probe> {
+	for (let tries = 1; ; tries++) {
+		if ((await privateDir(path.dirname(sock))) !== "private") return { state: "down" };
+		const start = Date.now();
+		const p = await probe(sock);
+		if (p.state !== "silent" || tries === 3) return p;
+		await sleep(HELLO_MS - (Date.now() - start));
+	}
+}
+
 function start(): void {
 	const home = os.homedir();
 	fs.mkdirSync(path.dirname(logFile(home)), { recursive: true });
-	// emptied, then appended to, so a daemon still on its way out doesn't write into a hole
-	fs.writeFileSync(logFile(home), "");
+	// appended to: the daemon that wins the lock empties it
 	const out = fs.openSync(logFile(home), "a");
 	try {
 		const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), "daemon", "run"], {
@@ -90,30 +114,32 @@ function start(): void {
 }
 
 // A connection to an up-to-date daemon: started if there's none, restarted if it's a
-// different build, killed first if it doesn't answer.
+// different build, terminated first if it doesn't answer.
 async function reach(): Promise<RpcPeer> {
 	const want = daemonVersion();
 	const sock = socketPath();
-	const first = await probe(sock);
+	const first = await reachable(sock);
 	if (first.state === "up") {
 		if (first.hello.version === want && !first.hello.stopping) return first.peer;
 		dlog("daemon %s is %s; replacing it", first.hello.version, first.hello.stopping ? "stopping" : "out of date");
 		await first.peer.call("stop", []).catch(() => {});
 		first.peer.close();
 		await until(async () => !(await listening(sock)), START_MS);
-	} else if (first.state === "hung") {
-		await kill(await readPid());
+	} else if (first.state === "silent") {
+		await terminate(await readPid());
 	}
 	start();
 	const end = Date.now() + START_MS;
 	for (;;) {
 		await sleep(50);
-		const p = await probe(sock);
-		if (p.state === "up") {
-			// any build will do now: one started at the same time by another build's command
-			// would only be replaced again
-			if (!p.hello.stopping) return p.peer;
-			p.peer.close();
+		if ((await privateDir(path.dirname(sock))) === "private") {
+			const p = await probe(sock);
+			if (p.state === "up") {
+				// any build will do now: one started at the same time by another build's command
+				// would only be replaced again
+				if (!p.hello.stopping) return p.peer;
+				p.peer.close();
+			}
 		}
 		if (Date.now() > end) throw new Error(`the pushwork daemon didn't answer within ${START_MS} ms`);
 	}
@@ -148,16 +174,16 @@ export function hangUp(): void {
 /** Stop this home's daemon, after the commands it's running finish; false if none was running. */
 export async function stopDaemon(): Promise<boolean> {
 	const sock = socketPath();
-	const p = await probe(sock);
+	const p = await reachable(sock);
 	if (p.state === "down") return false;
-	if (p.state === "hung") {
-		await kill(await readPid());
+	if (p.state === "silent") {
+		await terminate(await readPid());
 		return true;
 	}
 	const { pid } = p.hello;
 	await p.peer.call("stop", []).catch(() => {});
 	p.peer.close();
-	if (!(await until(async () => !(await listening(sock)), STOP_MS))) await kill(pid);
+	if (!(await until(async () => !(await listening(sock)), STOP_MS))) await terminate(pid);
 	// gone from the socket; wait for it to let go of its files too
 	await until(() => !alive(pid), 5000);
 	return true;
@@ -165,7 +191,7 @@ export async function stopDaemon(): Promise<boolean> {
 
 /** The running daemon's state, or undefined if none answers. */
 export async function daemonStatus(): Promise<Status | undefined> {
-	const p = await probe();
+	const p = await reachable();
 	if (p.state !== "up") return undefined;
 	try {
 		return (await p.peer.call("status", [])) as Status;
