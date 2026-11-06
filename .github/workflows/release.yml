@@ -90,6 +90,6 @@ jobs:
 
       # without an NPM_TOKEN secret, NODE_AUTH_TOKEN is empty and npm publishes through id-token
       - name: publish to the fx tag
-        run: npm publish --tag fx --access public --provenance
+        run: npm publish --tag fx --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
