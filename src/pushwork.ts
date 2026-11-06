@@ -16,6 +16,7 @@ import {
 } from "./config.js";
 import { headsFile, lockCheckout, readHeads, writeHeads } from "./checkout.js";
 import { Docs, DocumentUnreadable, type SyncReport } from "./docs.js";
+import { currentHub } from "./hub.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
 import type { Grantee, Member, PublicPair } from "./keyhive/common.js";
 import type { PublicPrincipals } from "./keyhive/keyline/public.js";
@@ -150,8 +151,11 @@ async function openDocs(
 	hive?: Hive,
 	{ group, base, fresh }: { group?: string; base?: Map<DocumentId, string[]>; fresh?: boolean } = {},
 ): Promise<Docs> {
+	// in a long-lived process every plain repo's docs go through its one node; keyhive brings its own
+	const hub = hive ? undefined : currentHub();
 	const docs = await Docs.open({
-		storage: await FsStorage.open(storeDir()),
+		storage: hub ? hub.storage : await FsStorage.open(storeDir()),
+		hub,
 		signer: signerFrom(seed),
 		server,
 		codec: hive?.codec,

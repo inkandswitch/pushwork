@@ -41,8 +41,10 @@ function transport(ws: WebSocket, stalled: () => boolean): Transport {
 }
 
 // A Subduction sync server on an ephemeral port, backed by memory. After stall() it
-// keeps its connections open but never answers.
-export async function startServer(policy?: Policy): Promise<{ url: string; node: Subduction; stall(): void; close(): Promise<void> }> {
+// keeps its connections open but never answers. connections() counts the websockets it accepted.
+export async function startServer(
+	policy?: Policy,
+): Promise<{ url: string; node: Subduction; stall(): void; connections(): number; close(): Promise<void> }> {
 	setSubductionLogLevel("error");
 	const node = new Subduction({ signer: MemorySigner.generate(), storage: new MemoryStorage(), policy });
 	const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -51,7 +53,9 @@ export async function startServer(policy?: Policy): Promise<{ url: string; node:
 	// The service name must equal the client's URL.host or the handshake fails.
 	const host = `127.0.0.1:${port}`;
 	let stalled = false;
+	let count = 0;
 	wss.on("connection", ws => {
+		count++;
 		ws.binaryType = "nodebuffer";
 		node.acceptTransport(transport(ws, () => stalled), host).catch(() => ws.terminate());
 	});
@@ -61,6 +65,7 @@ export async function startServer(policy?: Policy): Promise<{ url: string; node:
 		stall: () => {
 			stalled = true;
 		},
+		connections: () => count,
 		async close() {
 			for (const ws of wss.clients) ws.terminate();
 			await new Promise(resolve => wss.close(resolve));

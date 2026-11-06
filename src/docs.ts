@@ -16,6 +16,7 @@ import {
 	type Signer,
 } from "@automerge/automerge-subduction";
 import { Allowlist } from "./allowlist";
+import type { Hub } from "./hub";
 import { log } from "./log";
 import {
 	newDocumentId,
@@ -57,6 +58,8 @@ export type DocsOptions = {
 	base?: Map<DocumentId, string[]>;
 	// online, sync each doc before its first read, so a copy another checkout left in the store isn't taken for the server's
 	fresh?: boolean;
+	// a long-lived process's node and connections, shared instead of made and closed here; storage must be the hub's
+	hub?: Hub;
 };
 
 export type SyncReport = {
@@ -102,7 +105,7 @@ export function limiter(n: number) {
 	};
 }
 
-type Connection = { peer?: PeerId; error?: string; connectMs?: number };
+export type Connection = { peer?: PeerId; error?: string; connectMs?: number };
 
 /** No blob of the document is stored here, or on the server. */
 export class DocumentNotFound extends Error {
@@ -132,7 +135,7 @@ export class MissingBase extends Error {
 }
 
 // The handshake runs off the node, so one that times out leaves the node free to be freed.
-async function connect(node: Subduction, signer: Signer, server: string): Promise<Connection> {
+export async function connect(node: Subduction, signer: Signer, server: string): Promise<Connection> {
 	const start = performance.now();
 	const timeout = new Promise<never>((_, reject) =>
 		setTimeout(() => reject(new Error(`timed out connecting to ${server}`)), TIMEOUT_MS).unref(),
@@ -169,6 +172,12 @@ export class Docs {
 	) {}
 
 	static async open(options: DocsOptions): Promise<Docs> {
+		const { hub } = options;
+		if (hub) {
+			// a write through another node would leave the hub's node sending stale state
+			if (options.storage !== hub.storage) throw new Error("a hub's docs must use the hub's storage");
+			return new Docs(hub.node, options, options.server ? await hub.connect(options.server) : {}, hub.allowlist);
+		}
 		if (!/subduction/.test(process.env.DEBUG ?? "")) setSubductionLogLevel("error");
 		const allowlist = new Allowlist();
 		const node = new Subduction({
@@ -185,7 +194,8 @@ export class Docs {
 
 	/** Connect to another server, such as a keyhive server, that docs don't sync with. */
 	async connect(server: string): Promise<void> {
-		const { peer, error } = await connect(this.node, this.options.signer, server);
+		const { hub, signer } = this.options;
+		const { peer, error } = hub ? await hub.connect(server) : await connect(this.node, signer, server);
 		if (!peer) throw new Error(`could not connect to ${server}: ${error}`);
 	}
 
@@ -319,6 +329,8 @@ export class Docs {
 		for (const [id, entry] of this.entries) {
 			if (entry.touched) await this.compact(id, entry.doc);
 		}
+		// the hub's node and connections outlive this
+		if (this.options.hub) return;
 		await this.node.disconnectAll();
 		this.node.free();
 	}
