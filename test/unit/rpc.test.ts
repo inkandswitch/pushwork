@@ -2,6 +2,7 @@ import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import * as fs from "node:fs"
+import { encode } from "cbor-x"
 import { afterEach, describe, expect, it } from "vitest"
 import { RpcPeer, type Handler } from "../../src/rpc.js"
 
@@ -95,5 +96,49 @@ describe("RpcPeer", () => {
 			client.call("c", [big + "y"]),
 		])
 		expect(results).toEqual([big, 1, big + "y"])
+	})
+
+	it("does not leak an unhandled rejection from an unawaited callback", async () => {
+		const seen: unknown[] = []
+		const on = (e: unknown) => seen.push(e)
+		process.on("unhandledRejection", on)
+		try {
+			let release!: () => void
+			const gate = new Promise<void>(r => (release = r))
+			const { client } = await pair(async (_m, args) => {
+				await gate
+				void (args[0] as () => Promise<void>)()
+				return "done"
+			})
+			void client.call("go", [async () => {}]).catch(() => {})
+			client.close()
+			release()
+			await new Promise(r => setTimeout(r, 50))
+			expect(seen).toEqual([])
+		} finally {
+			process.off("unhandledRejection", on)
+		}
+	})
+
+	it("closes the peer on a malformed frame", async () => {
+		for (const payload of [null, { t: "result", id: 1, value: { $map: [1] } }]) {
+			const { client, serverSocket } = await pair(async () => 0)
+			const pending = client.call("x", [])
+			void pending.catch(() => {})
+			const body = encode(payload)
+			const frame = Buffer.alloc(4 + body.length)
+			frame.writeUInt32BE(body.length, 0)
+			frame.set(body, 4)
+			const closed = new Promise<void>(r => client.onClose(r))
+			serverSocket.write(frame)
+			await closed
+			await expect(pending).rejects.toThrow("connection closed")
+		}
+	})
+
+	it("does not mistake user objects for markers", async () => {
+		const { client } = await pair(async (_m, args) => args)
+		const input = [{ $fn: 3 }, { $map: [[1, 2]] }, { $obj: { $fn: 1 } }]
+		expect(await client.call("echo", input)).toEqual(input)
 	})
 })

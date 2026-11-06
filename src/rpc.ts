@@ -9,6 +9,10 @@ type Message =
 	| { t: "result"; id: number; value: unknown }
 	| { t: "error"; id: number; message: string; name: string }
 
+const MAX_FRAME = 256 * 1024 * 1024
+// a user object whose only key is one of these would read as a marker
+const MARKERS = new Set(["$fn", "$map", "$obj"])
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
 	if (typeof v !== "object" || v === null) return false
 	const proto = Object.getPrototypeOf(v)
@@ -16,7 +20,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 export class RpcPeer {
-	private buffer = Buffer.alloc(0)
+	private chunks: Buffer[] = []
+	private buffered = 0
+	// bytes the next frame needs in total, once its header has been read
+	private need = 4
 	private nextId = 1
 	private pending = new Map<
 		number,
@@ -75,7 +82,12 @@ export class RpcPeer {
 		const id = this.nextId++
 		return new Promise((resolve, reject) => {
 			this.pending.set(id, { resolve, reject })
-			this.send({ ...msg, id, args: this.marshal(msg.args) as unknown[] })
+			try {
+				this.send({ ...msg, id, args: this.marshal(msg.args) as unknown[] })
+			} catch (e) {
+				this.pending.delete(id)
+				throw e
+			}
 		})
 	}
 
@@ -101,7 +113,8 @@ export class RpcPeer {
 		if (isPlainObject(v)) {
 			const out: Record<string, unknown> = {}
 			for (const [k, x] of Object.entries(v)) out[k] = this.marshal(x)
-			return out
+			const keys = Object.keys(out)
+			return keys.length === 1 && MARKERS.has(keys[0]) ? { $obj: out } : out
 		}
 		return v
 	}
@@ -110,7 +123,17 @@ export class RpcPeer {
 		if (Array.isArray(v)) return v.map(x => this.unmarshal(x))
 		if (isPlainObject(v)) {
 			const keys = Object.keys(v)
-			if (keys.length === 1 && keys[0] === "$map" && Array.isArray(v.$map)) {
+			const only = keys.length === 1 ? keys[0] : undefined
+			if (only === "$obj" && isPlainObject(v.$obj)) {
+				return this.unmarshalEntries(v.$obj)
+			}
+			if (only === "$map") {
+				if (
+					!Array.isArray(v.$map) ||
+					!v.$map.every(e => Array.isArray(e) && e.length === 2)
+				) {
+					throw new Error("malformed map")
+				}
 				return new Map(
 					(v.$map as [unknown, unknown][]).map(([k, x]) => [
 						this.unmarshal(k),
@@ -118,49 +141,77 @@ export class RpcPeer {
 					]),
 				)
 			}
-			if (keys.length === 1 && keys[0] === "$fn" && typeof v.$fn === "number") {
+			if (only === "$fn") {
+				if (typeof v.$fn !== "number") throw new Error("malformed function")
 				const fn = v.$fn
-				return (...args: unknown[]) => this.request({ t: "invoke", fn, args })
+				return (...args: unknown[]) => {
+					const p = this.request({ t: "invoke", fn, args })
+					// callers may not await a callback; a closed socket mustn't crash us
+					p.catch(() => {})
+					return p
+				}
 			}
-			const out: Record<string, unknown> = {}
-			for (const [k, x] of Object.entries(v)) out[k] = this.unmarshal(x)
-			return out
+			return this.unmarshalEntries(v)
 		}
 		return v
 	}
 
+	private unmarshalEntries(v: Record<string, unknown>): Record<string, unknown> {
+		const out: Record<string, unknown> = {}
+		for (const [k, x] of Object.entries(v)) out[k] = this.unmarshal(x)
+		return out
+	}
+
 	private onData(chunk: Buffer): void {
-		this.buffer = Buffer.concat([this.buffer, chunk])
-		while (this.buffer.length >= 4) {
-			const len = this.buffer.readUInt32BE(0)
-			if (this.buffer.length < 4 + len) return
-			const body = this.buffer.subarray(4, 4 + len)
-			this.buffer = this.buffer.subarray(4 + len)
-			let msg: Message
-			try {
-				msg = decode(body) as Message
-			} catch {
-				this.close()
-				return
+		if (this.closed) return
+		this.chunks.push(chunk)
+		this.buffered += chunk.length
+		try {
+			// concat once per frame, not once per chunk
+			while (this.buffered >= this.need) {
+				let buf = Buffer.concat(this.chunks)
+				if (this.need === 4) {
+					const len = buf.readUInt32BE(0)
+					if (len > MAX_FRAME) throw new Error("frame too large")
+					this.need = 4 + len
+					if (this.buffered < this.need) {
+						this.chunks = [buf]
+						return
+					}
+				}
+				const body = buf.subarray(4, this.need)
+				buf = buf.subarray(this.need)
+				this.chunks = buf.length ? [buf] : []
+				this.buffered = buf.length
+				this.need = 4
+				this.onMessage(decode(body))
 			}
-			this.onMessage(msg)
+		} catch {
+			this.close()
 		}
 	}
 
-	private onMessage(msg: Message): void {
-		if (msg.t === "result" || msg.t === "error") {
-			const p = this.pending.get(msg.id)
+	private onMessage(msg: unknown): void {
+		if (!isPlainObject(msg) || typeof msg.id !== "number") {
+			throw new Error("bad message")
+		}
+		const m = msg as Message
+		if (m.t === "result" || m.t === "error") {
+			const p = this.pending.get(m.id)
 			if (!p) return
-			this.pending.delete(msg.id)
-			if (msg.t === "result") p.resolve(this.unmarshal(msg.value))
+			// unmarshal first: if it throws, close() must still reject this call
+			const value = m.t === "result" ? this.unmarshal(m.value) : undefined
+			this.pending.delete(m.id)
+			if (m.t === "result") p.resolve(value)
 			else {
-				const err = new Error(msg.message)
-				err.name = msg.name
+				const err = new Error(String(m.message))
+				err.name = String(m.name)
 				p.reject(err)
 			}
 			return
 		}
-		void this.serve(msg)
+		if (m.t !== "call" && m.t !== "invoke") throw new Error("bad message")
+		void this.serve(m)
 	}
 
 	private async serve(msg: Message & { t: "call" | "invoke" }): Promise<void> {
@@ -181,7 +232,11 @@ export class RpcPeer {
 		} catch (e) {
 			if (this.closed) return
 			const err = e instanceof Error ? e : new Error(String(e))
-			this.send({ t: "error", id: msg.id, message: err.message, name: err.name })
+			try {
+				this.send({ t: "error", id: msg.id, message: err.message, name: err.name })
+			} catch {
+				this.close()
+			}
 		}
 	}
 }
