@@ -4,6 +4,7 @@ import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
 import { exists, pushwork, readText } from "../cli";
+import { homeEnv } from "../home";
 
 const server = inject("server");
 
@@ -127,6 +128,21 @@ describe("checkouts", () => {
 		await pushwork(["sync"], b);
 		expect(await readText(notes(b))).toBe("one\ntwo\nTHREE\n");
 		expect(await readText(path.join(b, "sub", "new.txt"))).toBe("new\n");
+	});
+
+	it("clone writes what the server has, not an older copy in the store", async () => {
+		// another machine moves the repo on; this machine's store still has it as a and b left it
+		const elsewhere = path.join(work, "elsewhere");
+		await fs.mkdir(elsewhere);
+		const c = path.join(work, "c");
+		await pushwork(["clone", "--sync-server", server, await urlOf(a), c], undefined, homeEnv(elsewhere));
+		await edit(c, 1, "ONE");
+		await pushwork(["sync"], c, homeEnv(elsewhere));
+
+		const d = path.join(work, "d");
+		await pushwork(["clone", "--sync-server", server, await urlOf(a), d]);
+		expect(await readText(notes(d))).toBe("ONE\ntwo\nthree\n");
+		expect(await porcelainStatus(d)).toBe("");
 	});
 
 	it("no .pushwork/storage is written", async () => {

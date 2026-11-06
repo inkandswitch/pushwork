@@ -55,6 +55,8 @@ export type DocsOptions = {
 	newId?: () => Promise<DocumentId>;
 	// the heads this checkout last saw of each doc, which it reads and writes at
 	base?: Map<DocumentId, string[]>;
+	// online, sync each doc before its first read, so a copy another checkout left in the store isn't taken for the server's
+	fresh?: boolean;
 };
 
 export type SyncReport = {
@@ -155,7 +157,8 @@ export class Docs {
 	// docs with a fragment held back until its head reaches the server
 	private waiting = new Set<DocumentId>();
 	private limit = limiter(16);
-	// once set, every doc reads and writes live, and options.base is spent
+	// once set, options.base is spent: docs loaded from then on read and write live, as if fresh.
+	// Docs already loaded keep the base advance() gave them.
 	private advanced = false;
 
 	private constructor(
@@ -254,7 +257,7 @@ export class Docs {
 		return stringifyAutomergeUrl(documentId, entry.base ?? A.getHeads(entry.doc));
 	}
 
-	/** Move every loaded doc's base to its live heads; docs loaded from now on read live. */
+	/** Move every loaded doc's base to its live heads; docs loaded from now on are synced first when online, then read live. */
 	advance(): void {
 		this.advanced = true;
 		for (const entry of this.entries.values()) entry.base = A.getHeads(entry.doc);
@@ -334,8 +337,10 @@ export class Docs {
 	private async load(id: DocumentId): Promise<Entry> {
 		const base = this.advanced ? undefined : this.options.base?.get(id);
 		const missing = (doc?: A.Doc<unknown>) => !doc || (base !== undefined && !A.hasHeads(doc, base));
+		const fresh = this.online && (this.options.fresh || this.advanced) && !this.results.has(id);
+		if (fresh) await this.syncDoc(id);
 		let doc = await this.read(id);
-		if (missing(doc) && this.online) {
+		if (missing(doc) && this.online && !fresh) {
 			await this.syncDoc(id);
 			doc = await this.read(id);
 		}

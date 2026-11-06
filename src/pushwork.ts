@@ -148,8 +148,7 @@ async function openDocs(
 	seed: Uint8Array,
 	server?: string,
 	hive?: Hive,
-	group?: string,
-	base?: Map<DocumentId, string[]>,
+	{ group, base, fresh }: { group?: string; base?: Map<DocumentId, string[]>; fresh?: boolean } = {},
 ): Promise<Docs> {
 	const docs = await Docs.open({
 		storage: await FsStorage.open(storeDir()),
@@ -158,6 +157,7 @@ async function openDocs(
 		codec: hive?.codec,
 		newId: group ? hive!.newId(group) : undefined,
 		base,
+		fresh,
 	});
 	// keyhive talks to its own server when documents sync elsewhere
 	if (hive && docs.online && hive.server !== server) await docs.connect(hive.server);
@@ -625,7 +625,7 @@ async function openRepo(cwd: string, { online = false, reader = false, lock = tr
 		hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), reader) : undefined;
 		const server = online ? (config.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
 		const group = await hive?.groupOf(parseAutomergeUrl(config.rootUrl).documentId);
-		const docs = await openDocs(root, seed, server, hive, group, base);
+		const docs = await openDocs(root, seed, server, hive, { group, base });
 		const opened = hive;
 		const close = async () => {
 			try {
@@ -740,7 +740,7 @@ export async function init(
 		server: opts.keyhive?.serverAccess ?? "relay",
 	});
 	const server = online ? (opts.syncServer ?? hive?.server ?? DEFAULT_SERVER) : undefined;
-	const docs = await openDocs(root, seed, server, hive, group);
+	const docs = await openDocs(root, seed, server, hive, { group });
 	try {
 		const shape = await resolveShape(opts.shape);
 		report("Reading working tree");
@@ -794,7 +794,8 @@ async function attach(opts: CloneOpts, mode: Attach, report: Reporter): Promise<
 		const keyhive = isKeyhive(url) ? await keyhiveSettingsFor(opts) : undefined;
 		const hive = keyhive ? await openHive(seed, keyhive) : undefined;
 		const server = opts.syncServer ?? hive?.server ?? DEFAULT_SERVER;
-		const docs = await openDocs(root, seed, server, hive);
+		// the store may hold the url from an older checkout; what's written here is the server's
+		const docs = await openDocs(root, seed, server, hive, { fresh: true });
 		try {
 			if (!docs.online) {
 				throw new Error(`could not connect to ${server}: ${docs.report().error}`);

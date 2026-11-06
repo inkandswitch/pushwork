@@ -690,6 +690,42 @@ describe("Docs base", () => {
 		await docs.close();
 	});
 
+	// the store has h2, the server a newer change on top (a = 3)
+	async function newerOnServer() {
+		const server = inject("server");
+		const doc = await twoChanges();
+		const pusher = await doc.reopen(undefined, { server });
+		await pusher.sync([doc.url]);
+		await pusher.close();
+		const other = await open({ server });
+		await other.find(doc.url);
+		await other.change<Doc>(doc.url, d => {
+			d.a = 3;
+		});
+		await other.sync([doc.url]);
+		await other.close();
+		return { ...doc, server };
+	}
+
+	it("fresh fetches a document the store already holds before reading it", async () => {
+		const { url, reopen, server } = await newerOnServer();
+		const stale = await reopen(undefined, { server });
+		expect(await stale.find<Doc>(url)).toEqual({ a: 2 });
+		await stale.close();
+		const docs = await reopen(undefined, { server, fresh: true });
+		expect(await docs.find<Doc>(url)).toEqual({ a: 3 });
+		expect(docs.report()).toMatchObject({ synced: 1, unsynced: [] });
+		await docs.close();
+	});
+
+	it("a document first loaded after advance is fetched before it's read", async () => {
+		const { url, id, h2, reopen, server } = await newerOnServer();
+		const docs = await reopen(new Map([[id, h2]]), { server });
+		docs.advance();
+		expect(await docs.find<Doc>(url)).toEqual({ a: 3 });
+		await docs.close();
+	});
+
 	it("fetches a base it doesn't have when online", async () => {
 		const server = inject("server");
 		const { url, id, reopen } = await twoChanges();

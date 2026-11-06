@@ -28,14 +28,14 @@ The steps of `sync`, in order (`commitWorkdir` in `src/pushwork.ts`):
 5. `docs.sync()`: save, then sync every document this run has loaded (the whole tree).
 6. `docs.advance()`: this checkout has now seen what the sync brought, so its heads move to the live heads.
 7. If artifact pins moved during the sync, sync the folders that hold them again.
-8. Decode the tree again and write it to disk. Documents it references that we don't have yet are fetched as they are found.
+8. Decode the tree again and write it to disk. Documents it loads for the first time are synced as they are found, before they're read, even ones the store already holds.
 9. Save, record the checkout's heads, then close: compact, disconnect.
 
 `save` is the same pipeline offline, stopping after step 4 and materializing. It never advances, so it shows only this checkout's own changes.
 
 ## Checkout heads
 
-The store holds every document on the machine, including other checkouts' changes. Each checkout records the heads it last saw of each document in `.pushwork/heads.json` (see [`config`](./config.md)). Every command except `sync` reads and writes each document at those heads, so another checkout's sync doesn't show up in this one's `status` until this one syncs. A document with no recorded heads is read live. `sync` calls `advance()` right after syncing: from then on every document is read live and the new heads are recorded, so edits made in different checkouts merge there.
+The store holds every document on the machine, including other checkouts' changes. Each checkout records the heads it last saw of each document in `.pushwork/heads.json` (see [`config`](./config.md)). Every command except `sync` reads and writes each document at those heads, so another checkout's sync doesn't show up in this one's `status` until this one syncs. A document with no recorded heads is read live. `sync` calls `advance()` right after syncing: from then on every document is read live and the new heads are recorded, so edits made in different checkouts merge there. A document loaded after `advance()` is synced before it's read, so a copy another checkout left in the store isn't taken for the server's. `clone`, `track` and `merge` open `Docs` with `fresh` and do the same with every document, so a URL the store already has from an older checkout comes out as the server has it.
 
 Commands that open a repo take `.pushwork/checkout.lock` for the run, so two never write one checkout at once. `status`, `diff` and `heads` don't take it.
 
