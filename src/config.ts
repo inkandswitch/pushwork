@@ -119,15 +119,16 @@ function checkConfig(parsed: any): PushworkConfig {
 	};
 }
 
+// written aside and renamed in, so a crash leaves the old config whole (migrate relies on it)
 export async function writeConfig(
 	root: string,
 	config: PushworkConfig,
 ): Promise<void> {
 	await fs.mkdir(path.join(root, DIR), { recursive: true });
-	await fs.writeFile(
-		path.join(root, DIR, CONFIG),
-		JSON.stringify(config, null, 2) + "\n",
-	);
+	const file = path.join(root, DIR, CONFIG);
+	const tmp = `${file}.tmp`;
+	await fs.writeFile(tmp, JSON.stringify(config, null, 2) + "\n");
+	await fs.rename(tmp, file);
 }
 
 export async function configExists(root: string): Promise<boolean> {

@@ -29,6 +29,17 @@ describe("config", () => {
 		expect("publishGroup" in written).toBe(false);
 	});
 
+	it("writes the config aside and renames it into place", async () => {
+		const root = await withConfig({ version: 6, rootUrl: url, shape: "vfs" });
+		// a link to the old file keeps what it held only if the new one is a different file
+		const old = path.join(root, "old-config.json");
+		await fs.link(path.join(root, ".pushwork", "config.json"), old);
+		await writeConfig(root, { version: CONFIG_VERSION, rootUrl: url, shape: "vfs", artifactDirectories: [] });
+		expect(JSON.parse(await fs.readFile(old, "utf8")).version).toBe(6);
+		expect((await readConfig(root)).version).toBe(CONFIG_VERSION);
+		expect(await fs.readdir(path.join(root, ".pushwork"))).toEqual(["config.json"]);
+	});
+
 	it("strips heads from the root url", async () => {
 		const root = await withConfig({ version: CONFIG_VERSION, rootUrl: `${url}#abc`, shape: "vfs" });
 		const config = await readConfig(root);

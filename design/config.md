@@ -27,7 +27,7 @@ Per-repo configuration lives at `.pushwork/config.json`. Documents live in one s
 
 Whether a repo is keyhive-protected follows from its root id: protected ids are 32 bytes, plain ones 16. Its keyhive group isn't stored either; it's read from the root document's members in the local keyhive state.
 
-`readConfig` strips heads from `rootUrl`, because the root is always opened live so sync can change it.
+`readConfig` strips heads from `rootUrl`, because the root is always opened live so sync can change it. `writeConfig` writes `.pushwork/config.json.tmp` and renames it into place, so a crash leaves the old config whole.
 
 ## Checkout state
 

@@ -86,16 +86,18 @@ describe("migrate from version 6", () => {
 
 	it.skipIf(process.platform === "win32")("a migration that fails at the last step puts the old storage back", async () => {
 		const before = await fs.readdir(path.join(pushworkDir(repo), "storage", "trees"), { recursive: true });
-		await fs.chmod(configFile(repo), 0o400);
+		// a directory where the new config is written aside
+		const aside = `${configFile(repo)}.tmp`;
+		await fs.mkdir(aside);
 
-		await expect(run(["migrate"])).rejects.toThrow(/EACCES.*config\.json/);
+		await expect(run(["migrate"])).rejects.toThrow(/EISDIR.*config\.json\.tmp/);
 		expect((await readConfigFile(repo)).version).toBe(6);
 		expect(await fs.readdir(path.join(pushworkDir(repo), "storage", "trees"), { recursive: true })).toEqual(before);
 		expect(await exists(path.join(pushworkDir(repo), "pushwork_migration_backup_safe_to_delete"))).toBe(false);
 		expect(await exists(path.join(pushworkDir(repo), "heads.json"))).toBe(false);
 		expect(await exists(path.join(pushworkDir(repo), "checkout.lock"))).toBe(false);
 
-		await fs.chmod(configFile(repo), 0o600);
+		await fs.rmdir(aside);
 		await run(["migrate"]);
 		expect(await porcelainStatus()).toBe("");
 	});
