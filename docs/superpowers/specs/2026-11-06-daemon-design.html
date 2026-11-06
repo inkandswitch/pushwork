@@ -1,0 +1,252 @@
+<title>pushwork daemon</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Merriweather+Sans:wght@300;400;600&display=swap">
+<style>
+/* Layout: one reading column of sheets on a grey page. Tokens from the Patchwork write-ups design system. */
+:root {
+	--page: #f9fafb; --paper: #ffffff; --chrome: #f3f4f6;
+	--ink: #374151; --strong: #111827; --soft: #5f6672; --rule: #e5e7eb;
+	--accent: #2563eb;
+	--added: #dcfce7; --on-added: #166534;
+	--removed: #fee2e2; --on-removed: #991b1b;
+	--highlight: #fef9c3; --on-highlight: #374151;
+	--serif: Merriweather, Georgia, "Times New Roman", serif;
+	--sans: "Merriweather Sans", "Helvetica Neue", Arial, sans-serif;
+	--ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+	--shadow-sm: 0 1px 2px rgba(17,24,39,0.06);
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--page: #111318; --paper: #1a1d23; --chrome: #23272f;
+		--ink: #d1d5db; --strong: #f3f4f6; --soft: #9ca3af; --rule: #2f343d;
+		--accent: #60a5fa;
+		--added: #133b24; --on-added: #86efac;
+		--removed: #3f1d1d; --on-removed: #fca5a5;
+		--highlight: #3d3510; --on-highlight: #f3f4f6;
+		--shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--page: #111318; --paper: #1a1d23; --chrome: #23272f;
+	--ink: #d1d5db; --strong: #f3f4f6; --soft: #9ca3af; --rule: #2f343d;
+	--accent: #60a5fa;
+	--added: #133b24; --on-added: #86efac;
+	--removed: #3f1d1d; --on-removed: #fca5a5;
+	--highlight: #3d3510; --on-highlight: #f3f4f6;
+	--shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+	color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+	background: var(--page); color: var(--ink);
+	font-family: var(--serif); font-size: 16.5px; line-height: 1.75;
+	padding-left: max(16px, env(safe-area-inset-left, 0px));
+	padding-right: max(16px, env(safe-area-inset-right, 0px));
+	padding-block: 40px 64px;
+}
+.wrap { max-width: 820px; margin: 0 auto; display: grid; gap: 20px; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+header { display: grid; gap: 10px; padding-block: 8px 12px; }
+.label { font-family: var(--ui); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--soft); }
+h1 { font-family: var(--sans); font-weight: 300; font-size: clamp(32px, 6vw, 44px); line-height: 1.18; letter-spacing: -0.01em; color: var(--strong); margin: 0; text-wrap: balance; }
+.lede { font-size: 18px; max-width: 62ch; margin: 0; }
+.byline { font-family: var(--ui); font-size: 13px; color: var(--soft); display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.pill { font-family: var(--ui); font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--highlight); color: var(--on-highlight); }
+.sheet { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; box-shadow: var(--shadow-sm); padding: 28px clamp(18px, 5vw, 44px); display: grid; gap: 14px; min-width: 0; }
+.sheet > * { min-width: 0; }
+h2 { font-family: var(--sans); font-weight: 400; font-size: 24px; line-height: 32px; color: var(--strong); margin: 0; text-wrap: balance; }
+h3 { font-family: var(--sans); font-weight: 600; font-size: 16.5px; line-height: 1.5; color: var(--strong); margin: 8px 0 0; }
+p, ul, ol { margin: 0; max-width: 66ch; }
+ul, ol { padding-left: 1.3em; display: grid; gap: 6px; }
+code { font-family: var(--mono); font-size: 13.5px; background: var(--chrome); border-radius: 3px; padding: 1px 4px; color: var(--strong); }
+.ref { font-family: var(--mono); font-size: 12px; color: var(--soft); white-space: nowrap; }
+.mine { background: var(--highlight); color: var(--on-highlight); border-radius: 3px; padding: 0 3px; }
+.callout { background: var(--chrome); border-radius: 8px; padding: 14px 18px; font-size: 15.5px; display: grid; gap: 8px; }
+.callout strong { color: var(--strong); }
+.tablebox { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-family: var(--ui); font-size: 13.5px; line-height: 1.55; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { background: var(--chrome); color: var(--strong); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td code { font-size: 12.5px; }
+.figure { background: var(--page); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--rule); background: var(--chrome); font-family: var(--ui); font-size: 13px; }
+.fig-body { padding: 14px; display: grid; gap: 12px; min-width: 0; }
+.caption { font-family: var(--ui); font-size: 13px; line-height: 1.55; color: var(--soft); padding: 0 14px 14px; }
+button { font-family: var(--ui); font-size: 13px; color: var(--strong); background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button[aria-pressed="true"] { background: var(--strong); color: var(--paper); border-color: var(--strong); }
+.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; max-width: none; font-family: var(--ui); font-size: 13.5px; }
+.steps li { display: grid; grid-template-columns: 92px 1fr; gap: 10px; align-items: start; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 7px 10px; }
+.who { font-family: var(--ui); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--soft); padding-top: 2px; }
+.steps li.good { background: var(--added); color: var(--on-added); border-color: transparent; }
+.steps li.good .who { color: var(--on-added); }
+.steps li.bad { background: var(--removed); color: var(--on-removed); border-color: transparent; }
+.steps li.bad .who { color: var(--on-removed); }
+.stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.stat { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 12px; min-width: 120px; flex: 1; }
+.stat .n { font-family: var(--sans); font-weight: 300; font-size: 30px; line-height: 1.15; color: var(--strong); font-variant-numeric: tabular-nums; }
+.stat .l { font-family: var(--ui); font-size: 12px; color: var(--soft); }
+</style>
+
+<div class="wrap">
+<header>
+	<div class="label">pushwork · design spec · project 2 of 2</div>
+	<h1>The pushwork daemon</h1>
+	<p class="lede">A background process that runs pushwork's commands, keeps one connection open per sync server across them, and is checked and restarted by the CLI on every command.</p>
+	<div class="byline"><span>chee</span><span>6 November 2026</span><span class="pill">draft</span><span>builds on <a href="https://claude.ai/artifact/JxJC5FEtpAeL5m47S3omSk">One store per machine</a></span></div>
+</header>
+
+<section class="sheet">
+	<h2>What changes for someone using pushwork</h2>
+	<ul>
+		<li>Commands look and behave the same. The first one starts a daemon in the background; later ones reuse it, and reuse its open connections to sync servers.</li>
+		<li><code>pushwork daemon status</code> shows whether it's running, its pid and version, and which servers it holds connections to. <code>pushwork daemon stop</code> stops it.</li>
+		<li><code>--no-daemon</code> runs a command in the CLI's own process, as before. It stops a running daemon first (see "the shared node" for why).</li>
+		<li>The daemon logs to <code>~/.pushwork/daemon.log</code>. It exits by itself after 10 minutes with no commands, or when its home directory disappears.</li>
+	</ul>
+</section>
+
+<section class="sheet">
+	<h2>Every command checks the daemon</h2>
+	<p>The CLI connects to the daemon's socket and says hello with its version. The version is the package version plus the modification time of the installed <code>dist/daemon.js</code>, so a rebuild or an upgrade counts as a new version.</p>
+	<div class="figure" id="fig-life">
+		<div class="controls" role="group" aria-label="Situation">
+			<button type="button" data-case="ok" aria-pressed="true">Running, same version</button>
+			<button type="button" data-case="none" aria-pressed="false">Not running</button>
+			<button type="button" data-case="old" aria-pressed="false">Older version</button>
+			<button type="button" data-case="hung" aria-pressed="false">Not answering</button>
+			<button type="button" data-case="crash" aria-pressed="false">Dies mid-command</button>
+			<button type="button" data-case="broken" aria-pressed="false">Can't start</button>
+		</div>
+		<div class="fig-body"><ol class="steps" id="life-steps"></ol></div>
+		<div class="caption">What the CLI does before and during one command, in each situation.</div>
+	</div>
+	<p>The daemon isn't restarted automatically in the middle of a command: the command could have committed and partly synced, and running it twice is a decision for the person. Every later command finds the daemon gone and starts a new one.</p>
+</section>
+
+<section class="sheet">
+	<h2>Where it lives</h2>
+	<div class="tablebox"><table>
+		<thead><tr><th>Thing</th><th>Where</th></tr></thead>
+		<tbody>
+			<tr><td>Socket (macOS, Linux)</td><td><code>~/.pushwork/daemon.sock</code>. If that path is longer than 100 bytes (the limit is 104 on macOS), <code>/tmp/pushwork-&lt;uid&gt;/&lt;hash of home&gt;.sock</code> in a directory created with mode 0700. Either way only the user can connect.</td></tr>
+			<tr><td>Socket (Windows)</td><td>The named pipe <code>\\.\pipe\pushwork-&lt;hash of home&gt;</code>.</td></tr>
+			<tr><td>Pid</td><td><code>~/.pushwork/daemon.pid</code>, used to kill a daemon that doesn't answer.</td></tr>
+			<tr><td>Log</td><td><code>~/.pushwork/daemon.log</code>, the daemon's stdout and stderr (truncated at each start).</td></tr>
+		</tbody>
+	</table></div>
+	<p>One daemon per home directory, so test suites and separate users each get their own. It starts as <code>node dist/cli.js daemon run</code>, detached, with the environment of the command that started it (including <code>DEBUG</code>).</p>
+</section>
+
+<section class="sheet">
+	<h2>How commands reach it</h2>
+	<p>The CLI keeps its argument parsing and all of its output. Only the calls into <code>src/pushwork.ts</code> move: each is sent to the daemon by name with its arguments, and the result comes back. Messages are CBOR (already a dependency) with a 4-byte length prefix, so bytes in <code>diff</code> results and <code>Map</code>s survive.</p>
+	<ul>
+		<li>Functions in the arguments become handles the other side can call. Progress reports, warnings and <code>clone</code>'s "run this strategy?" prompt (which passes a <code>viewCode</code> function back) work across the socket without special cases.</li>
+		<li>An error thrown in the daemon is rethrown in the CLI with the same message, so exit codes and output don't change.</li>
+		<li>Only the functions the CLI imports today are callable. Pure helpers (<code>plural</code>, constants) stay local.</li>
+	</ul>
+	<h3>Two commands at once</h3>
+	<p>The daemon runs commands concurrently, the way separate processes run today: commands in different checkouts share the node, and the checkout lock from project 1 still refuses a second command in the same checkout, now naming the daemon's pid. The one exception is <code>migrate</code>, which replaces the shared node afterwards: it waits for running commands to finish, holds new ones back while it runs, and lets them go once the new node is in place.</p>
+</section>
+
+<section class="sheet">
+	<h2>The shared node</h2>
+	<p>The daemon holds one Subduction node on the machine store, with one connection per sync server. <code>Docs</code> gains a <code>hub</code> option: with it, <code>Docs</code> uses the hub's node and allowlist, asks the hub for the connection to its server, and leaves the connection open when it closes.</p>
+	<div class="callout"><strong>Every write to the store in the daemon goes through the hub's node.</strong> A Subduction node keeps documents it has touched in memory and never rereads them. A spike confirmed it: after a second node wrote a commit to the same store, the long-lived node's next sync sent nothing (<code>totalSent 0</code>), with <code>maxResidentTrees</code> unset and at 1. With every write going through one node, 40 alternating offline saves and online syncs with compaction between them ended with the server holding exactly the local document.</div>
+	<ul>
+		<li>Offline commands in the daemon use the hub's node too, without a connection.</li>
+		<li><code>migrate</code> imports blobs straight into the store, so the daemon replaces its hub (new node, connections re-dialled) after a <code>migrate</code>.</li>
+		<li><code>--no-daemon</code> stops a running daemon before it starts, so a daemon never holds a stale view of what another process wrote.</li>
+		<li>Keyhive repos keep a node of their own per command, as in project 1. Keyhive's adapters register frame handlers and listeners on the node and never remove them; on a shared node they would pile up across commands. Their documents use 32-byte ids, so they never overlap with the hub's.</li>
+		<li><code>Docs.pull()</code> still uses a throwaway node: it only ever adds commits the server already has, so the hub missing them costs a repeat download, nothing more.</li>
+	</ul>
+	<h3>Connections</h3>
+	<p>The hub keeps a map from server URL to peer. Before handing out a peer it checks <code>getConnectedPeerIds()</code>; a peer that has dropped is dialled again, with the same 10 second timeout as today. The allowlist is the hub's, shared by every command: a document synced with a server by any command stays allowed with that server.</p>
+	<div class="stats" id="conn-stats"></div>
+</section>
+
+<section class="sheet">
+	<h2>Testing</h2>
+	<div class="tablebox"><table>
+		<thead><tr><th>Level</th><th>What it checks</th></tr></thead>
+		<tbody>
+			<tr><td>unit, rpc</td><td>Calls round-trip <code>Uint8Array</code>, <code>Map</code> and nested objects; a function argument can be called back, including one inside an object passed to a callback; errors keep their message.</td></tr>
+			<tr><td>unit, hub</td><td>Two <code>Docs</code> on one hub open one connection to a server; a connection the server dropped is re-dialled; closing <code>Docs</code> leaves the connection open; the shared-node scenario from the spike (writes from one command are sent by the next).</td></tr>
+			<tr><td>integration, daemon</td><td>In its own home: two <code>sync</code>s open one connection to a counting server; <code>daemon status</code> reports a pid; after <code>kill -9</code> the next command works with a new pid; a newer <code>dist/daemon.js</code> mtime restarts it; <code>--no-daemon</code> runs without one and stops a running one; a daemon exits when its home is deleted.</td></tr>
+			<tr><td>whole suite</td><td>Every existing integration test runs through the daemon, since it's the default. The test setup stops the shared home's daemon at the end.</td></tr>
+		</tbody>
+	</table></div>
+</section>
+
+<section class="sheet">
+	<h2>Out of scope</h2>
+	<ul>
+		<li>Keyhive repos on the shared node (needs keyhive's adapters to be removable).</li>
+		<li>Keeping keyhive archives open between commands.</li>
+		<li>Re-running a command automatically after the daemon dies mid-command.</li>
+		<li>Starting the daemon at login (launchd, systemd).</li>
+		<li>Restricting the Windows pipe beyond its default access control.</li>
+	</ul>
+</section>
+</div>
+
+<script>
+(() => {
+	const CASES = {
+		ok: [
+			["cli", "connect to the socket, send hello with version"],
+			["daemon", "answers with the same version and its pid", "good"],
+			["cli", "send the call; stream progress; print the result"],
+		],
+		none: [
+			["cli", "connect fails (no socket, or nothing listening)"],
+			["cli", "start node dist/cli.js daemon run, detached, logging to daemon.log"],
+			["cli", "retry connecting for up to 10 seconds"],
+			["daemon", "listening; answers hello", "good"],
+			["cli", "send the call"],
+		],
+		old: [
+			["cli", "hello"],
+			["daemon", "answers with a different version"],
+			["cli", "send stop; wait for the socket to close"],
+			["cli", "start a new daemon, then send the call", "good"],
+		],
+		hung: [
+			["cli", "hello gets no answer within 2 seconds"],
+			["cli", "kill the pid in daemon.pid"],
+			["cli", "start a new daemon, then send the call", "good"],
+		],
+		crash: [
+			["cli", "hello, call"],
+			["daemon", "process dies while syncing", "bad"],
+			["cli", "socket closes with the call unanswered: report \"the pushwork daemon stopped while running this command\" and exit 1", "bad"],
+			["cli", "the next command finds no daemon and starts one", "good"],
+		],
+		broken: [
+			["cli", "connect fails; start a daemon"],
+			["cli", "still nothing after 10 seconds"],
+			["cli", "warn \"couldn't start the pushwork daemon (see ~/.pushwork/daemon.log); running here instead\""],
+			["cli", "run the command in its own process, as --no-daemon does", "good"],
+		],
+	};
+	const list = document.getElementById("life-steps");
+	const buttons = document.querySelectorAll("#fig-life [data-case]");
+	function render(key) {
+		list.innerHTML = CASES[key].map(([who, what, cls]) => `<li class="${cls ?? ""}"><span class="who">${who}</span><span>${what}</span></li>`).join("");
+		buttons.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.case === key)));
+	}
+	buttons.forEach(b => b.addEventListener("click", () => render(b.dataset.case)));
+	render("ok");
+	document.getElementById("conn-stats").innerHTML = [
+		["10", "syncs of repos on two servers"],
+		["10", "connections opened before"],
+		["2", "connections opened with the daemon"],
+	].map(([n, l]) => `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+})();
+</script>
