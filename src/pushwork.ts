@@ -874,6 +874,12 @@ export async function migrate(
 		return migrateStore(root, opts.syncServer ? { ...config, syncServer: opts.syncServer } : config);
 	}
 	const dir = pushworkDir(root);
+	// everything in .pushwork moves aside, which at home would take the machine's key and store with it
+	if (await sameDir(dir, pushworkHome())) {
+		throw new Error(
+			`${root} is your home directory, whose .pushwork is pushwork's own; move the repo out of your home directory and run \`pushwork migrate\` there`,
+		);
+	}
 	const backup = path.join(dir, MIGRATION_BACKUP);
 	const moved = (await fs.readdir(dir)).filter((name) => name !== MIGRATION_BACKUP);
 	await fs.mkdir(backup, { recursive: true });

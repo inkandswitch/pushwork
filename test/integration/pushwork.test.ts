@@ -194,6 +194,23 @@ describe("pushwork", () => {
 			await sync(b, a);
 			expect(await readText(path.join(a, "new.txt"))).toBe("local edit");
 		});
+
+		it("refuses a pushwork 2 repo at the home directory, whose .pushwork is the machine's", async () => {
+			const home = await dir("home");
+			const env = homeEnv(home);
+			const other = await dir("other");
+			await fs.writeFile(path.join(other, "x.txt"), "x");
+			await pushwork(["init", "--sync-server", server], other, env);
+			const key = await readText(path.join(home, ".pushwork", "key"));
+			const before = await fs.readdir(path.join(home, ".pushwork"));
+			const oldConfig = { version: 5, rootUrl: await urlOf(other), backend: "subduction", shape: "vfs" };
+			await fs.writeFile(path.join(home, ".pushwork", "config.json"), JSON.stringify(oldConfig));
+
+			await expect(pushwork(["migrate", "--sync-server", server], home, env)).rejects.toThrow(/home directory/);
+			expect((await fs.readdir(path.join(home, ".pushwork"))).sort()).toEqual([...before, "config.json"].sort());
+			expect(await readText(path.join(home, ".pushwork", "key"))).toBe(key);
+			expect((await pushwork(["--porcelain", "status"], other, env)).stdout).toBe("");
+		});
 	});
 
 	describe("installed shapes", () => {
