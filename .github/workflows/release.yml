@@ -86,7 +86,7 @@ jobs:
         run: pnpm test
 
       - name: set the version from the tag
-        run: npm version "${GITHUB_REF_NAME#fx-v}" --no-git-tag-version
+        run: npm version "${GITHUB_REF_NAME#fx-v}" --no-git-tag-version --allow-same-version
 
       # without an NPM_TOKEN secret, NODE_AUTH_TOKEN is empty and npm publishes through id-token
       - name: publish to the fx tag

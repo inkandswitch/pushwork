@@ -325,11 +325,13 @@ pushwork daemon stop     # stop it once running commands finish
 pushwork --no-daemon sync  # run this command in its own process
 ```
 
-The daemon logs to `~/.pushwork/daemon.log`, which each daemon starts afresh. It listens on `~/.pushwork/run/daemon.sock`, readable only by you. See [`design/daemon.md`](./design/daemon.md).
+A long command can keep the daemon from answering. A command in another terminal then waits for it, saying `waiting for the pushwork daemon (busy with sync in /home/you/notes)`, rather than kill it; only a daemon with no command in flight, or one whose oldest command has been running for over 10 minutes, is terminated. `daemon stop` and `--no-daemon` wait in the same way for the daemon's running commands to finish, however long they take, and `daemon status` says what a daemon that isn't answering is busy with. Ctrl-C cancels the command in the daemon too: it stops at its next step.
+
+The daemon logs to `~/.pushwork/daemon.log`, which each daemon starts afresh, keeping the last one's as `daemon.log.1`. That is also where a command's `DEBUG` output, and anything a custom shape or strategy prints, goes when the daemon runs it; run it with `--no-daemon` to see them in the terminal. The daemon listens on `~/.pushwork/run/daemon.sock`, readable only by you. See [`design/daemon.md`](./design/daemon.md).
 
 ## Programmatic API
 
-The package also exposes a library API (`import` from `pushwork`).
+The package also exposes a library API (`import` from `pushwork`). Its functions run in your process, not the daemon: the first one that opens the machine's store stops a running daemon first, as `--no-daemon` does, waiting for the commands it is running to finish. A daemon started after that, by a command in another terminal, would not see what your process writes until it is restarted.
 
 ```ts
 import {init, clone, sync, save, status} from "pushwork"
@@ -402,7 +404,7 @@ type SyncSummary = {
 
 ## Debugging
 
-Set `DEBUG=pushwork:*` for pushwork's debug log (`DEBUG=true` turns on everything). Subduction's own log stays at errors only unless `DEBUG` mentions `subduction`.
+Set `DEBUG=pushwork:*` for pushwork's debug log (`DEBUG=true` turns on everything). Subduction's own log stays at errors only unless `DEBUG` mentions `subduction`. A command the daemon runs logs to `~/.pushwork/daemon.log`, with the daemon's `DEBUG`; use `--no-daemon` to see a command's debug log in the terminal.
 
 ## Development
 
