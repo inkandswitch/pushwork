@@ -66,7 +66,7 @@ If any step fails, it rolls back to a working version 6 repo. A version 6 checko
 
 A repo rooted at the home directory is refused before anything moves: its `.pushwork` is also the machine's, holding the key and the store. It has to be moved out of the home directory and migrated there.
 
-It pushes nothing. The fetched tree becomes the saved state, so `status` shows how the working tree differs from the server, and the next `sync` publishes those differences. Repos on the retired sync3 server can't be fetched and are told to `rm -rf .pushwork && pushwork init`.
+It pushes none of the working tree. The fetched tree becomes the saved state, so `status` shows how the working tree differs from the server, and the next `sync` publishes those differences. With the machine store, `migrate` syncs each document on first load, so it also uploads commits another checkout saved but didn't sync. Repos on the retired sync3 server can't be fetched and are told to `rm -rf .pushwork && pushwork init`.
 
 ## Changing the format
 

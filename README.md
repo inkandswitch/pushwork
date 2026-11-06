@@ -85,6 +85,7 @@ pushwork diff
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
 | `pushwork shape install <source>` | Install a shape from a file, an `http(s)://` url or an `automerge:` file doc, so `--shape <name>` can use it. `--name` picks the name (default: the source's file name). |
 | `pushwork shape list` / `shape remove <name>` | List or remove installed shapes. |
+| `pushwork daemon status` / `daemon stop` | Show the background [daemon](#daemon), or stop it once its running commands finish. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
 
 ### Global options
@@ -96,6 +97,7 @@ These apply to every command:
 | `--porcelain` | Machine-readable output: tab-separated lines, no spinners/colors/prompts. |
 | `-q, --quiet` | Suppress progress; show only results and errors. |
 | `--silent` | Suppress all output except errors (check the exit code). |
+| `--no-daemon` | Run the command in its own process instead of the [daemon](#daemon), and stop the daemon if it is running. |
 | `-v, --version` | Print version info and exit. |
 
 ### `init` / `clone` options
@@ -307,11 +309,23 @@ pushwork 3 uses a new storage format. In a pushwork 2 repo, run:
 pushwork migrate
 ```
 
-This keeps the root URL, shape and artifact directories, moves the old `.pushwork` contents to `.pushwork/pushwork_migration_backup_safe_to_delete/`, and fetches the repo from the server as `track` does. Nothing is pushed: the next `sync` publishes whatever differs from the server, so check `pushwork status` first. Local edits that pushwork 2 saved but never synced only survive if the files are still on disk; to be sure, run `npx pushwork@2 sync` before migrating.
+This keeps the root URL, shape and artifact directories, moves the old `.pushwork` contents to `.pushwork/pushwork_migration_backup_safe_to_delete/`, and fetches the repo from the server as `track` does. None of the working tree is pushed: the next `sync` publishes whatever differs from the server, so check `pushwork status` first. Local edits that pushwork 2 saved but never synced only survive if the files are still on disk; to be sure, run `npx pushwork@2 sync` before migrating.
 
 Repos on the retired sync3 server can't be migrated; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo. A pushwork 2 repo rooted at your home directory can't be migrated in place, because its `.pushwork` is also where pushwork keeps your key and the machine's store; move it out of your home directory and migrate it there.
 
 Earlier pushwork 3 repos (config version 6) kept their documents in `.pushwork/storage`. `pushwork migrate` moves them into `~/.pushwork/storage` offline, records the checkout's heads, and keeps the old storage in `.pushwork/pushwork_migration_backup_safe_to_delete/storage-v6`. If it fails partway, the repo is left as it was, and migrate can be run again.
+
+## Daemon
+
+Commands run in a background daemon, one per home directory, which keeps a connection open to each sync server between commands. The first command starts it; it exits after 10 minutes without a command, or once `~/.pushwork` is gone. When pushwork is rebuilt or upgraded, the next command replaces it. If it can't be started within 10 seconds, the command warns and runs in its own process.
+
+```sh
+pushwork daemon status   # pid, version, connected servers, socket and log
+pushwork daemon stop     # stop it once running commands finish
+pushwork --no-daemon sync  # run this command in its own process
+```
+
+The daemon logs to `~/.pushwork/daemon.log`, which each daemon starts afresh. It listens on `~/.pushwork/run/daemon.sock`, readable only by you. See [`design/daemon.md`](./design/daemon.md).
 
 ## Programmatic API
 

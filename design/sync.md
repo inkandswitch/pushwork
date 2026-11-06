@@ -69,4 +69,4 @@ The store holds every document on the machine, and a connected server could ask 
 
 ## Offline commands
 
-`save`, `status`, `diff`, `heads`, `cut`, `paste` and `snarfs` never open a connection. What `save` commits goes into the machine store, so the next `sync` of any checkout sharing those documents publishes it, not only this checkout's.
+`save`, `status`, `diff`, `heads`, `cut`, `paste` and `snarfs` never open a connection. What `save` commits goes into the machine store, so the next `sync`, `clone`, `track`, `merge` or `migrate` of any checkout sharing those documents publishes it, not only this checkout's. Those commands sync each document the first time they load it, so they also upload commits another checkout saved but didn't sync.

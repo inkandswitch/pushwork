@@ -11,6 +11,7 @@ This directory contains design documents for pushwork: how a directory tree is m
 | [`artifacts`](./artifacts.md) | Artifact directories as heads-pinned, immutable subtrees |
 | [`config`](./config.md) | The config file, and what happens to old versions |
 | [`snarf`](./snarf.md) | Offline stash: `cut` / `paste` / `snarfs` |
+| [`daemon`](./daemon.md) | The background process commands run in, and the hub that holds server connections |
 
 ## Layers
 
@@ -18,10 +19,11 @@ This directory contains design documents for pushwork: how a directory tree is m
 block-beta
     columns 1
     CLI["CLI<br/>(commander + clack)"]
+    Daemon["Daemon<br/>(one per home · socket · runs the commands)"]
     Commands["Commands<br/>(init · clone · sync · save · status · diff · yoink · yeet · cut · paste)"]
     Shapes["Shapes<br/>(VfsNode ⇄ Automerge docs)"]
     Docs["Docs<br/>(find · create · change · save · sync · compact)"]
-    Subduction["Subduction<br/>(FsStorage in ~/.pushwork · one server connection)"]
+    Subduction["Subduction<br/>(FsStorage in ~/.pushwork · one connection per server, held by the daemon's hub)"]
 ```
 
 ## Core Model
@@ -52,5 +54,5 @@ Sync is a decode → diff → encode cycle:
 - **The CRDT is the merge** — no conflict resolution UI; concurrent edits converge via Automerge.
 - **Honest verdicts** — the CLI only prints SYNCED when a sync round with the server for every document had nothing left to exchange; otherwise PENDING.
 - **Immutability in the link layer** — artifact subtrees are frozen by pinning heads in URLs, not by content conventions.
-- **Strict config versioning** — other config versions hard-error and point at `pushwork migrate`, which re-tracks the root URL without pushing anything.
+- **Strict config versioning** — other config versions hard-error and point at `pushwork migrate`, which re-tracks the root URL without pushing the working tree.
 - **Offline-first** — `save`, `status`, `diff`, `heads`, `cut`/`paste` all work without a network connection.

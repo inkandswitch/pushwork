@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "fx-v*"
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
   release:
     name: release pushwork
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -45,3 +48,48 @@ jobs:
           publish: pnpm publish-packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  fx:
+    name: publish an fx prerelease
+    if: startsWith(github.ref, 'refs/tags/fx-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: install javascript
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # trusted publishing needs npm 11.5.1 or newer, which node 24 may not bundle
+      - name: update npm
+        run: npm install -g npm@latest
+
+      - name: install dependencies
+        run: pnpm install
+
+      - name: build everything
+        run: pnpm build
+
+      - name: test everything
+        run: pnpm test
+
+      - name: set the version from the tag
+        run: npm version "${GITHUB_REF_NAME#fx-v}" --no-git-tag-version
+
+      # without an NPM_TOKEN secret, NODE_AUTH_TOKEN is empty and npm publishes through id-token
+      - name: publish to the fx tag
+        run: npm publish --tag fx --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
