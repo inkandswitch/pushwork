@@ -250,6 +250,30 @@ describe("daemon", () => {
 		}
 	});
 
+	it("starts another daemon when the one it started is stopped before it says hello", async () => {
+		// another process (the library, say) stops the new daemon the moment it's listening
+		let stopped = 0;
+		let watching = true;
+		const watcher = (async () => {
+			while (watching) {
+				const pid = Number(await readText(pidFile()).catch(() => "")) || 0;
+				if (pid && !stopped) {
+					stopped = pid;
+					process.kill(pid);
+				}
+				await new Promise(r => setTimeout(r, 2));
+			}
+		})();
+		try {
+			await run(["init", "--offline"]);
+		} finally {
+			watching = false;
+			await watcher;
+		}
+		expect(stopped).not.toBe(0);
+		expect(await daemonPid()).not.toBe(stopped);
+	});
+
 	it("a killed daemon is replaced on the next command", async () => {
 		await run(["init", "--offline"]);
 		const pid = await daemonPid();

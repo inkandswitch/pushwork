@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
@@ -165,7 +165,7 @@ async function gone(sock: string, pid: number, ms: number, say: Say): Promise<bo
 	return true;
 }
 
-function start(): void {
+function start(): ChildProcess {
 	const home = os.homedir();
 	fs.mkdirSync(path.dirname(logFile(home)), { recursive: true });
 	// appended to: the daemon that wins the lock empties it
@@ -180,6 +180,7 @@ function start(): void {
 		});
 		child.on("error", e => dlog("starting the daemon: %s", e.message));
 		child.unref();
+		return child;
 	} finally {
 		fs.closeSync(out);
 	}
@@ -202,10 +203,11 @@ async function reach(say: Say): Promise<RpcPeer> {
 	}
 	// a daemon on its way out holds the lock the new one waits for, maybe after it has let go of
 	// the socket: the new one's time starts once it has gone
-	const old = first.state === "up" ? first.hello.pid : await readPid();
-	start();
+	let old = first.state === "up" ? first.hello.pid : await readPid();
+	let child = start();
 	const cap = Date.now() + STOP_MS;
 	let end = Date.now() + START_MS;
+	let restarts = 0;
 	for (;;) {
 		await sleep(50);
 		if ((await privateDir(path.dirname(sock))) === "private") {
@@ -215,6 +217,17 @@ async function reach(say: Say): Promise<RpcPeer> {
 				// would only be replaced again
 				if (!p.hello.stopping) return p.peer;
 				p.peer.close();
+				old = p.hello.pid;
+			}
+			// The one this started has gone, and none took its place: stopped (by another process
+			// opening the store, say) before this one could use it. Not forever: one that can't
+			// start at all goes too.
+			const exited = child.exitCode !== null || child.signalCode !== null;
+			if (p.state === "down" && exited && restarts < 3) {
+				dlog("the daemon went before answering; starting another");
+				restarts++;
+				child = start();
+				end = Math.min(cap, Date.now() + START_MS);
 			}
 		}
 		if (Date.now() < cap && alive(old)) end = Date.now() + START_MS;
