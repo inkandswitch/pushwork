@@ -287,8 +287,13 @@ export async function runDaemon(): Promise<void> {
 async function serve(home: string, sock: string): Promise<void> {
 	const dir = daemonDir(home);
 	markDaemon();
-	// clients open the log to append, so only the daemon that won the lock starts it afresh
-	await fsp.truncate(logFile(home), 0).catch(() => {});
+	// clients open the log to append, so only the daemon that won the lock starts it afresh,
+	// keeping the last one's beside it. Copied and emptied, not renamed: this daemon's output
+	// is the log file it was started with.
+	await fsp
+		.copyFile(logFile(home), `${logFile(home)}.1`)
+		.then(() => fsp.truncate(logFile(home), 0))
+		.catch(() => {});
 
 	const version = daemonVersion();
 	const startedAt = Date.now();
@@ -438,6 +443,8 @@ async function serve(home: string, sock: string): Promise<void> {
 	const ownCwd = process.cwd.bind(process);
 	process.cwd = () => callerCwd.getStore() ?? ownCwd();
 	process.on("unhandledRejection", e => log(`unhandled rejection: ${errorText(e)}`));
+	// Node prints it too, but without saying when
+	process.on("uncaughtExceptionMonitor", e => log(`uncaught exception: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`));
 	// what a client sends one that stopped answering: finish what it's running, as for stop
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 	process.on("SIGINT", () => void shutdown("SIGINT"));

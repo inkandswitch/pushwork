@@ -211,6 +211,28 @@ describe("daemon", () => {
 		expect(await readText(path.join(copy, "notes.txt"))).toBe("three\n");
 	});
 
+	it("keeps the last daemon's log as daemon.log.1", async () => {
+		await run(["init", "--offline"]);
+		const pid = await daemonPid();
+		await run(["daemon", "stop"]);
+		await run(["status"]);
+		const log = path.join(home, ".pushwork", "daemon.log");
+		expect(await readText(`${log}.1`)).toContain(`(pid ${pid}) listening`);
+		expect(await readText(log)).not.toContain(`(pid ${pid})`);
+		expect(await readText(log)).toContain(`(pid ${await daemonPid()}) listening`);
+	});
+
+	it("logs the error that kills it", async () => {
+		await run(["init", "--offline"]);
+		const pid = await daemonPid();
+		// a shape module runs in the daemon, and can throw where nothing catches it
+		const boom = path.join(work, "boom.js");
+		await fs.writeFile(boom, 'setTimeout(() => { throw new Error("boom from a shape"); }); export default {};\n');
+		await expect(run(["shape", "install", "--name", "boom", boom])).rejects.toThrow("not a shape");
+		expect(await until(() => !alive(pid), 10_000)).toBe(true);
+		expect(await readText(path.join(home, ".pushwork", "daemon.log"))).toMatch(/^\d{4}-\S+ uncaught exception: Error: boom from a shape$/m);
+	});
+
 	it("a killed daemon is replaced on the next command", async () => {
 		await run(["init", "--offline"]);
 		const pid = await daemonPid();
