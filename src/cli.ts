@@ -118,14 +118,16 @@ function usesApi(command: Named): boolean {
 	return command.name() !== "version";
 }
 
+const say = (message: string) => out.notice(message);
+
 async function chooseApi(daemon: boolean): Promise<Api> {
 	if (!daemon) {
 		// one we can't trust the socket of can't be stopped either
-		await stopDaemon().catch(e => dlog("stopping the daemon: %s", e instanceof Error ? e.message : e));
+		await stopDaemon({ say }).catch(e => dlog("stopping the daemon: %s", e instanceof Error ? e.message : e));
 		return pushwork;
 	}
 	try {
-		return await remote();
+		return await remote({ say });
 	} catch (e) {
 		dlog("daemon: %s", e instanceof Error ? e.message : e);
 		out.warn("couldn't start the pushwork daemon (see ~/.pushwork/daemon.log); running here instead");
@@ -745,11 +747,20 @@ daemon
 	.command("status")
 	.description("Show whether the daemon is running, and the servers it's connected to")
 	.action(async () => {
-		const status = await daemonStatus();
-		if (!status) {
+		const daemon = await daemonStatus();
+		if (!daemon) {
 			out.log("the pushwork daemon is not running");
 			return;
 		}
+		if (daemon.state === "busy") {
+			out.log(`the pushwork daemon (pid ${daemon.pid}) is busy with ${daemon.call.fn} in ${daemon.call.cwd}`);
+			return;
+		}
+		if (daemon.state === "silent") {
+			out.log(`the pushwork daemon is not answering (pid ${daemon.pid})`);
+			return;
+		}
+		const { status } = daemon;
 		out.obj({
 			pid: status.pid,
 			version: status.version,
@@ -764,7 +775,7 @@ daemon
 	.command("stop")
 	.description("Stop the daemon once the commands it's running finish; the next command starts it again")
 	.action(async () => {
-		out.log((await stopDaemon()) ? "stopped the pushwork daemon" : "the pushwork daemon is not running");
+		out.log((await stopDaemon({ say })) ? "stopped the pushwork daemon" : "the pushwork daemon is not running");
 	});
 
 daemon.command("run", { hidden: true }).action(() => runDaemon());

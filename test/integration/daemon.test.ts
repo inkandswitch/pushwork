@@ -66,6 +66,41 @@ describe("daemon", () => {
 	const pidFile = () => path.join(home, ".pushwork", "daemon.pid");
 	const daemonPid = async () => Number(await readText(pidFile()));
 
+	// a command in a terminal of its own, still running: its output so far, and how it exited
+	const start = (args: string[], cwd = repo) => {
+		const child = spawn(process.execPath, [CLI, ...args], {
+			cwd,
+			env: { ...process.env, ...env, FORCE_COLOR: "0", NO_COLOR: "1" },
+		});
+		let output = "";
+		child.stdout.on("data", d => (output += d));
+		child.stderr.on("data", d => (output += d));
+		const exited = new Promise<number | null>(resolve => child.once("exit", code => resolve(code)));
+		return { child, output: () => output, exited };
+	};
+
+	// A sync in flight against a server that stopped answering, in a daemon that's stopped too:
+	// what a long command does to the daemon's loop (Automerge's work on a big tree, say), as a
+	// stopped process takes connections and answers none. Returns the sync, and the resume.
+	async function busyDaemon() {
+		await run(["init", "--sync-server", server.url]);
+		const pid = await daemonPid();
+		await fs.writeFile(path.join(repo, "notes.txt"), "two\n");
+		server.stall();
+		const sync = start(["sync"]);
+		const busy = path.join(home, ".pushwork", "daemon.busy");
+		await until(async () => (await readText(busy).catch(() => "")).includes('"sync"'), 5000);
+		process.kill(pid, "SIGSTOP");
+		let stopped = true;
+		const resume = () => {
+			if (stopped && alive(pid)) process.kill(pid, "SIGCONT");
+			stopped = false;
+		};
+		return { pid, sync, resume };
+	}
+
+	const unix = process.platform !== "win32";
+
 	it("two syncs share one connection", async () => {
 		await run(["init", "--sync-server", server.url]);
 		await fs.writeFile(path.join(repo, "notes.txt"), "two\n");
@@ -80,6 +115,58 @@ describe("daemon", () => {
 		const pid = await daemonPid();
 		expect(alive(pid)).toBe(true);
 		expect((await run(["daemon", "status"])).stdout).toContain(String(pid));
+	});
+
+	it.skipIf(!unix)("a command in another terminal waits for a busy daemon, whose command survives", { timeout: 120_000 }, async () => {
+		const other = path.join(work, "other");
+		await fs.mkdir(other);
+		await fs.writeFile(path.join(other, "notes.txt"), "other\n");
+		await run(["init", "--offline"], other);
+		const { pid, sync, resume } = await busyDaemon();
+		const where = await fs.realpath(repo);
+		try {
+			const status = start(["status"], other);
+			const daemonStatus = start(["daemon", "status"]);
+			expect(await until(() => status.output().includes(`waiting for the pushwork daemon (busy with sync in ${where})`), 30_000)).toBe(true);
+			expect(alive(pid)).toBe(true);
+			expect(await daemonStatus.exited).toBe(0);
+			expect(daemonStatus.output()).toContain(`busy with sync in ${where}`);
+			resume();
+			expect(await status.exited).toBe(0);
+		} finally {
+			resume();
+		}
+		expect(await sync.exited).toBe(0);
+		expect(sync.output()).not.toContain("stopped while running");
+		expect(await daemonPid()).toBe(pid);
+		expect(alive(pid)).toBe(true);
+	});
+
+	it.skipIf(!unix)("daemon stop waits for a busy daemon's command", { timeout: 120_000 }, async () => {
+		const { pid, sync, resume } = await busyDaemon();
+		try {
+			const stop = start(["daemon", "stop"]);
+			expect(await until(() => stop.output().includes("busy with sync in"), 30_000)).toBe(true);
+			expect(alive(pid)).toBe(true);
+			resume();
+			expect(await stop.exited).toBe(0);
+		} finally {
+			resume();
+		}
+		expect(await sync.exited).toBe(0);
+		expect(sync.output()).not.toContain("stopped while running");
+		expect(alive(pid)).toBe(false);
+	});
+
+	it.skipIf(!unix)("daemon status says when the daemon doesn't answer", async () => {
+		await run(["init", "--offline"]);
+		const pid = await daemonPid();
+		process.kill(pid, "SIGSTOP");
+		try {
+			expect((await run(["daemon", "status"])).stdout).toContain(`not answering (pid ${pid})`);
+		} finally {
+			process.kill(pid, "SIGCONT");
+		}
 	});
 
 	it("a killed daemon is replaced on the next command", async () => {

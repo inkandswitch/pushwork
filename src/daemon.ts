@@ -69,6 +69,8 @@ const GRACE_MS = 10_000;
 const daemonDir = (home: string) => path.join(home, ".pushwork");
 export const pidFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.pid");
 export const logFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.log");
+/** What the daemon is running (see Busy). */
+export const busyFile = (home = os.homedir()) => path.join(daemonDir(home), "daemon.busy");
 
 const hash = (home: string) => createHash("sha256").update(home).digest("hex").slice(0, 12);
 
@@ -110,6 +112,14 @@ export async function privateDir(dir: string, { fix = false } = {}): Promise<"mi
 }
 
 export type Hello = { version: string; pid: number; stopping: boolean };
+/** A command the daemon is running: its name, the caller's directory, and when it came in. */
+export type Call = { fn: string; cwd: string; since: number };
+/**
+ * The commands in flight, which the daemon writes to daemon.busy as each starts and ends, so a
+ * client can tell a daemon that's busy (a command's Automerge work can keep it from answering
+ * for a long time) from one that's hung, even while it can't answer.
+ */
+export type Busy = { pid: number; calls: Call[] };
 export type Status = { pid: number; version: string; startedAt: number; servers: { server: string; peer: string }[] };
 /** up: it answered; down: nothing listens; silent: something took the connection but didn't answer. */
 export type Probe = { state: "up"; peer: RpcPeer; hello: Hello } | { state: "silent" } | { state: "down" };
@@ -262,6 +272,7 @@ async function serve(home: string, sock: string): Promise<void> {
 	const peers = new Set<RpcPeer>();
 	let stopping = false;
 	let inFlight = 0;
+	const calls = new Set<Call>();
 	const drained: (() => void)[] = [];
 	let idleTimer: NodeJS.Timeout | undefined;
 	// set while a migrate runs: other commands wait for it
@@ -335,6 +346,18 @@ async function serve(home: string, sock: string): Promise<void> {
 		}
 	}
 
+	// Written aside and renamed in, and synchronously, so it's on disk before a command's work
+	// can keep this process from doing anything else.
+	function writeBusy(): void {
+		const tmp = `${busyFile(home)}.${process.pid}`;
+		try {
+			fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, calls: [...calls] } satisfies Busy));
+			fs.renameSync(tmp, busyFile(home));
+		} catch (e) {
+			log(`writing ${busyFile(home)}: ${errorText(e)}`);
+		}
+	}
+
 	async function run(fn: unknown, args: unknown, cwd: unknown): Promise<unknown> {
 		if (typeof fn !== "string" || !(COMMANDS as readonly string[]).includes(fn)) {
 			throw new Error(`unknown command ${String(fn)}`);
@@ -343,6 +366,9 @@ async function serve(home: string, sock: string): Promise<void> {
 		const command = pushwork[fn as Command] as (...args: unknown[]) => Promise<unknown>;
 		const start = Date.now();
 		const go = () => callerCwd.run(typeof cwd === "string" ? cwd : undefined, () => command(...args));
+		const call = { fn, cwd: String(cwd), since: start };
+		calls.add(call);
+		writeBusy();
 		try {
 			const result = await (fn === "migrate" ? exclusive(go) : shared(go));
 			log(`${fn} in ${cwd}: ${Date.now() - start} ms`);
@@ -350,6 +376,9 @@ async function serve(home: string, sock: string): Promise<void> {
 		} catch (e) {
 			log(`${fn} in ${cwd} failed after ${Date.now() - start} ms: ${errorText(e)}`);
 			throw e;
+		} finally {
+			calls.delete(call);
+			writeBusy();
 		}
 	}
 
@@ -417,12 +446,23 @@ async function serve(home: string, sock: string): Promise<void> {
 		else server.close();
 		for (const peer of peers) peer.close();
 		await closeHub();
-		if ((await fsp.readFile(pidFile(home), "utf8").catch(() => "")).trim() === String(process.pid)) {
-			await fsp.rm(pidFile(home), { force: true });
+		for (const file of [pidFile(home), busyFile(home)]) {
+			if ((await ownerOf(file)) === process.pid) await fsp.rm(file, { force: true });
 		}
 		log("stopped");
 		finish();
 	}
 
 	await finished;
+}
+
+// the daemon a file of its own names: the pid file is its pid, the busy file a Busy
+async function ownerOf(file: string): Promise<number> {
+	const text = (await fsp.readFile(file, "utf8").catch(() => "")).trim();
+	if (/^\d+$/.test(text)) return Number(text);
+	try {
+		return Number((JSON.parse(text) as Busy).pid) || 0;
+	} catch {
+		return 0;
+	}
 }

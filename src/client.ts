@@ -4,6 +4,7 @@ import * as net from "net";
 import * as os from "os";
 import * as path from "path";
 import {
+	busyFile,
 	COMMANDS,
 	daemonVersion,
 	HELLO_MS,
@@ -13,6 +14,8 @@ import {
 	probe,
 	sleep,
 	socketPath,
+	type Busy,
+	type Call,
 	type Command,
 	type Probe,
 	type Status,
@@ -27,8 +30,25 @@ const dlog = log("client");
 export type Api = Pick<typeof pushwork, Command>;
 
 const START_MS = 10_000;
-// how long `daemon stop` lets running commands finish before terminating the daemon
+// how long `daemon stop` gives a daemon with no command in flight to go before terminating it
 const STOP_MS = 60_000;
+// a command that has run this long is taken for a hung daemon, not a busy one
+const STUCK_MS = 10 * 60_000;
+// how long a command waits for the daemon before saying so
+const SLOW_MS = 1000;
+
+/** Where a client says what it's waiting for: the CLI's output. */
+export type Say = (message: string) => void;
+
+// each thing said once
+function once(say: Say): Say {
+	const said = new Set<string>();
+	return message => {
+		if (said.has(message)) return;
+		said.add(message);
+		say(message);
+	};
+}
 
 const alive = (pid: number) => {
 	try {
@@ -62,6 +82,30 @@ async function readPid(): Promise<number> {
 	return Number(await fs.promises.readFile(pidFile(), "utf8").catch(() => "")) || 0;
 }
 
+async function readBusy(): Promise<Busy | undefined> {
+	try {
+		const busy = JSON.parse(await fs.promises.readFile(busyFile(), "utf8"));
+		if (typeof busy?.pid === "number" && Array.isArray(busy.calls)) return busy as Busy;
+	} catch {}
+	return undefined;
+}
+
+/**
+ * The command the daemon `pid` is busy with, from daemon.busy, if it's one to wait for: a
+ * command's Automerge work can keep the daemon from answering for a long time, and terminating
+ * it would kill that command, the user's, in another terminal. Undefined if the daemon may be
+ * terminated: the busy file isn't `pid`'s, `pid` isn't alive, nothing is in flight, or the
+ * oldest command has run for over `stuckMs`.
+ */
+export function busyWith(busy: Busy | undefined, pid: number, alive: boolean, now: number, stuckMs = STUCK_MS): Call | undefined {
+	if (!busy || pid <= 0 || busy.pid !== pid || !alive || busy.calls.length === 0) return undefined;
+	const oldest = busy.calls.reduce((a, b) => (b.since < a.since ? b : a));
+	return now - oldest.since > stuckMs ? undefined : oldest;
+}
+
+const busyCall = async (pid: number, stuckMs?: number) => busyWith(await readBusy(), pid, alive(pid), Date.now(), stuckMs);
+const busyMessage = (call: Call) => `waiting for the pushwork daemon (busy with ${call.fn} in ${call.cwd})`;
+
 // Ask a daemon that stopped answering to finish up and go (it drains on SIGTERM as on stop); kill it if it won't.
 async function terminate(pid: number): Promise<void> {
 	if (!alive(pid)) return;
@@ -89,8 +133,35 @@ export async function reachable(sock = socketPath()): Promise<Probe> {
 		const start = Date.now();
 		const p = await probe(sock);
 		if (p.state !== "silent" || tries === 3) return p;
-		await sleep(HELLO_MS - (Date.now() - start));
+		await sleep(Math.max(0, HELLO_MS - (Date.now() - start)));
 	}
+}
+
+// reachable(), for as long as the daemon is silent but busy with a command (see busyWith).
+// Silent only for one that may be terminated.
+async function patiently(sock: string, say: Say): Promise<Probe> {
+	for (;;) {
+		const p = await reachable(sock);
+		if (p.state !== "silent") return p;
+		const call = await busyCall(await readPid());
+		if (!call) return p;
+		say(busyMessage(call));
+	}
+}
+
+// Wait for the daemon `pid`, asked to stop, to let go of the socket: for as long as it's
+// running a command (see busyWith), and `ms` more once it isn't. False if it's still there.
+async function gone(sock: string, pid: number, ms: number, say: Say): Promise<boolean> {
+	let end = Date.now() + ms;
+	while (await listening(sock)) {
+		const call = await busyCall(pid);
+		if (call) {
+			say(busyMessage(call));
+			end = Date.now() + ms;
+		} else if (Date.now() > end) return false;
+		await sleep(200);
+	}
+	return true;
 }
 
 function start(): void {
@@ -114,17 +185,17 @@ function start(): void {
 }
 
 // A connection to an up-to-date daemon: started if there's none, restarted if it's a
-// different build, terminated first if it doesn't answer.
-async function reach(): Promise<RpcPeer> {
+// different build, waited for while it's busy, terminated first if it doesn't answer and isn't.
+async function reach(say: Say): Promise<RpcPeer> {
 	const want = daemonVersion();
 	const sock = socketPath();
-	const first = await reachable(sock);
+	const first = await patiently(sock, say);
 	if (first.state === "up") {
 		if (first.hello.version === want && !first.hello.stopping) return first.peer;
 		dlog("daemon %s is %s; replacing it", first.hello.version, first.hello.stopping ? "stopping" : "out of date");
 		await first.peer.call("stop", []).catch(() => {});
 		first.peer.close();
-		await until(async () => !(await listening(sock)), START_MS);
+		await gone(sock, first.hello.pid, START_MS, say);
 	} else if (first.state === "silent") {
 		await terminate(await readPid());
 	}
@@ -147,9 +218,19 @@ async function reach(): Promise<RpcPeer> {
 
 let session: RpcPeer | undefined;
 
-/** The commands, run in this home's daemon. Throws if it can't be reached or started. */
-export async function remote(): Promise<Api> {
-	const peer = await reach();
+/**
+ * The commands, run in this home's daemon. Throws if it can't be reached or started. `say`
+ * hears what it's waiting for, if it waits: a daemon starting, or busy with another command.
+ */
+export async function remote({ say = () => {} }: { say?: Say } = {}): Promise<Api> {
+	const tell = once(say);
+	const slow = setTimeout(() => tell("waiting for the pushwork daemon…"), SLOW_MS);
+	let peer: RpcPeer;
+	try {
+		peer = await reach(tell);
+	} finally {
+		clearTimeout(slow);
+	}
 	session = peer;
 	let closed = false;
 	peer.onClose(() => (closed = true));
@@ -171,10 +252,14 @@ export function hangUp(): void {
 	session = undefined;
 }
 
-/** Stop this home's daemon, after the commands it's running finish; false if none was running. */
-export async function stopDaemon(): Promise<boolean> {
+/**
+ * Stop this home's daemon, after the commands it's running finish, however long they take
+ * (see busyWith); false if none was running. `say` hears what it's waiting for.
+ */
+export async function stopDaemon({ say = () => {} }: { say?: Say } = {}): Promise<boolean> {
+	const tell = once(say);
 	const sock = socketPath();
-	const p = await reachable(sock);
+	const p = await patiently(sock, tell);
 	if (p.state === "down") return false;
 	if (p.state === "silent") {
 		await terminate(await readPid());
@@ -183,18 +268,29 @@ export async function stopDaemon(): Promise<boolean> {
 	const { pid } = p.hello;
 	await p.peer.call("stop", []).catch(() => {});
 	p.peer.close();
-	if (!(await until(async () => !(await listening(sock)), STOP_MS))) await terminate(pid);
+	if (!(await gone(sock, pid, STOP_MS, tell))) await terminate(pid);
 	// gone from the socket; wait for it to let go of its files too
 	await until(() => !alive(pid), 5000);
 	return true;
 }
 
-/** The running daemon's state, or undefined if none answers. */
-export async function daemonStatus(): Promise<Status | undefined> {
+/** The daemon: its status if it answers, else what it's busy with, if anything; undefined if none is running. */
+export type DaemonState =
+	| { state: "up"; status: Status }
+	| { state: "busy"; pid: number; call: Call }
+	| { state: "silent"; pid: number };
+
+export async function daemonStatus(): Promise<DaemonState | undefined> {
 	const p = await reachable();
-	if (p.state !== "up") return undefined;
+	if (p.state === "down") return undefined;
+	if (p.state === "silent") {
+		const pid = await readPid();
+		// however long it's been at it
+		const call = await busyCall(pid, Infinity);
+		return call ? { state: "busy", pid, call } : { state: "silent", pid };
+	}
 	try {
-		return (await p.peer.call("status", [])) as Status;
+		return { state: "up", status: (await p.peer.call("status", [])) as Status };
 	} finally {
 		p.peer.close();
 	}

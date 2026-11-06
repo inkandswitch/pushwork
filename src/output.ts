@@ -183,6 +183,17 @@ export class Output {
 		else clack.log.success(message);
 	}
 
+	/**
+	 * What the CLI is waiting for before a command starts (the daemon): not the command's output,
+	 * so off stdout but in an interactive terminal. Suppressed only by --silent.
+	 */
+	notice(message: string): void {
+		if (this.isSilent) return;
+		this.halt();
+		if (this.porcelain || this.isQuiet || !this.isTTY) console.error(message);
+		else clack.log.info(message);
+	}
+
 	warn(message: string): void {
 		if (this.isSilent) {
 			console.error(`warning: ${message}`);
