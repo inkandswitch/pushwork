@@ -169,6 +169,27 @@ describe("daemon", () => {
 		}
 	});
 
+	it("a command whose caller is gone stops at its next step", async () => {
+		// a daemon already running, so the init below gets to the server straight away
+		const other = path.join(work, "other");
+		await fs.mkdir(other);
+		await run(["init", "--offline"], other);
+		server.stall();
+		const init = start(["init", "--sync-server", server.url]);
+		// connecting: the server takes the connection and never answers
+		expect(await until(() => server.connections() > 0, 15_000)).toBe(true);
+		// what Ctrl-C does to the CLI
+		init.child.kill("SIGKILL");
+		await init.exited;
+		// after 10 seconds the daemon gives up on the server, and would go on to publish offline
+		const log = path.join(home, ".pushwork", "daemon.log");
+		expect(await until(async () => (await readText(log)).includes(`init in ${await fs.realpath(repo)}`), 30_000)).toBe(true);
+		for (const file of ["config.json", "heads.json", "checkout.lock"]) {
+			expect(await exists(path.join(repo, ".pushwork", file))).toBe(false);
+		}
+		expect(await readText(log)).toContain("the command was cancelled");
+	});
+
 	it("a killed daemon is replaced on the next command", async () => {
 		await run(["init", "--offline"]);
 		const pid = await daemonPid();

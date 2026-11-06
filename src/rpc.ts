@@ -55,6 +55,11 @@ export class RpcPeer {
 		else this.closeCallbacks.push(cb)
 	}
 
+	/** Whether the connection has closed. */
+	get isClosed(): boolean {
+		return this.closed
+	}
+
 	close(): void {
 		this.socket.destroy()
 		this.finish()

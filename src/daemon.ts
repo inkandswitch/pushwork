@@ -182,6 +182,28 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const lockBase = (home: string) => path.join(daemonDir(home), "daemon");
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+	typeof v === "object" && v !== null && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+
+/**
+ * A command's arguments, with each of the caller's functions (report, warn, onStrategyDoc...)
+ * throwing once `gone` says the caller has hung up (Ctrl-C, say). Commands report at every
+ * step, so a cancelled one stops at its next, and doesn't go on to publish what the user
+ * cancelled; its finally blocks let go of the checkout's lock.
+ */
+function cancellable(v: unknown, gone: () => boolean): unknown {
+	if (typeof v === "function") {
+		return (...args: unknown[]) => {
+			if (gone()) throw new Error("the command was cancelled");
+			return v(...args);
+		};
+	}
+	if (Array.isArray(v)) return v.map(x => cancellable(x, gone));
+	if (v instanceof Map) return new Map([...v].map(([k, x]) => [k, cancellable(x, gone)]));
+	if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cancellable(x, gone)]));
+	return v;
+}
+
 /**
  * The lock only one daemon per home holds, for its whole life: only the holder removes the
  * socket and listens. Undefined if another daemon is serving, or if one on its way out takes
@@ -358,14 +380,15 @@ async function serve(home: string, sock: string): Promise<void> {
 		}
 	}
 
-	async function run(fn: unknown, args: unknown, cwd: unknown): Promise<unknown> {
+	async function run(caller: RpcPeer, fn: unknown, args: unknown, cwd: unknown): Promise<unknown> {
 		if (typeof fn !== "string" || !(COMMANDS as readonly string[]).includes(fn)) {
 			throw new Error(`unknown command ${String(fn)}`);
 		}
 		if (!Array.isArray(args)) throw new Error(`bad arguments for ${fn}`);
 		const command = pushwork[fn as Command] as (...args: unknown[]) => Promise<unknown>;
 		const start = Date.now();
-		const go = () => callerCwd.run(typeof cwd === "string" ? cwd : undefined, () => command(...args));
+		const guarded = cancellable(args, () => caller.isClosed) as unknown[];
+		const go = () => callerCwd.run(typeof cwd === "string" ? cwd : undefined, () => command(...guarded));
 		const call = { fn, cwd: String(cwd), since: start };
 		calls.add(call);
 		writeBusy();
@@ -382,7 +405,7 @@ async function serve(home: string, sock: string): Promise<void> {
 		}
 	}
 
-	async function handle(method: string, args: unknown[]): Promise<unknown> {
+	async function handle(caller: RpcPeer, method: string, args: unknown[]): Promise<unknown> {
 		switch (method) {
 			case "hello":
 				return { version, pid: process.pid, stopping } satisfies Hello;
@@ -397,13 +420,13 @@ async function serve(home: string, sock: string): Promise<void> {
 				setImmediate(() => void shutdown("asked to stop"));
 				return true;
 			case "call":
-				return run(args[0], args[1], args[2]);
+				return run(caller, args[0], args[1], args[2]);
 		}
 		throw new Error(`unknown method ${method}`);
 	}
 
 	const server = net.createServer(socket => {
-		const peer = new RpcPeer(socket, handle);
+		const peer: RpcPeer = new RpcPeer(socket, (method, args) => handle(peer, method, args));
 		peers.add(peer);
 		peer.onClose(() => peers.delete(peer));
 	});
