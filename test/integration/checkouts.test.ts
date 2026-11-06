@@ -3,7 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
-import { exists, pushwork, readText } from "../cli";
+import { exists, pushwork, readText, stopDaemons } from "../cli";
 import { homeEnv } from "../home";
 
 const server = inject("server");
@@ -29,7 +29,10 @@ describe("checkouts", () => {
 		await pushwork(["clone", "--sync-server", server, await urlOf(a), b]);
 	});
 
-	afterEach(() => cleanup());
+	afterEach(async () => {
+		await stopDaemons();
+		cleanup();
+	});
 
 	const notes = (dir: string) => path.join(dir, "notes.txt");
 

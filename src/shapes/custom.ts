@@ -1,3 +1,4 @@
+import * as fs from "fs/promises";
 import * as path from "path";
 import { pathToFileURL } from "url";
 import { log } from "../log.js";
@@ -10,7 +11,9 @@ export async function loadCustomShape(filePath: string): Promise<Shape> {
 		? filePath
 		: path.resolve(process.cwd(), filePath);
 	dlog("loading custom shape from %s", absolute);
-	const url = pathToFileURL(absolute).href;
+	// a long-lived process (the daemon) would otherwise keep running the first version it loaded
+	const changed = await fs.stat(absolute).then(st => `?${st.mtimeMs}`, () => "");
+	const url = pathToFileURL(absolute).href + changed;
 	const mod = (await import(url)) as {
 		default?: Partial<Shape>;
 	};

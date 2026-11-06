@@ -321,13 +321,14 @@ async function parseKeyhiveServer(server: string, card?: string): Promise<Settin
 async function readCard(card: string): Promise<string> {
 	if (card.trimStart().startsWith("{")) return card.trim();
 	const { isCard } = await import("./keyhive/keyline.js");
-	if (isCard(card) && !(await fs.stat(card).catch(() => undefined))) return card.trim();
+	if (isCard(card) && !(await fs.stat(path.resolve(card)).catch(() => undefined))) return card.trim();
 	if (/^https?:\/\//.test(card)) {
 		const res = await fetch(card);
 		if (!res.ok) throw new Error(`fetching ${card}: ${res.status} ${res.statusText}`);
 		return (await res.text()).trim();
 	}
-	return (await fs.readFile(card, "utf8")).trim();
+	// resolved, so a daemon reads it from the caller's directory (see daemon.ts)
+	return (await fs.readFile(path.resolve(card), "utf8")).trim();
 }
 
 // ---- contacts: keyhive contact cards by name, shared by every repo on the machine

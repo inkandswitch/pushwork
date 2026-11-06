@@ -3,7 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
-import { exists, pushwork, readText, userFiles } from "../cli";
+import { exists, pushwork, readText, stopDaemons, userFiles } from "../cli";
 import { homeEnv } from "../home";
 
 const server = inject("server");
@@ -27,7 +27,10 @@ describe("pushwork", () => {
 		cleanup = t.removeCallback;
 	});
 
-	afterEach(() => cleanup());
+	afterEach(async () => {
+		await stopDaemons();
+		cleanup();
+	});
 
 	async function dir(name: string) {
 		const d = path.join(work, name);

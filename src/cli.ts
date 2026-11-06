@@ -2,44 +2,10 @@
 import "./log.js"; // sets up DEBUG=true → DEBUG=* before anything else
 import { Argument, Command, Option } from "@commander-js/extra-typings";
 import * as path from "path";
-import {
-	clone,
-	merge,
-	shapeInstall,
-	listShapes,
-	removeShape,
-	ACCESS_LEVELS,
-	keyhiveInfo,
-	setKeyhiveServer,
-	setPublicAccess,
-	setContactAccess,
-	repoAccess,
-	addContact,
-	listContacts,
-	removeContact,
-	checkAccess,
-	addPublicApp,
-	listPublicApps,
-	newPublicApp,
-	removePublicApp,
-	migrate,
-	track,
-	cutWorkdir,
-	diff,
-	heads,
-	init,
-	pasteSnarf,
-	plural,
-	save,
-	showSnarfs,
-	status,
-	sync,
-	url,
-	yeet,
-	yoink,
-	type RepoSummary,
-	type SyncSummary,
-} from "./pushwork.js";
+import * as pushwork from "./pushwork.js";
+import { ACCESS_LEVELS, plural, type RepoSummary, type SyncSummary } from "./pushwork.js";
+import { daemonStatus, hangUp, remote, stopDaemon, type Api } from "./client.js";
+import { logFile, runDaemon, socketPath } from "./daemon.js";
 import type { SyncReport } from "./docs.js";
 import { KEYHIVE_VERSIONS } from "./keyhive/common.js";
 import type { AutomergeUrl } from "./url.js";
@@ -97,7 +63,7 @@ const summaryRows = (root: string, info: RepoSummary, filesLabel: string) => ({
 
 async function pickStrategyInteractively(info: {
 	url: AutomergeUrl;
-	viewCode: () => string;
+	viewCode: () => string | Promise<string>;
 }): Promise<boolean> {
 	out.info(
 		`This repo's root doc has no standard @patchwork.type but declares a custom strategy: ${info.url}`,
@@ -117,7 +83,7 @@ async function pickStrategyInteractively(info: {
 		if (choice === "run") return true;
 		if (choice === "abort") return false;
 		out.log("\n----- .pushworkStrategy -----");
-		out.log(info.viewCode().replace(/\n?$/, "\n") + "----- end -----\n");
+		out.log((await info.viewCode()).replace(/\n?$/, "\n") + "----- end -----\n");
 	}
 }
 
@@ -131,13 +97,40 @@ const program = new Command()
 	)
 	.option("-q, --quiet", "Suppress progress; show only results and errors")
 	.option("--silent", "Suppress all output except errors (check exit code)")
-	.hook("preAction", (thisCommand) => {
+	.option("--no-daemon", "Run here instead of in the background daemon, stopping the daemon if it's running")
+	.hook("preAction", async (thisCommand, actionCommand) => {
 		const opts = thisCommand.opts();
 		out.configure({
 			porcelain: Boolean(opts.porcelain),
 			verbosity: opts.silent ? "silent" : opts.quiet ? "quiet" : "normal",
 		});
+		if (usesApi(actionCommand)) api = await chooseApi(opts.daemon);
 	});
+
+// Commands run in the daemon, which keeps server connections open between them; with
+// --no-daemon, or when it can't be started, they run here.
+let api: Api = pushwork;
+
+// `version` and `daemon ...` neither start a daemon nor stop one
+type Named = { name(): string; parent: Named | null };
+function usesApi(command: Named): boolean {
+	for (let c: Named | null = command; c; c = c.parent) if (c.name() === "daemon") return false;
+	return command.name() !== "version";
+}
+
+async function chooseApi(daemon: boolean): Promise<Api> {
+	if (!daemon) {
+		await stopDaemon();
+		return pushwork;
+	}
+	try {
+		return await remote();
+	} catch (e) {
+		dlog("daemon: %s", e instanceof Error ? e.message : e);
+		out.warn("couldn't start the pushwork daemon (see ~/.pushwork/daemon.log); running here instead");
+		return pushwork;
+	}
+}
 
 program
 	.command("version")
@@ -189,7 +182,7 @@ program
 		if (opts.publicApp && !opts.publicAccess) throw new Error("--public-app needs --public-access");
 		out.intro("pushwork init");
 		out.task(opts.offline ? "Initializing" : "Connecting to sync server");
-		const info = await init(
+		const info = await api.init(
 			{
 				dir: root,
 				shape: opts.shape,
@@ -269,7 +262,7 @@ attachCommand("clone", "Clone an automerge URL into a directory", "<dir>").actio
 		const root = path.resolve(dir);
 		out.intro("pushwork clone");
 		out.task("Connecting to sync server");
-		const info = await clone(attachOpts(u, root, opts), report);
+		const info = await api.clone(attachOpts(u, root, opts), report);
 		out.done(); // complete the final phase line before the summary
 		out.obj(summaryRows(root, info, "downloaded"));
 		out.block("CLONED", info.url);
@@ -287,7 +280,7 @@ attachCommand(
 	const root = path.resolve(dir);
 	out.intro("pushwork track");
 	out.task("Connecting to sync server");
-	const info = await track(attachOpts(u, root, opts), report);
+	const info = await api.track(attachOpts(u, root, opts), report);
 	out.done();
 	out.obj(summaryRows(root, info, "tracked"));
 	out.block("TRACKING", info.url);
@@ -304,7 +297,7 @@ attachCommand(
 	const root = path.resolve(dir);
 	out.intro("pushwork merge");
 	out.task("Connecting to sync server");
-	const info = await merge(attachOpts(u, root, opts), report, warn);
+	const info = await api.merge(attachOpts(u, root, opts), report, warn);
 	out.done();
 	out.obj(summaryRows(root, info, "in the url"));
 	out.block("MERGED", info.url);
@@ -321,10 +314,10 @@ program
 		const root = process.cwd();
 		out.intro("pushwork migrate");
 		out.task("Migrating");
-		const info = await migrate(root, { syncServer: opts.syncServer }, report);
+		const info = await api.migrate(root, { syncServer: opts.syncServer }, report);
 		out.done();
 		out.obj(summaryRows(root, info, "tracked"));
-		const { diff: d } = await status(root);
+		const { diff: d } = await api.status(root);
 		const total = d.added.length + d.modified.length + d.deleted.length + d.renamed.length;
 		if (total) {
 			out.warn(
@@ -351,7 +344,7 @@ Then, here: pushwork keyhive contacts add <name> '<card json>'`,
 		new Option("--keyhive-version <version>", "Which keyhive identity's card to show (default 0.6)").choices(KEYHIVE_VERSIONS),
 	)
 	.action(async opts => {
-		const info = await keyhiveInfo(opts.keyhiveVersion);
+		const info = await api.keyhiveInfo(opts.keyhiveVersion);
 		out.obj({
 			Keyhive: `automerge-repo-keyhive ${info.version}`,
 			Server: info.serverName ? `${info.server} (${info.serverName})` : info.server,
@@ -375,7 +368,7 @@ keyhive
 		"The server's contact card, for a url (a keyline server is asked for its own): a built-in name, JSON or base64, an http(s) url or a file",
 	)
 	.action(async (server, card) => {
-		await setKeyhiveServer(server, card);
+		await api.setKeyhiveServer(server, card);
 		out.log(`keyhive server set to ${server}`);
 	});
 
@@ -388,7 +381,7 @@ keyhive
 	.option("--keyhive-card <card>", "The keyhive server's contact card, for a url (a keyline server is asked for its own)")
 	.addOption(new Option("--keyhive-version <version>", "The repo's keyhive version (default 0.6)").choices(KEYHIVE_VERSIONS))
 	.action(async (url, _opts, cmd) => {
-		const check = await checkAccess(url as `automerge:${string}`, cmd.optsWithGlobals());
+		const check = await api.checkAccess(url as `automerge:${string}`, cmd.optsWithGlobals());
 		out.obj({
 			as: check.as,
 			pulled: `${check.pulled} blob${check.pulled === 1 ? "" : "s"} of the root doc`,
@@ -408,7 +401,7 @@ keyhive
 	)
 	.option("--app <name>", "For a keyline repo: the app whose users count as anyone (default patchwork; see `keyhive apps`)")
 	.action(async (level, opts) => {
-		await setPublicAccess(process.cwd(), level, opts.app);
+		await api.setPublicAccess(process.cwd(), level, opts.app);
 		const who = opts.app ? `${opts.app}'s users` : "anyone with the URL";
 		out.log(level === "none" ? `public access removed${opts.app ? ` for ${opts.app}` : ""}` : `${who} can now ${level}`);
 	});
@@ -423,11 +416,11 @@ keyhive
 	.action(async (contact, level) => {
 		if (contact && !level) throw new Error("give a level: relay, read, edit, admin or none");
 		if (contact && level) {
-			await setContactAccess(process.cwd(), contact, level);
+			await api.setContactAccess(process.cwd(), contact, level);
 			out.log(level === "none" ? `${contact}'s access revoked` : `${contact} can now ${level}`);
 			return;
 		}
-		const members = await repoAccess(process.cwd());
+		const members = await api.repoAccess(process.cwd());
 		out.obj(
 			Object.fromEntries(
 				members.map(m => [
@@ -446,7 +439,7 @@ apps
 	.command("ls")
 	.description("List apps with public pairs: built in, and added on this machine")
 	.action(async () => {
-		const all = await listPublicApps();
+		const all = await api.listPublicApps();
 		out.obj(
 			Object.fromEntries(
 				all.map(a => [a.name, `${a.added ? (a.builtIn ? "added (overrides built-in)" : "added") : "built in"}: reader ${a.reader}, fetcher ${a.fetcher}`]),
@@ -461,7 +454,7 @@ apps
 	.argument("<pair>", "Its public pair: JSON, an http(s) url or a file (as `keyhive apps new` prints it)")
 	.option("--replace", "Update an app that already has a pair (repos made public with the old one stay readable only with it)")
 	.action(async (name, pair, opts) => {
-		const app = await addPublicApp(name, pair, { replace: opts.replace });
+		const app = await api.addPublicApp(name, pair, { replace: opts.replace });
 		out.log(`saved ${app.name} (reader ${app.reader}, fetcher ${app.fetcher})`);
 	});
 
@@ -472,7 +465,7 @@ apps
 	.option("--replace", "Replace the pair an app already has")
 	.action(async (name, opts) => {
 		// only the pair goes to stdout, so it can be redirected to a file to ship
-		const { principals } = await newPublicApp(name, { replace: opts.replace });
+		const { principals } = await api.newPublicApp(name, { replace: opts.replace });
 		out.log(JSON.stringify(principals, null, 2));
 	});
 
@@ -481,7 +474,7 @@ apps
 	.description("Forget an added app's pair (a built-in app goes back to the pair pushwork ships)")
 	.argument("<name>", "The app's name")
 	.action(async name => {
-		await removePublicApp(name);
+		await api.removePublicApp(name);
 		out.log(`removed ${name}`);
 	});
 
@@ -493,7 +486,7 @@ contacts
 	.argument("<name>", "What to call them")
 	.argument("<card>", "Their contact card: JSON, an http(s) url or a file")
 	.action(async (name, card) => {
-		const contact = await addContact(name, card);
+		const contact = await api.addContact(name, card);
 		out.log(`saved ${contact.name} (${contact.id})`);
 	});
 
@@ -507,14 +500,14 @@ contacts
 		// `keyhive` has its own --keyhive-version, which commander gives the flag to
 		const { keyhiveVersion } = cmd.optsWithGlobals();
 		// only the card goes to stdout, so it can be captured
-		out.log((await keyhiveInfo(keyhiveVersion)).me);
+		out.log((await api.keyhiveInfo(keyhiveVersion)).me);
 	});
 
 contacts
 	.command("ls")
 	.description("List saved contacts")
 	.action(async () => {
-		const all = await listContacts();
+		const all = await api.listContacts();
 		if (!all.length) {
 			out.log("no contacts; add one with `pushwork keyhive contacts add <name> <card>`");
 			return;
@@ -527,7 +520,7 @@ contacts
 	.description("Forget a saved contact (their access to repos is unchanged)")
 	.argument("<name>", "The contact's name")
 	.action(async name => {
-		await removeContact(name);
+		await api.removeContact(name);
 		out.log(`removed ${name}`);
 	});
 
@@ -540,7 +533,7 @@ shape
 	.option("--name <name>", "Name to install it as (default: the source's file name)")
 	.option("--sync-server <url>", "Sync server to fetch an automerge: url from")
 	.action(async (source, opts) => {
-		const { name, path: file } = await shapeInstall(process.cwd(), source, {
+		const { name, path: file } = await api.shapeInstall(process.cwd(), source, {
 			name: opts.name,
 			syncServer: opts.syncServer,
 		});
@@ -551,7 +544,7 @@ shape
 	.command("list")
 	.description("List installed shapes")
 	.action(async () => {
-		for (const name of await listShapes()) out.log(name);
+		for (const name of await api.listShapes()) out.log(name);
 	});
 
 shape
@@ -559,7 +552,7 @@ shape
 	.description("Remove an installed shape")
 	.argument("<name>")
 	.action(async (name) => {
-		await removeShape(name);
+		await api.removeShape(name);
 		out.log(`removed shape ${name}`);
 	});
 
@@ -567,7 +560,7 @@ program
 	.command("url")
 	.description("Print the automerge URL of this pushwork repo")
 	.action(async () => {
-		out.log(await url(process.cwd()));
+		out.log(await api.url(process.cwd()));
 	});
 
 program
@@ -579,7 +572,7 @@ program
 	.action(async (u, dest, opts) => {
 		dlog("yoink url=%s dest=%s", u, dest);
 		out.task("Yoinking");
-		const result = await yoink(process.cwd(), u, dest, opts.syncServer);
+		const result = await api.yoink(process.cwd(), u, dest, opts.syncServer);
 		out.done(`yoinked ${result.path} (${plural(result.bytes, "byte")})`);
 	});
 
@@ -592,7 +585,7 @@ program
 	.action(async (src, u, opts) => {
 		dlog("yeet src=%s url=%s", src, u);
 		out.task("Yeeting");
-		const result = await yeet(process.cwd(), src, u, opts.syncServer);
+		const result = await api.yeet(process.cwd(), src, u, opts.syncServer);
 		out.done(`yeeted ${result.path} → ${result.url} (${plural(result.bytes, "byte")})`);
 		const { state, detail } = verdict(result.sync);
 		if (state !== "SYNCED") out.warn(`${state}${detail ? `: ${detail}` : ""}`);
@@ -609,7 +602,7 @@ program
 		dlog("sync cwd=%s opts=%o", process.cwd(), opts);
 		out.intro(opts.nuclear ? "pushwork sync --nuclear" : "pushwork sync");
 		out.task("Connecting to sync server");
-		const summary = await sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
+		const summary = await api.sync(process.cwd(), { nuclear: opts.nuclear }, report, warn);
 		out.done(); // complete the final phase line before the summary
 		reportSync(summary);
 		out.outro("Done");
@@ -623,7 +616,7 @@ program
 	.action(async () => {
 		dlog("save cwd=%s", process.cwd());
 		out.task("Saving");
-		await save(process.cwd(), undefined, warn);
+		await api.save(process.cwd(), undefined, warn);
 		out.done("saved");
 		flushWarnings();
 	});
@@ -632,7 +625,7 @@ program
 	.command("status")
 	.description("Show changes against the saved state")
 	.action(async () => {
-		const { diff: d } = await status(process.cwd());
+		const { diff: d } = await api.status(process.cwd());
 		const total = d.added.length + d.modified.length + d.deleted.length + d.renamed.length;
 		if (out.isPorcelain) {
 			for (const p of d.modified) out.log(`modified\t${p}`);
@@ -658,7 +651,7 @@ program
 	.description("Show textual diffs of local changes against the saved state")
 	.argument("[path]", "Limit to a specific path")
 	.action(async (limitPath) => {
-		const entries = await diff(process.cwd(), limitPath);
+		const entries = await api.diff(process.cwd(), limitPath);
 		if (entries.length === 0) {
 			out.log("(no changes)");
 			return;
@@ -691,7 +684,7 @@ program
 	.description("Print Automerge heads for the root folder and every file doc (offline)")
 	.argument("[pathspec]", "Limit to a path or path prefix (e.g. \"src\" or \"src/foo.ts\")")
 	.action(async (pathspec) => {
-		const entries = await heads(process.cwd(), pathspec);
+		const entries = await api.heads(process.cwd(), pathspec);
 		if (entries.length === 0) {
 			out.log("(no matching docs)");
 			return;
@@ -708,7 +701,7 @@ program
 	.description("Snarf working-tree changes and reset the tree to the saved state (offline)")
 	.argument("[name]", "Optional name for the snarf entry")
 	.action(async (name) => {
-		const result = await cutWorkdir(process.cwd(), { name });
+		const result = await api.cutWorkdir(process.cwd(), { name });
 		out.success(`cut #${result.id}: ${plural(result.entries, "entry", "entries")}`);
 	});
 
@@ -717,7 +710,7 @@ program
 	.description("Re-apply a snarfed set of changes; default is the most recent (offline)")
 	.argument("[id-or-name]", "Snarf id or name")
 	.action(async (selector) => {
-		const result = await pasteSnarf(process.cwd(), selector);
+		const result = await api.pasteSnarf(process.cwd(), selector);
 		const label = result.name ? ` (${result.name})` : "";
 		out.success(
 			`pasted #${result.id}${label}: ${plural(result.entries, "entry", "entries")}`,
@@ -729,7 +722,7 @@ program
 	.alias("clipboard")
 	.description("List snarfed change sets (newest first)")
 	.action(async () => {
-		const snarfs = await showSnarfs(process.cwd());
+		const snarfs = await api.showSnarfs(process.cwd());
 		if (snarfs.length === 0) {
 			out.log("(no snarfs)");
 			return;
@@ -743,10 +736,46 @@ program
 		);
 	});
 
+const daemon = program
+	.command("daemon")
+	.description("The background process commands run in, which keeps server connections open between them");
+
+daemon
+	.command("status")
+	.description("Show whether the daemon is running, and the servers it's connected to")
+	.action(async () => {
+		const status = await daemonStatus();
+		if (!status) {
+			out.log("the pushwork daemon is not running");
+			return;
+		}
+		out.obj({
+			pid: status.pid,
+			version: status.version,
+			started: new Date(status.startedAt).toISOString(),
+			servers: status.servers.map(s => s.server).join(", ") || "(none)",
+			socket: socketPath(),
+			log: logFile(),
+		});
+	});
+
+daemon
+	.command("stop")
+	.description("Stop the daemon once the commands it's running finish; the next command starts it again")
+	.action(async () => {
+		out.log((await stopDaemon()) ? "stopped the pushwork daemon" : "the pushwork daemon is not running");
+	});
+
+daemon.command("run", { hidden: true }).action(() => runDaemon());
+
 program
 	.parseAsync(process.argv)
-	.then(() => out.exit(0))
+	.then(() => {
+		hangUp();
+		out.exit(0);
+	})
 	.catch((err) => {
+		hangUp();
 		out.error(err instanceof Error ? err.message : String(err));
 		out.exit(1);
 	});

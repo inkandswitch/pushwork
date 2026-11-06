@@ -20,7 +20,8 @@ export async function installShape(name: string, code: string): Promise<string> 
 	const dir = shapesDir();
 	await fs.mkdir(dir, { recursive: true });
 	await fs.writeFile(path.join(dir, "package.json"), '{ "type": "module" }\n');
-	const tmp = path.join(dir, `.${name}.${process.pid}.js`);
+	// a new name each time, as a daemon installs them all from one pid
+	const tmp = path.join(dir, `.${name}.${crypto.randomUUID()}.js`);
 	await fs.writeFile(tmp, code);
 	try {
 		await loadCustomShape(tmp);

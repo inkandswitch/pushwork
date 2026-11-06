@@ -3,7 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
 import { inject } from "vitest";
-import { exists, pushwork, readText } from "../cli";
+import { exists, pushwork, readText, stopDaemons } from "../cli";
 import { homeEnv } from "../home";
 
 // nothing listens here, so a migrate that reached for the server would fail
@@ -35,6 +35,7 @@ describe("migrate from version 6", () => {
 	});
 
 	afterEach(async () => {
+		await stopDaemons();
 		// a failed test may leave the read-only store behind, which tmp can't remove
 		await fs.chmod(path.join(h2, ".pushwork", "storage"), 0o700).catch(() => {});
 		cleanup();

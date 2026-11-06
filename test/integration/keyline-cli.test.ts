@@ -2,7 +2,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
-import { pushwork, readText } from "../cli";
+import { pushwork, readText, stopDaemons } from "../cli";
 import { homeEnv } from "../home";
 import { keylineServerBinary, startKeylineServer } from "../keyline-server";
 
@@ -13,7 +13,10 @@ describe.skipIf(!keylineServerBinary)("keyline CLI", () => {
 	beforeAll(async () => {
 		server = await startKeylineServer();
 	});
-	afterAll(() => server?.close());
+	afterAll(async () => {
+		await stopDaemons();
+		await server?.close();
+	});
 
 	it("grants read and relay, and checks what each user can do", async () => {
 		const work = tmp.dirSync({ unsafeCleanup: true }).name;
