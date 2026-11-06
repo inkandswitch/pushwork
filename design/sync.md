@@ -24,13 +24,14 @@ The steps of `sync`, in order (`commitWorkdir` in `src/pushwork.ts`):
 1. Decode the saved tree. This is local: we diff against the last local state, not the remote one.
 2. Walk the working directory and write changed files into their docs.
 3. If the tree changed, re-encode it into the root.
-4. `docs.sync()`: save, then sync every document this run has loaded (the whole tree).
-5. `docs.advance()`: this checkout has now seen what the sync brought, so its heads move to the live heads.
-6. If artifact pins moved during the sync, sync the folders that hold them again.
-7. Decode the tree again and write it to disk. Documents it references that we don't have yet are fetched as they are found.
-8. Save, record the checkout's heads, then close: compact, disconnect.
+4. Save, and record the checkout's heads. The commit is this checkout's from here on, so a sync that dies later doesn't commit the same edits again.
+5. `docs.sync()`: save, then sync every document this run has loaded (the whole tree).
+6. `docs.advance()`: this checkout has now seen what the sync brought, so its heads move to the live heads.
+7. If artifact pins moved during the sync, sync the folders that hold them again.
+8. Decode the tree again and write it to disk. Documents it references that we don't have yet are fetched as they are found.
+9. Save, record the checkout's heads, then close: compact, disconnect.
 
-`save` is the same pipeline offline, stopping after step 3 and materializing. It never advances, so it shows only this checkout's own changes.
+`save` is the same pipeline offline, stopping after step 4 and materializing. It never advances, so it shows only this checkout's own changes.
 
 ## Checkout heads
 

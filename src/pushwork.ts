@@ -1202,6 +1202,8 @@ async function commitWorkdir(
 			report(online ? "Committing local changes" : "Writing documents");
 			const moved = await findMoves(root, prevFiles, fsFiles);
 			await writeFiles(docs, shape, fsFiles, prevFiles, isArtifact, { previousRoot: rootUrl, moved });
+			// the commit is this checkout's from here on, so a sync that dies after it doesn't make it again
+			await saveHeads(root, docs);
 		} else if (changes(prevFiles, fsFiles).length) {
 			throw new Error("read-only repo; `pushwork cut` your changes first");
 		}

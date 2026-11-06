@@ -111,6 +111,24 @@ describe("checkouts", () => {
 		expect(await exists(path.join(b, ".pushwork", "checkout.lock"))).toBe(false);
 	});
 
+	it.skipIf(process.platform === "win32")("a sync that fails after its commit doesn't commit the edit again", async () => {
+		// a's new folder can't be written into b, so b's sync fails after it saved and pushed its commit
+		await fs.mkdir(path.join(a, "sub"));
+		await fs.writeFile(path.join(a, "sub", "new.txt"), "new\n");
+		await pushwork(["sync"], a);
+		await edit(b, 3, "THREE");
+		await fs.chmod(b, 0o500);
+		try {
+			await expect(pushwork(["sync"], b)).rejects.toThrow(/EACCES/);
+		} finally {
+			await fs.chmod(b, 0o700);
+		}
+		expect(await porcelainStatus(b)).toBe("");
+		await pushwork(["sync"], b);
+		expect(await readText(notes(b))).toBe("one\ntwo\nTHREE\n");
+		expect(await readText(path.join(b, "sub", "new.txt"))).toBe("new\n");
+	});
+
 	it("no .pushwork/storage is written", async () => {
 		await pushwork(["sync"], b);
 		for (const dir of [a, b]) expect(await exists(path.join(dir, ".pushwork", "storage"))).toBe(false);
