@@ -44,7 +44,7 @@ A client says hello with its version: the package version plus the mtime of `dis
 
 A command that has waited a second for the daemon, to start or to answer, says `waiting for the pushwork daemon…`. These notes go to stderr, but in an interactive terminal.
 
-The new daemon is started detached, with the log as its output and the filesystem root as its working directory. If none answers within 10 seconds, the CLI warns, pointing at the log, and runs the command in its own process. `version` and `daemon ...` commands neither start a daemon nor stop one.
+The new daemon is started detached, with the log as its output and the filesystem root as its working directory. If none answers within 10 seconds (counted from when a daemon on its way out, which may hold the lock after letting go of the socket, has exited, for up to a minute), the CLI warns, pointing at the log, and runs the command in its own process. `version` and `daemon ...` commands neither start a daemon nor stop one.
 
 `daemon stop` and `--no-daemon` find the daemon the same way, then ask it to stop and wait for it to go: for as long as it is running a command (as above), and then a minute more before terminating it. A daemon that has exited is gone, even if a new one has taken the socket by then.
 

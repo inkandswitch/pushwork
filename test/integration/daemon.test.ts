@@ -233,6 +233,23 @@ describe("daemon", () => {
 		expect(await readText(path.join(home, ".pushwork", "daemon.log"))).toMatch(/^\d{4}-\S+ uncaught exception: Error: boom from a shape$/m);
 	});
 
+	it("waits for a daemon on its way out before giving up on the next", async () => {
+		// what a daemon finishing its stop holds for a moment: its lock and pid file, and no socket
+		const old = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+		await new Promise(resolve => old.once("spawn", resolve));
+		try {
+			await fs.mkdir(path.join(home, ".pushwork"), { recursive: true });
+			await fs.writeFile(path.join(home, ".pushwork", "daemon.lock"), `${old.pid} on-its-way-out`);
+			await fs.writeFile(pidFile(), String(old.pid));
+			// and a machine so busy the next daemon takes seconds to start
+			const slow = path.join(work, "slow.js");
+			await fs.writeFile(slow, "for (const end = Date.now() + 3000; Date.now() < end; );\n");
+			await pushwork(["init", "--offline"], repo, { ...env, NODE_OPTIONS: `--require ${slow}` });
+		} finally {
+			old.kill();
+		}
+	});
+
 	it("a killed daemon is replaced on the next command", async () => {
 		await run(["init", "--offline"]);
 		const pid = await daemonPid();

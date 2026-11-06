@@ -200,8 +200,12 @@ async function reach(say: Say): Promise<RpcPeer> {
 	} else if (first.state === "silent") {
 		await terminate(await readPid());
 	}
+	// a daemon on its way out holds the lock the new one waits for, maybe after it has let go of
+	// the socket: the new one's time starts once it has gone
+	const old = first.state === "up" ? first.hello.pid : await readPid();
 	start();
-	const end = Date.now() + START_MS;
+	const cap = Date.now() + STOP_MS;
+	let end = Date.now() + START_MS;
 	for (;;) {
 		await sleep(50);
 		if ((await privateDir(path.dirname(sock))) === "private") {
@@ -213,6 +217,7 @@ async function reach(say: Say): Promise<RpcPeer> {
 				p.peer.close();
 			}
 		}
+		if (Date.now() < cap && alive(old)) end = Date.now() + START_MS;
 		if (Date.now() > end) throw new Error(`the pushwork daemon didn't answer within ${START_MS} ms`);
 	}
 }
