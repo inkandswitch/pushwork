@@ -8,7 +8,7 @@ import * as path from "path";
 import { storeDir } from "./config.js";
 import { Hub, currentHub, setHub } from "./hub.js";
 import { loadSeed, signerFrom } from "./key.js";
-import { lock } from "./lock.js";
+import { lock, lockHolder } from "./lock.js";
 import * as pushwork from "./pushwork.js";
 import { RpcPeer } from "./rpc.js";
 import { FsStorage } from "./storage.js";
@@ -58,8 +58,11 @@ export type Command = (typeof COMMANDS)[number];
 export const HELLO_MS = 2000;
 const IDLE_MS = 10 * 60_000;
 const HOME_CHECK_MS = 30_000;
-// how long a new daemon waits for the lock while the daemon holding it is on its way out
-const CLAIM_MS = 20_000;
+// how long a holder of the daemon lock may go without a socket before it's taken over: less
+// than a client waits for a daemon to start, so the command that started this one gets it
+const CLAIM_MS = 8000;
+// how long a new daemon waits for one on its way out to let go of the lock
+const WAIT_MS = 60_000;
 // how long a stopping daemon waits for connected clients that aren't running a command to hang up
 const GRACE_MS = 10_000;
 
@@ -125,6 +128,12 @@ export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /** Say hello to the daemon at `sock`, within HELLO_MS. */
 export async function probe(sock = socketPath()): Promise<Probe> {
+	if (process.platform !== "win32") {
+		const st = await fsp.lstat(sock).catch(() => undefined);
+		if (!st) return { state: "down" };
+		// whoever made the socket would get our commands
+		if (st.uid !== process.getuid!()) throw new Error(`${sock} belongs to someone else`);
+	}
 	const deadline = Date.now() + HELLO_MS;
 	const socket = net.connect(sock);
 	const connected = await within(
@@ -161,33 +170,41 @@ const callerCwd = new AsyncLocalStorage<string | undefined>();
 const log = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+const lockBase = (home: string) => path.join(daemonDir(home), "daemon");
+
 /**
  * The lock only one daemon per home holds, for its whole life: only the holder removes the
- * socket and listens. Undefined if another daemon is serving. One on its way out is waited
- * for; a lock whose holder is alive but has had no socket for CLAIM_MS (its pid reused by
- * another process after a crash, say) is taken over.
+ * socket and listens. Undefined if another daemon is serving, or if one on its way out takes
+ * longer than WAIT_MS to go. A holder that's alive but has had no socket for CLAIM_MS (its pid
+ * reused by another process after a crash, say, or stuck) is taken over: through lock(), so
+ * the lock is removed only if it still names that holder, and only by one daemon at a time.
  */
 async function claimLock(home: string): Promise<(() => Promise<void>) | undefined> {
-	const file = path.join(daemonDir(home), "daemon");
-	const deadline = Date.now() + CLAIM_MS;
+	const file = lockBase(home);
+	const end = Date.now() + WAIT_MS;
+	// the holder being waited on, and since when it's had no socket
+	let holder = 0;
+	let since = Date.now();
 	for (;;) {
 		try {
-			return await lock(file);
+			return await lock(file, { staleIf: Date.now() - since > CLAIM_MS ? holder : undefined });
 		} catch (e) {
 			// lock() says "in use" with a plain Error; anything with a code is a real failure
 			if ((e as NodeJS.ErrnoException).code) throw e;
+		}
+		const now = await lockHolder(file);
+		if (now !== holder) {
+			holder = now;
+			since = Date.now();
 		}
 		const other = await probe(socketPath(home));
 		if (other.state === "up") {
 			other.peer.close();
 			if (!other.hello.stopping) return undefined;
 		}
-		if (Date.now() > deadline) {
-			if (other.state !== "down") return undefined;
-			log(`taking over ${file}.lock, whose holder isn't serving`);
-			await fsp.rm(`${file}.lock`, { force: true });
-			continue;
-		}
+		if (other.state !== "down") since = Date.now();
+		else if (Date.now() - since > CLAIM_MS) log(`taking over ${file}.lock from pid ${holder}, which has no socket`);
+		if (Date.now() > end) return undefined;
 		await sleep(200);
 	}
 }
@@ -372,8 +389,14 @@ async function serve(home: string, sock: string): Promise<void> {
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 	process.on("SIGINT", () => void shutdown("SIGINT"));
 
-	const homeCheck = setInterval(() => {
+	// a daemon whose lock another took over (see claimLock) isn't reachable any more
+	const displaced = async () => {
+		const holder = await lockHolder(lockBase(home));
+		return holder !== 0 && holder !== process.pid;
+	};
+	const homeCheck = setInterval(async () => {
 		if (!fs.existsSync(dir)) void shutdown(`${dir} is gone`);
+		else if (await displaced()) void shutdown("another daemon took over the lock");
 	}, HOME_CHECK_MS);
 	armIdle();
 
@@ -388,10 +411,15 @@ async function serve(home: string, sock: string): Promise<void> {
 		for (const end = Date.now() + GRACE_MS; inFlight > 0 || (peers.size > 0 && Date.now() < end); ) {
 			await sleep(50);
 		}
-		server.close();
+		// closing a unix socket's server unlinks its path, which after a takeover is the new daemon's
+		// socket; exiting leaves it be
+		if (await displaced()) log("not closing the socket, which is another daemon's now");
+		else server.close();
 		for (const peer of peers) peer.close();
 		await closeHub();
-		await fsp.rm(pidFile(home), { force: true });
+		if ((await fsp.readFile(pidFile(home), "utf8").catch(() => "")).trim() === String(process.pid)) {
+			await fsp.rm(pidFile(home), { force: true });
+		}
 		log("stopped");
 		finish();
 	}
