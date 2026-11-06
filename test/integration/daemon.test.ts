@@ -38,7 +38,6 @@ async function until(check: () => boolean | Promise<boolean>, ms: number): Promi
 
 describe("daemon", () => {
 	let work: string;
-	let cleanup: () => void;
 	let home: string;
 	let env: NodeJS.ProcessEnv;
 	let repo: string;
@@ -47,7 +46,6 @@ describe("daemon", () => {
 	beforeEach(async () => {
 		const t = tmp.dirSync({ unsafeCleanup: true });
 		work = t.name;
-		cleanup = t.removeCallback;
 		home = path.join(work, "home");
 		repo = path.join(work, "repo");
 		await fs.mkdir(home);
@@ -60,7 +58,8 @@ describe("daemon", () => {
 	afterEach(async () => {
 		await stopDaemons();
 		await server.close();
-		cleanup();
+		// a daemon that lost the race to start may still be making its directories
+		await fs.rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	});
 
 	const run = (args: string[], cwd = repo) => pushwork(args, cwd, env);
@@ -157,6 +156,53 @@ describe("daemon", () => {
 		expect(await sync.exited).toBe(0);
 		expect(sync.output()).not.toContain("stopped while running");
 		expect(alive(pid)).toBe(false);
+	});
+
+	it.skipIf(!unix)("terminals waiting on a blocked daemon don't fill up its socket's queue", { timeout: 180_000 }, async () => {
+		const others: string[] = [];
+		for (let i = 0; i < 8; i++) {
+			const other = path.join(work, `other${i}`);
+			await fs.mkdir(other);
+			await fs.writeFile(path.join(other, "notes.txt"), "other\n");
+			await run(["init", "--offline"], other);
+			others.push(other);
+		}
+		await run(["init", "--sync-server", server.url]);
+		const pid = await daemonPid();
+		await fs.writeFile(path.join(repo, "notes.txt"), "two\n");
+		server.stall();
+		const sync = start(["sync"]);
+		const busy = path.join(home, ".pushwork", "daemon.busy");
+		expect(await until(async () => (await readText(busy).catch(() => "")).includes('"sync"'), 10_000)).toBe(true);
+		// asked to stop while it answers; it waits for the sync
+		const log = path.join(home, ".pushwork", "daemon.log");
+		const logs = async () => (await readText(`${log}.1`).catch(() => "")) + (await readText(log).catch(() => ""));
+		const stop = start(["daemon", "stop"]);
+		expect(await until(async () => (await logs()).includes("stopping: asked to stop"), 15_000)).toBe(true);
+		process.kill(pid, "SIGSTOP");
+		let stopped = true;
+		const resume = () => {
+			if (stopped && alive(pid)) process.kill(pid, "SIGCONT");
+			stopped = false;
+		};
+		try {
+			const statuses = others.map(other => start(["status"], other));
+			// time enough to fill the 128 connections macOS queues on a socket, at the rate clients
+			// that connect to ask asked
+			await new Promise(r => setTimeout(r, 40_000));
+			expect(stop.child.exitCode).toBe(null);
+			for (const status of statuses) expect(status.child.exitCode).toBe(null);
+			expect(await logs()).not.toContain("taking over");
+			expect(alive(pid)).toBe(true);
+			resume();
+			expect(await stop.exited).toBe(0);
+			for (const status of statuses) expect(await status.exited).toBe(0);
+		} finally {
+			resume();
+		}
+		expect(await sync.exited).toBe(0);
+		expect(sync.output()).not.toContain("stopped while running");
+		expect(await logs()).not.toContain("taking over");
 	});
 
 	it.skipIf(!unix)("daemon status says when the daemon doesn't answer", async () => {
@@ -275,6 +321,32 @@ describe("daemon", () => {
 		}
 		expect(stopped).not.toBe(0);
 		expect(await daemonPid()).not.toBe(stopped);
+	});
+
+	it("a new daemon doesn't take the lock from one that's busy", { timeout: 60_000 }, async () => {
+		// a daemon whose loop a command blocks: it holds the lock, and its socket refuses connections
+		const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+		await new Promise(resolve => holder.once("spawn", resolve));
+		const dir = path.join(home, ".pushwork");
+		const lockFile = path.join(dir, "daemon.lock");
+		const busy = (calls: unknown[]) => fs.writeFile(path.join(dir, "daemon.busy"), JSON.stringify({ pid: holder.pid, calls }));
+		const next = spawn(process.execPath, [CLI, "daemon", "run"], { env: { ...process.env, ...env }, stdio: "ignore" });
+		try {
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(lockFile, `${holder.pid} busy`);
+			await fs.writeFile(pidFile(), String(holder.pid));
+			await busy([{ fn: "sync", cwd: repo, since: Date.now() }]);
+			// longer than a holder with no socket is given
+			await new Promise(r => setTimeout(r, 12_000));
+			expect(await readText(lockFile)).toBe(`${holder.pid} busy`);
+			expect(next.exitCode).toBe(null);
+			// once it's done, it's one with no socket, and is taken over
+			await busy([]);
+			expect(await until(async () => !(await readText(lockFile)).startsWith(`${holder.pid} `), 20_000)).toBe(true);
+		} finally {
+			holder.kill();
+			next.kill();
+		}
 	});
 
 	it("a killed daemon is replaced on the next command", async () => {

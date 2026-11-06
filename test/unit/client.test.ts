@@ -3,8 +3,8 @@ import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import { busyWith, daemonStatus, hangUp, reachable, remote, stopDaemon } from "../../src/client";
-import { busyFile, daemonVersion, pidFile, privateDir, socketPath } from "../../src/daemon";
+import { daemonStatus, hangUp, reachable, remote, stopDaemon } from "../../src/client";
+import { busyFile, busyWith, daemonVersion, pidFile, privateDir, socketPath } from "../../src/daemon";
 import { RpcPeer } from "../../src/rpc";
 import { setHome } from "../home";
 
@@ -191,8 +191,9 @@ describe("a daemon that doesn't answer", () => {
 		await until(() => said.includes(BUSY) || !alive(pid.pid!), 20_000);
 		expect(alive(pid.pid!)).toBe(true);
 		expect(said).toEqual(["waiting for the pushwork daemon…", BUSY]);
-		// it answers once its command lets it
+		// it answers once its command is done
 		answering = true;
+		busy([]);
 		await reached;
 		hangUp();
 		expect(alive(pid.pid!)).toBe(true);
@@ -219,6 +220,25 @@ describe("a daemon that doesn't answer", () => {
 		expect(await stopDaemon()).toBe(true);
 		expect(alive(pid.pid!)).toBe(false);
 		expect(Date.now() - start).toBeLessThan(10_000);
+	});
+
+	it("is waited for while it's busy, though its socket is gone or refuses connections", async () => {
+		// what a socket whose queue is full of connections the daemon hasn't taken says
+		for (const socket of sockets) socket.destroy();
+		await new Promise(resolve => daemon.close(resolve));
+		busy([{ fn: "sync", cwd: "/somewhere", since: Date.now() }]);
+		const said: string[] = [];
+		const reached = remote({ say: m => said.push(m) });
+		reached.catch(() => {});
+		await until(() => said.includes(BUSY), 10_000);
+		expect(said).toContain(BUSY);
+		// then it's done, and answers
+		answering = true;
+		await new Promise<void>(resolve => daemon.listen(socketPath(home), resolve));
+		busy([]);
+		await reached;
+		hangUp();
+		expect(alive(pid.pid!)).toBe(true);
 	});
 
 	it("is terminated with nothing in flight", async () => {

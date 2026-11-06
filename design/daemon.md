@@ -20,7 +20,7 @@ Whoever can connect to the socket runs commands as the user, so `run/` is kept `
 
 ## Lifecycle
 
-The daemon takes `daemon.lock` before it listens, and only the holder listens. A daemon started while another is serving exits. One started while another is on its way out waits up to a minute for the lock. A holder that has had no socket for 8 seconds, less than a client waits for a daemon to start, is taken over, and only from the holder that was waited on; a daemon whose lock was taken over stops without touching the new one's socket.
+The daemon takes `daemon.lock` before it listens, and only the holder listens. A daemon started while another is serving exits. One started while another is on its way out waits up to a minute for the lock. A holder that has had no socket for 8 seconds, less than a client waits for a daemon to start, is taken over, and only from the holder that was waited on, and never while `daemon.busy` shows it running a command (as below), when its socket may refuse connections only because it can't take them; a daemon whose lock was taken over stops without touching the new one's socket.
 
 It stops when:
 
@@ -39,14 +39,14 @@ A client says hello with its version: the package version plus the mtime of `dis
 | Nothing listens, or `run/` is loose | Starts a daemon. |
 | Answers, same version | Uses it. |
 | Answers, different version, or stopping | Asks it to stop (it drains), waits for it to go (for as long as it is running a command, as below, and 10 seconds more), starts a new one. |
-| Accepts but doesn't answer 3 hellos over about 6 seconds, and `daemon.busy` names the pid in `daemon.pid`, alive, running a command that started under 10 minutes ago | Waits, saying `waiting for the pushwork daemon (busy with <fn> in <cwd>)`, and says hello again. A command's Automerge work can keep the daemon from answering for a long time, and terminating it would kill that command. |
+| Doesn't answer 3 hellos over about 6 seconds, or refuses the connection, and `daemon.busy` names the pid in `daemon.pid`, alive, running a command that started under 10 minutes ago | Waits, saying `waiting for the pushwork daemon (busy with <fn> in <cwd>)`, until the pid has exited or the busy file shows nothing in flight, then says hello again. A command's Automerge work can keep the daemon from answering for a long time, and terminating it would kill that command. While it waits it looks at the pid and the busy file every half second and doesn't connect: a daemon whose loop is blocked takes no connections, and they queue (128 on macOS) until the socket refuses them, as if nothing listened. |
 | Accepts but doesn't answer, and isn't busy as above | Sends the pid in `daemon.pid` `SIGTERM`, then `SIGKILL` after 2 seconds, and starts a new one. On Windows `SIGTERM` is already a kill. |
 
 A command that has waited a second for the daemon, to start or to answer, says `waiting for the pushwork daemon…`. These notes go to stderr, but in an interactive terminal.
 
 The new daemon is started detached, with the log as its output and the filesystem root as its working directory. If none answers within 10 seconds (counted from when a daemon on its way out, which may hold the lock after letting go of the socket, has exited, for up to a minute), the CLI warns, pointing at the log, and runs the command in its own process. One that exits before answering, with nothing else listening (stopped by another process opening the store, say), is started again, up to three times. `version` and `daemon ...` commands neither start a daemon nor stop one.
 
-`daemon stop` and `--no-daemon` find the daemon the same way, then ask it to stop and wait for it to go: for as long as it is running a command (as above), and then a minute more before terminating it. A daemon that has exited is gone, even if a new one has taken the socket by then.
+`daemon stop` and `--no-daemon` find the daemon the same way, then ask it to stop and wait for it to go: for as long as it is running a command (as above, without connecting), and then a minute more before terminating it. A daemon that has exited is gone, even if a new one has taken the socket by then.
 
 ## RPC
 

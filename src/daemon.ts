@@ -8,7 +8,7 @@ import * as path from "path";
 import { daemonPidFile, storeDir } from "./config.js";
 import { Hub, currentHub, markDaemon, setHub } from "./hub.js";
 import { loadSeed, signerFrom } from "./key.js";
-import { lock, lockHolder } from "./lock.js";
+import { alive, lock, lockHolder } from "./lock.js";
 import * as pushwork from "./pushwork.js";
 import { RpcPeer } from "./rpc.js";
 import { FsStorage } from "./storage.js";
@@ -120,6 +120,34 @@ export type Call = { fn: string; cwd: string; since: number };
  * for a long time) from one that's hung, even while it can't answer.
  */
 export type Busy = { pid: number; calls: Call[] };
+
+// a command that has run this long is taken for a hung daemon, not a busy one
+const STUCK_MS = 10 * 60_000;
+
+async function readBusy(home: string): Promise<Busy | undefined> {
+	try {
+		const busy = JSON.parse(await fsp.readFile(busyFile(home), "utf8"));
+		if (typeof busy?.pid === "number" && Array.isArray(busy.calls)) return busy as Busy;
+	} catch {}
+	return undefined;
+}
+
+/**
+ * The command the daemon `pid` is busy with, from daemon.busy, if it's one to wait for: a
+ * command's Automerge work can keep the daemon from answering for a long time, and terminating
+ * it, or taking its lock, would kill that command, the user's, in another terminal. Undefined
+ * if it may be: the busy file isn't `pid`'s, `pid` isn't alive, nothing is in flight, or the
+ * oldest command has run for over `stuckMs`.
+ */
+export function busyWith(busy: Busy | undefined, pid: number, alive: boolean, now: number, stuckMs = STUCK_MS): Call | undefined {
+	if (!busy || pid <= 0 || busy.pid !== pid || !alive || busy.calls.length === 0) return undefined;
+	const oldest = busy.calls.reduce((a, b) => (b.since < a.since ? b : a));
+	return now - oldest.since > stuckMs ? undefined : oldest;
+}
+
+/** What the daemon `pid` is busy with, if it's one to wait for (see busyWith). */
+export const busyCall = async (pid: number, { home = os.homedir(), stuckMs = STUCK_MS } = {}) =>
+	busyWith(await readBusy(home), pid, alive(pid), Date.now(), stuckMs);
 export type Status = { pid: number; version: string; startedAt: number; servers: { server: string; peer: string }[] };
 /** up: it answered; down: nothing listens; silent: something took the connection but didn't answer. */
 export type Probe = { state: "up"; peer: RpcPeer; hello: Hello } | { state: "silent" } | { state: "down" };
@@ -228,6 +256,15 @@ async function claimLock(home: string): Promise<(() => Promise<void>) | undefine
 		if (now !== holder) {
 			holder = now;
 			since = Date.now();
+		}
+		if (Date.now() > end) return undefined;
+		// A holder running a command is busy, not gone, though it may not take connections: one
+		// whose loop the command blocks lets them queue up until the socket refuses them. Not
+		// connected to, then, so as not to add to them.
+		if (await busyCall(holder, { home })) {
+			since = Date.now();
+			await sleep(500);
+			continue;
 		}
 		const other = await probe(socketPath(home));
 		if (other.state === "up") {

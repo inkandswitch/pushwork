@@ -1,6 +1,7 @@
 import * as fs from "fs/promises";
 
-const alive = (pid: number) => {
+/** Whether process `pid` is running. */
+export const alive = (pid: number) => {
 	try {
 		return pid > 0 && process.kill(pid, 0);
 	} catch (e) {

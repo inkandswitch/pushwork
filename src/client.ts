@@ -4,7 +4,7 @@ import * as net from "net";
 import * as os from "os";
 import * as path from "path";
 import {
-	busyFile,
+	busyCall,
 	COMMANDS,
 	daemonVersion,
 	HELLO_MS,
@@ -14,12 +14,12 @@ import {
 	probe,
 	sleep,
 	socketPath,
-	type Busy,
 	type Call,
 	type Command,
 	type Probe,
 	type Status,
 } from "./daemon.js";
+import { alive } from "./lock.js";
 import { log } from "./log.js";
 import type * as pushwork from "./pushwork.js";
 import type { RpcPeer } from "./rpc.js";
@@ -32,8 +32,8 @@ export type Api = Pick<typeof pushwork, Command>;
 const START_MS = 10_000;
 // how long `daemon stop` gives a daemon with no command in flight to go before terminating it
 const STOP_MS = 60_000;
-// a command that has run this long is taken for a hung daemon, not a busy one
-const STUCK_MS = 10 * 60_000;
+// how often a client waiting on a busy daemon looks at it again
+const BUSY_POLL_MS = 500;
 // how long a command waits for the daemon before saying so
 const SLOW_MS = 1000;
 
@@ -49,14 +49,6 @@ function once(say: Say): Say {
 		say(message);
 	};
 }
-
-const alive = (pid: number) => {
-	try {
-		return pid > 0 && process.kill(pid, 0);
-	} catch (e) {
-		return (e as NodeJS.ErrnoException).code === "EPERM";
-	}
-};
 
 async function until(check: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
 	const end = Date.now() + ms;
@@ -82,29 +74,22 @@ async function readPid(): Promise<number> {
 	return Number(await fs.promises.readFile(pidFile(), "utf8").catch(() => "")) || 0;
 }
 
-async function readBusy(): Promise<Busy | undefined> {
-	try {
-		const busy = JSON.parse(await fs.promises.readFile(busyFile(), "utf8"));
-		if (typeof busy?.pid === "number" && Array.isArray(busy.calls)) return busy as Busy;
-	} catch {}
-	return undefined;
-}
+const busyMessage = (call: Call) => `waiting for the pushwork daemon (busy with ${call.fn} in ${call.cwd})`;
 
 /**
- * The command the daemon `pid` is busy with, from daemon.busy, if it's one to wait for: a
- * command's Automerge work can keep the daemon from answering for a long time, and terminating
- * it would kill that command, the user's, in another terminal. Undefined if the daemon may be
- * terminated: the busy file isn't `pid`'s, `pid` isn't alive, nothing is in flight, or the
- * oldest command has run for over `stuckMs`.
+ * Wait while the daemon in daemon.pid is busy with a command (see busyWith), saying so, without
+ * connecting to it: a daemon whose loop a command blocks takes no connections, and the queue
+ * they wait in fills (128 on macOS) until its socket refuses them, as if no daemon were there.
+ * Its pid and its busy file say when it's done.
  */
-export function busyWith(busy: Busy | undefined, pid: number, alive: boolean, now: number, stuckMs = STUCK_MS): Call | undefined {
-	if (!busy || pid <= 0 || busy.pid !== pid || !alive || busy.calls.length === 0) return undefined;
-	const oldest = busy.calls.reduce((a, b) => (b.since < a.since ? b : a));
-	return now - oldest.since > stuckMs ? undefined : oldest;
+async function whileBusy(say: Say, pid?: number): Promise<void> {
+	for (;;) {
+		const call = await busyCall(pid ?? (await readPid()));
+		if (!call) return;
+		say(busyMessage(call));
+		await sleep(BUSY_POLL_MS);
+	}
 }
-
-const busyCall = async (pid: number, stuckMs?: number) => busyWith(await readBusy(), pid, alive(pid), Date.now(), stuckMs);
-const busyMessage = (call: Call) => `waiting for the pushwork daemon (busy with ${call.fn} in ${call.cwd})`;
 
 // Ask a daemon that stopped answering to finish up and go (it drains on SIGTERM as on stop); kill it if it won't.
 async function terminate(pid: number): Promise<void> {
@@ -137,32 +122,32 @@ export async function reachable(sock = socketPath()): Promise<Probe> {
 	}
 }
 
-// reachable(), for as long as the daemon is silent but busy with a command (see busyWith).
-// Silent only for one that may be terminated.
+// reachable(), and if the daemon doesn't answer, or its socket refuses the connection (see
+// whileBusy), while it's busy with a command, again once it's done. Silent or down only for
+// one that isn't busy.
 async function patiently(sock: string, say: Say): Promise<Probe> {
 	for (;;) {
 		const p = await reachable(sock);
-		if (p.state !== "silent") return p;
-		const call = await busyCall(await readPid());
-		if (!call) return p;
-		say(busyMessage(call));
+		if (p.state === "up") return p;
+		if (!(await busyCall(await readPid()))) return p;
+		await whileBusy(say);
 	}
 }
 
 // Wait for the daemon `pid`, asked to stop, to let go of the socket: for as long as it's
-// running a command (see busyWith), and `ms` more once it isn't. False if it's still there.
+// running a command (see whileBusy), and `ms` more once it isn't. False if it's still there.
 // One that has exited is gone, though the socket may be a new daemon's by then.
 async function gone(sock: string, pid: number, ms: number, say: Say): Promise<boolean> {
-	let end = Date.now() + ms;
-	while (alive(pid) && (await listening(sock))) {
-		const call = await busyCall(pid);
-		if (call) {
-			say(busyMessage(call));
-			end = Date.now() + ms;
-		} else if (Date.now() > end) return false;
-		await sleep(200);
+	for (;;) {
+		await whileBusy(say, pid);
+		const end = Date.now() + ms;
+		while (alive(pid) && !(await busyCall(pid))) {
+			if (!(await listening(sock))) return true;
+			if (Date.now() > end) return false;
+			await sleep(200);
+		}
+		if (!alive(pid)) return true;
 	}
-	return true;
 }
 
 function start(): ChildProcess {
@@ -212,6 +197,13 @@ async function reach(say: Say): Promise<RpcPeer> {
 		await sleep(50);
 		if ((await privateDir(path.dirname(sock))) === "private") {
 			const p = await probe(sock);
+			// one that doesn't answer, or refuses, while it's busy is waited for without connecting
+			// (see whileBusy), and isn't timed
+			if (p.state !== "up" && (await busyCall(await readPid()))) {
+				await whileBusy(say);
+				end = Math.max(end, Date.now() + START_MS);
+				continue;
+			}
 			if (p.state === "up") {
 				// any build will do now: one started at the same time by another build's command
 				// would only be replaced again
@@ -325,7 +317,7 @@ export async function daemonStatus(): Promise<DaemonState | undefined> {
 	if (p.state === "silent") {
 		const pid = await readPid();
 		// however long it's been at it
-		const call = await busyCall(pid, Infinity);
+		const call = await busyCall(pid, { stuckMs: Infinity });
 		return call ? { state: "busy", pid, call } : { state: "silent", pid };
 	}
 	try {
