@@ -143,7 +143,13 @@ describe("a daemon that doesn't answer", () => {
 		daemon = net.createServer(socket => {
 			sockets.add(socket);
 			socket.on("error", () => {});
-			if (answering) new RpcPeer(socket, async () => ({ version: daemonVersion(), pid: pid.pid }));
+			if (answering) {
+				new RpcPeer(socket, async method => {
+					// and goes, leaving its socket to another daemon, as a new one started by a command would take it
+					if (method === "stop") pid.kill("SIGKILL");
+					return { version: daemonVersion(), pid: pid.pid };
+				});
+			}
 		});
 		await new Promise<void>(resolve => daemon.listen(sock, resolve));
 		pid = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120_000)"], { stdio: "ignore" });
@@ -203,6 +209,14 @@ describe("a daemon that doesn't answer", () => {
 		for (const socket of sockets) socket.destroy();
 		await new Promise(resolve => daemon.close(resolve));
 		await stopped;
+	});
+
+	it("is done with once it has exited, though the socket is another daemon's by then", { timeout: 90_000 }, async () => {
+		answering = true;
+		const start = Date.now();
+		expect(await stopDaemon()).toBe(true);
+		expect(alive(pid.pid!)).toBe(false);
+		expect(Date.now() - start).toBeLessThan(10_000);
 	});
 
 	it("is terminated with nothing in flight", async () => {

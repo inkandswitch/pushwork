@@ -16,7 +16,7 @@ import {
 } from "./config.js";
 import { headsFile, lockCheckout, readHeads, writeHeads } from "./checkout.js";
 import { Docs, DocumentUnreadable, type SyncReport } from "./docs.js";
-import { currentHub } from "./hub.js";
+import { currentHub, isDaemon } from "./hub.js";
 import type { AccessLevel, Hive, KeyhiveVersion, Settings } from "./keyhive.js";
 import type { Grantee, Member, PublicPair } from "./keyhive/common.js";
 import type { PublicPrincipals } from "./keyhive/keyline/public.js";
@@ -144,6 +144,17 @@ export type Change = {
 	after?: Uint8Array;
 };
 
+// The machine's store, for a node of this process's own. A running daemon's node never rereads
+// it, so it would go on sending stale state beside one writing here: outside the daemon, a
+// running daemon is stopped first, once per process, as --no-daemon does.
+async function machineStore(): Promise<FsStorage> {
+	if (!isDaemon()) {
+		const { leaveDaemon } = await import("./client.js");
+		await leaveDaemon();
+	}
+	return FsStorage.open(storeDir());
+}
+
 async function openDocs(
 	_root: string, // every checkout opens the one store on this machine
 	seed: Uint8Array,
@@ -154,7 +165,7 @@ async function openDocs(
 	// in a long-lived process every plain repo's docs go through its one node; keyhive brings its own
 	const hub = hive ? undefined : currentHub();
 	const docs = await Docs.open({
-		storage: hub ? hub.storage : await FsStorage.open(storeDir()),
+		storage: hub ? hub.storage : await machineStore(),
 		hub,
 		signer: signerFrom(seed),
 		server,
@@ -925,7 +936,7 @@ async function migrateStore(root: string, config: PushworkConfig): Promise<RepoS
 	let madeBackupDir: string | undefined;
 	let moved = false;
 	try {
-		const store = await FsStorage.open(storeDir());
+		const store = await machineStore();
 		if (inPlace) await convertSent(legacy, store, { remove: true });
 		else await importStore(legacy, store);
 		const seed = await loadSeed();

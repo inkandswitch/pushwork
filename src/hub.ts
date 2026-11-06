@@ -71,6 +71,16 @@ export class Hub {
 }
 
 let current: Hub | undefined;
+let daemon = false;
+
+/** Mark this process as the daemon, which opens the machine's store through its hub. */
+export function markDaemon(): void {
+	daemon = true;
+}
+
+export function isDaemon(): boolean {
+	return daemon;
+}
 
 /** The hub commands in this process open their docs through, if any. */
 export function setHub(hub: Hub | undefined): void {

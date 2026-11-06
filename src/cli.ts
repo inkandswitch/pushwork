@@ -4,7 +4,7 @@ import { Argument, Command, Option } from "@commander-js/extra-typings";
 import * as path from "path";
 import * as pushwork from "./pushwork.js";
 import { ACCESS_LEVELS, plural, type RepoSummary, type SyncSummary } from "./pushwork.js";
-import { daemonStatus, hangUp, remote, stopDaemon, type Api } from "./client.js";
+import { daemonStatus, hangUp, leaveDaemon, remote, stopDaemon, type Api } from "./client.js";
 import { logFile, runDaemon, socketPath } from "./daemon.js";
 import type { SyncReport } from "./docs.js";
 import { KEYHIVE_VERSIONS } from "./keyhive/common.js";
@@ -122,8 +122,7 @@ const say = (message: string) => out.notice(message);
 
 async function chooseApi(daemon: boolean): Promise<Api> {
 	if (!daemon) {
-		// one we can't trust the socket of can't be stopped either
-		await stopDaemon({ say }).catch(e => dlog("stopping the daemon: %s", e instanceof Error ? e.message : e));
+		await leaveDaemon(say);
 		return pushwork;
 	}
 	try {

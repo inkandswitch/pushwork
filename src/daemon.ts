@@ -6,7 +6,7 @@ import * as net from "net";
 import * as os from "os";
 import * as path from "path";
 import { storeDir } from "./config.js";
-import { Hub, currentHub, setHub } from "./hub.js";
+import { Hub, currentHub, markDaemon, setHub } from "./hub.js";
 import { loadSeed, signerFrom } from "./key.js";
 import { lock, lockHolder } from "./lock.js";
 import * as pushwork from "./pushwork.js";
@@ -286,6 +286,7 @@ export async function runDaemon(): Promise<void> {
 
 async function serve(home: string, sock: string): Promise<void> {
 	const dir = daemonDir(home);
+	markDaemon();
 	// clients open the log to append, so only the daemon that won the lock starts it afresh
 	await fsp.truncate(logFile(home), 0).catch(() => {});
 

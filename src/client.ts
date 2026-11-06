@@ -151,9 +151,10 @@ async function patiently(sock: string, say: Say): Promise<Probe> {
 
 // Wait for the daemon `pid`, asked to stop, to let go of the socket: for as long as it's
 // running a command (see busyWith), and `ms` more once it isn't. False if it's still there.
+// One that has exited is gone, though the socket may be a new daemon's by then.
 async function gone(sock: string, pid: number, ms: number, say: Say): Promise<boolean> {
 	let end = Date.now() + ms;
-	while (await listening(sock)) {
+	while (alive(pid) && (await listening(sock))) {
 		const call = await busyCall(pid);
 		if (call) {
 			say(busyMessage(call));
@@ -272,6 +273,26 @@ export async function stopDaemon({ say = () => {} }: { say?: Say } = {}): Promis
 	// gone from the socket; wait for it to let go of its files too
 	await until(() => !alive(pid), 5000);
 	return true;
+}
+
+const left = new Map<string, Promise<void>>();
+
+/**
+ * Stop this home's daemon, if it's running, once per process: before this process opens the
+ * machine's store with a node of its own, which the daemon's node would never see. One whose
+ * socket can't be trusted can't be stopped either, and is left be.
+ */
+export function leaveDaemon(say?: Say): Promise<void> {
+	const home = os.homedir();
+	let leaving = left.get(home);
+	if (!leaving) {
+		leaving = stopDaemon({ say }).then(
+			() => {},
+			e => dlog("stopping the daemon: %s", e instanceof Error ? e.message : e),
+		);
+		left.set(home, leaving);
+	}
+	return leaving;
 }
 
 /** The daemon: its status if it answers, else what it's busy with, if anything; undefined if none is running. */

@@ -7,8 +7,9 @@ import * as tmp from "tmp";
 import { promisify } from "util";
 import { RpcPeer } from "../../src/rpc";
 import { socketPath } from "../../src/daemon";
+import { save } from "../../src/pushwork";
 import { exists, pushwork, readText, stopDaemons } from "../cli";
-import { homeEnv } from "../home";
+import { homeEnv, setHome } from "../home";
 import { startServer } from "../server";
 
 const ROOT = path.join(__dirname, "..", "..");
@@ -188,6 +189,26 @@ describe("daemon", () => {
 			expect(await exists(path.join(repo, ".pushwork", file))).toBe(false);
 		}
 		expect(await readText(log)).toContain("the command was cancelled");
+	});
+
+	it("a save through the library beside the daemon is published by the next sync", async () => {
+		await run(["init", "--sync-server", server.url]);
+		const url = (await run(["url"])).stdout.trim();
+		await fs.writeFile(path.join(repo, "notes.txt"), "two\n");
+		await run(["sync"]);
+		await fs.writeFile(path.join(repo, "notes.txt"), "three\n");
+		const restoreHome = setHome(home);
+		try {
+			await save(repo);
+		} finally {
+			restoreHome();
+		}
+		await run(["sync"]);
+		const h2 = path.join(work, "h2");
+		await fs.mkdir(h2);
+		const copy = path.join(work, "copy");
+		await pushwork(["clone", "--sync-server", server.url, url, copy], work, homeEnv(h2));
+		expect(await readText(path.join(copy, "notes.txt"))).toBe("three\n");
 	});
 
 	it("a killed daemon is replaced on the next command", async () => {
