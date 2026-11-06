@@ -899,7 +899,7 @@ export async function migrate(
 }
 
 // Version 6 kept each checkout's documents in its own .pushwork/storage. They're copied into
-// the machine store, the checkout's heads are recorded as they stood there, and the old
+// the machine store, the checkout's heads are recorded as they stood in its own storage, and the old
 // storage goes into the backup folder as storage-v6. Nothing is fetched or pushed. On
 // failure the checkout is left a version 6 repo, as it was, so migrate can be run again.
 async function migrateStore(root: string, config: PushworkConfig): Promise<RepoSummary> {
@@ -920,10 +920,14 @@ async function migrateStore(root: string, config: PushworkConfig): Promise<RepoS
 		const hive = isKeyhive(config.rootUrl) ? await openHive(seed, await recordedKeyhive(config), true) : undefined;
 		let summary: RepoSummary;
 		try {
-			const docs = await openDocs(root, seed, undefined, hive);
+			// The heads are the ones this checkout's own store had: the machine store may hold
+			// newer versions, from another checkout of the url, that this working tree never had.
+			// At home the two are one store, so another checkout's newer versions can't be told apart.
+			const docs = await Docs.open({ storage: await FsStorage.open(legacy), signer: signerFrom(seed), codec: hive?.codec });
 			try {
 				const files = await readSaved(docs, await resolveShape(config.shape), config.rootUrl);
-				await saveHeads(root, docs);
+				// importStore copied every one of them into the machine store
+				await writeHeads(root, docs.checkoutHeads());
 				summary = { url: config.rootUrl, files: files.size, sync: await summarize(docs, config.rootUrl) };
 			} finally {
 				await docs.close();

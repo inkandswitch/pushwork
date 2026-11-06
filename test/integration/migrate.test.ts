@@ -2,6 +2,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tmp from "tmp";
+import { inject } from "vitest";
 import { exists, pushwork, readText } from "../cli";
 import { homeEnv } from "../home";
 
@@ -97,6 +98,27 @@ describe("migrate from version 6", () => {
 		await fs.chmod(configFile(repo), 0o600);
 		await run(["migrate"]);
 		expect(await porcelainStatus()).toBe("");
+	});
+
+	it("a second checkout migrates at its own heads after the first saved", async () => {
+		const server = inject("server");
+		const other = path.join(work, "other");
+		await fs.cp(repo, other, { recursive: true });
+		const runOther = (args: string[]) => pushwork(args, other, homeEnv(h2));
+		await run(["migrate", "--sync-server", server]);
+		await fs.writeFile(path.join(repo, "notes.txt"), "one\ntwo\nthree\n");
+		await run(["save"]);
+
+		// the machine store now has repo's save, which other's working tree never had
+		await runOther(["migrate", "--sync-server", server]);
+		expect((await runOther(["--porcelain", "status"])).stdout).toBe("");
+		await fs.writeFile(path.join(other, "notes.txt"), "ONE\ntwo\n");
+		await runOther(["save"]);
+		expect(await readText(path.join(other, "notes.txt"))).toBe("ONE\ntwo\n");
+
+		await runOther(["sync"]);
+		await run(["sync"]);
+		for (const dir of [repo, other]) expect(await readText(path.join(dir, "notes.txt"))).toBe("ONE\ntwo\nthree\n");
 	});
 
 	it("keeps a pushwork 2 backup's storage alongside the v6 one", async () => {

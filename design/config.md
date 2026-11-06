@@ -50,11 +50,11 @@ A config with any other version throws, pointing at `pushwork migrate`.
 `migrate` on a version 6 repo works offline:
 
 1. imports `.pushwork/storage` into `~/.pushwork/storage`, converting the old flat `sent/` files to one directory per server;
-2. writes `heads.json`;
+2. writes `heads.json`, with each document's heads as the checkout's own storage had them, so newer versions another checkout already put in the machine store aren't taken for this one's;
 3. moves the old storage to `.pushwork/pushwork_migration_backup_safe_to_delete/storage-v6`;
 4. writes config version 7.
 
-If any step fails, it rolls back to a working version 6 repo. A version 6 checkout rooted at the home directory, whose `.pushwork/storage` is the machine store, is converted in place. `migrate --sync-server` on a version 6 repo records that server.
+If any step fails, it rolls back to a working version 6 repo. A version 6 checkout rooted at the home directory, whose `.pushwork/storage` is the machine store, is converted in place. Its heads are the store's live heads, so if another checkout already put newer versions of its documents there, they can't be told apart from its own: `status` shows the difference as local changes, and the next `save` or `sync` would undo them. Check `status` after migrating it. `migrate --sync-server` on a version 6 repo records that server.
 
 ### Earlier versions
 
