@@ -71,9 +71,9 @@ pushwork diff
 | `pushwork clone <url> <dir>` | Clone an `automerge:` URL into a directory. |
 | `pushwork track <url> [dir]` | Follow an `automerge:` URL from an existing directory without touching its files. The next `sync` pushes whatever differs, including files missing here as deletions, so check `status` first. |
 | `pushwork merge <url> [dir]` | Join an existing directory with an `automerge:` URL, keeping files from both sides: files only the URL has are written to disk, then local files are pushed. Where both have a file, the local copy wins. |
-| `pushwork migrate` | Upgrade a pushwork 2 repo in place (see below). |
+| `pushwork migrate` | Upgrade a pushwork 2 repo, or one from an earlier pushwork 3, in place (see below). |
 | `pushwork sync` | Sync local changes with peers and merge remote changes to disk. |
-| `pushwork save` (alias `commit`) | Commit local changes to local storage without contacting the server. |
+| `pushwork save` (alias `commit`) | Commit local changes to the machine's store without contacting the server. |
 | `pushwork status` | Show changes against the saved state. |
 | `pushwork diff [path]` | Show textual diffs of local changes; optionally limit to `path`. |
 | `pushwork url` | Print the `automerge:` URL of this repo. |
@@ -168,19 +168,21 @@ Keyhive membership then syncs through the keyhive server and documents through t
 
 ## Configuration
 
-pushwork stores all of its metadata under `.pushwork/` at the repo root:
+pushwork keeps documents in one store per machine, and each checkout's own state under `.pushwork/` at the repo root:
 
 | Path | Contents |
 | --- | --- |
+| `~/.pushwork/storage/` | Every repo's documents, shared by every checkout on the machine, in the same layout as Subduction's Rust filesystem storage. |
 | `.pushwork/config.json` | Repo configuration (see below). |
-| `.pushwork/storage/` | Document storage, in the same layout as Subduction's Rust filesystem storage. |
+| `.pushwork/heads.json` | The heads of each document this checkout last saw. Commands read and write at them, so another checkout's `sync` doesn't show up in this one's `status` until this one syncs. Without it, everything is read as the store has it. |
+| `.pushwork/checkout.lock` | The pid of the command using this checkout, while it runs. A second command fails and names it; a lock left by a dead process is taken over. `status`, `diff` and `heads` don't take it. |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is at version `6`:
+`config.json` is at version `7`:
 
 ```json
 {
-	"version": 6,
+	"version": 7,
 	"rootUrl": "automerge:2sX...e9",
 	"shape": "vfs",
 	"artifactDirectories": ["dist"],
@@ -291,15 +293,15 @@ sequenceDiagram
     PW->>FS: materialize merged tree back to disk
 ```
 
-`save` (alias `commit`) runs the same pipeline _offline_ — it commits to local storage and never contacts a server.
+`save` (alias `commit`) runs the same pipeline _offline_ — it commits to the machine's store and never contacts a server.
 
 Every file on disk is labelled with its file doc's URL in the `user.automerge.url` extended attribute (`xattr -p user.automerge.url <file>` on macOS, `getfattr -n user.automerge.url <file>` on Linux). Moving a file with `mv` keeps the attribute, so pushwork sees a rename rather than a deletion and a new file: `status` and `diff` show it as renamed, and the file keeps its doc and URL. Tools that drop extended attributes (`git checkout`, `tar`, `zip`, editors that save by replacing the file) make a rename look like a deletion and an addition, as it always did. On Windows there are no labels.
 
 Each document is stored as a sedimentree: loose commits plus fragments that bundle runs of history. At the end of every command pushwork compacts the documents it changed, so old loose commits on disk are replaced by the fragments that cover them.
 
-## Upgrading from pushwork 2
+## Upgrading
 
-pushwork 3 uses a new storage format. In an old repo, run:
+pushwork 3 uses a new storage format. In a pushwork 2 repo, run:
 
 ```sh
 pushwork migrate
@@ -307,7 +309,9 @@ pushwork migrate
 
 This keeps the root URL, shape and artifact directories, moves the old `.pushwork` contents to `.pushwork/pushwork_migration_backup_safe_to_delete/`, and fetches the repo from the server as `track` does. Nothing is pushed: the next `sync` publishes whatever differs from the server, so check `pushwork status` first. Local edits that pushwork 2 saved but never synced only survive if the files are still on disk; to be sure, run `npx pushwork@2 sync` before migrating.
 
-Repos on the retired sync3 server can't be migrated; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo.
+Repos on the retired sync3 server can't be migrated; `rm -rf .pushwork && pushwork init` republishes the directory as a new repo. A pushwork 2 repo rooted at your home directory can't be migrated in place, because its `.pushwork` is also where pushwork keeps your key and the machine's store; move it out of your home directory and migrate it there.
+
+Earlier pushwork 3 repos (config version 6) kept their documents in `.pushwork/storage`. `pushwork migrate` moves them into `~/.pushwork/storage` offline, records the checkout's heads, and keeps the old storage in `.pushwork/pushwork_migration_backup_safe_to_delete/storage-v6`. If it fails partway, the repo is left as it was, and migrate can be run again.
 
 ## Programmatic API
 
