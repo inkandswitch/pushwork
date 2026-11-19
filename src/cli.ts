@@ -39,6 +39,7 @@ import {
 	type SyncSnapshot,
 } from "./repo.js";
 import { formatVersions } from "./version.js";
+import { importGit } from "./import-git.js";
 import { migrate, versionLabel } from "./migrations.js";
 
 const dlog = log("cli");
@@ -320,6 +321,80 @@ program
 		out.block("INITIALIZED", info.url);
 		reportSync(info.sync);
 		out.outro("Done");
+		flushWarnings();
+	});
+
+program
+	.command("import-git")
+	.description(
+		"Import a git repository as a Patchwork workspace: main from a branch's history, a draft for every other branch",
+	)
+	.argument("[dir]", "The git repository", ".")
+	.option("--main <branch>", "The branch to make main (default: the checked-out branch)")
+	.option(
+		"--branch <name>",
+		"A branch to make a draft of (default: every other local branch). Repeatable.",
+		collect,
+		undefined as string[] | undefined,
+	)
+	.option("--depth <n>", "Replay at most this many of main's commits", "200")
+	.option("--history", "Replay all of those commits, not only from the oldest a draft starts at")
+	.option("--github <owner/repo>", "The GitHub repository strand syncs with (default: origin's)")
+	.option("--no-github", "Don't connect the workspace to a GitHub repository")
+	.option(
+		"--artifact-dir <dir>",
+		"Directory whose text is stored atomically (default: dist). Repeatable.",
+		collect,
+		undefined as string[] | undefined,
+	)
+	.option("--offline", "Don't publish to the sync server (keeps the storage, see --storage)")
+	.option("--storage <dir>", "Keep the automerge storage here instead of a temporary directory")
+	.option("--no-sub", "Use the legacy WebSocket sync backend instead of Subduction")
+	.option("--legacy", "Alias for --no-sub")
+	.action(async (dir, opts) => {
+		dlog("import-git dir=%s opts=%o", dir, opts);
+		const backend = backendOf(opts);
+		const depth = Number(opts.depth);
+		if (!Number.isInteger(depth) || depth < 1) throw new Error("--depth takes a whole number above 0");
+		let github: { owner: string; repo: string } | null | undefined;
+		if (opts.github === false) github = null;
+		else if (typeof opts.github === "string") {
+			const [owner, repo, ...rest] = opts.github.split("/");
+			if (!owner || !repo || rest.length) throw new Error("--github takes owner/repo");
+			github = { owner, repo };
+		}
+		out.intro("pushwork import-git");
+		const info = await importGit(
+			{
+				gitDir: path.resolve(dir),
+				backend,
+				main: opts.main,
+				branches: opts.branch,
+				depth,
+				history: Boolean(opts.history),
+				github,
+				artifactDirectories: opts.artifactDir,
+				online: !opts.offline,
+				storageDir: opts.storage ? path.resolve(opts.storage) : undefined,
+			},
+			report,
+			warn,
+		);
+		out.done();
+		out.obj({
+			Main: `${info.main.branch}: ${info.main.files} files, ${info.main.commits} ${info.main.commits === 1 ? "commit" : "commits"} replayed`,
+			Drafts: info.drafts.length
+				? info.drafts.map((d) => `${d.branch} (${d.changed} changed)`).join(", ")
+				: "none",
+			GitHub: info.github ? `${info.github.owner}/${info.github.repo}` : "not connected",
+			...(info.storageKept ? { Storage: info.storageDir } : {}),
+		});
+		for (const skip of info.skipped) out.warn(`Skipped ${skip.branch}: ${skip.reason}`);
+		if (info.sync && !info.sync.every((s) => s.synced)) {
+			out.warn("Not everything was confirmed by the sync server; the storage was kept.");
+		}
+		out.block("IMPORTED", info.url);
+		out.outro("Open the URL in strand");
 		flushWarnings();
 	});
 

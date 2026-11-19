@@ -82,6 +82,7 @@ pushwork diff
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
+| `pushwork import-git [dir]` | Import a git repository as a Patchwork workspace with drafts (see [Importing a git repository](#importing-a-git-repository)). |
 
 ### Global options
 
@@ -111,6 +112,20 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 | Flag | Description |
 | --- | --- |
 | `--nuclear` | Re-create every file/folder doc with a fresh URL before syncing, dropping references to the old URLs from this repo. |
+
+## Importing a git repository
+
+```sh
+pushwork import-git ~/code/my-repo     # prints the workspace's automerge: URL
+```
+
+`import-git` reads a git repository (git itself is left untouched) and makes a Patchwork workspace the way strand's drafts lay one out:
+
+- **Main** is the checked-out branch (or `--main <branch>`), built by replaying its first-parent history one commit at a time, from the oldest commit a draft needs (just the tip when there are none; `--history` replays the last `--depth` commits, default 200).
+- **Every other local branch** (or each `--branch <name>`) becomes a draft named after it (see `pushwork switch`), forked off main as of the commit it branched from, with the branch's files written through the draft so only the docs it changes are cloned into it. Branches already merged into main are skipped, as are ones that started further back than `--depth`.
+- **Each replayed commit and each branch tip is recorded as a sync point**, so strand's git sync starts out connected to the GitHub repository `origin` points at (`--github owner/repo` to name another, `--no-github` for none) with every draft linked to its branch. Push the branches first: strand compares them with GitHub's.
+
+Files are stored as `init` stores them, so `.pushworkattributes` datatype and artifact rules apply. Only regular and executable files are imported; symlinks and submodules stay in git. The automerge storage goes in a temporary directory that's removed once the sync server has everything; `--storage <dir>` keeps it, and `--offline` imports without publishing.
 
 ## Sync backends
 

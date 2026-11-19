@@ -110,7 +110,7 @@ type IsArtifact = (posixPath: string) => boolean;
 type DatatypeOf = (posixPath: string) => Datatype | undefined;
 
 /** A leaf as recorded at its pinned link: the merge base for the next sync. */
-type StoredLeaf = LeafContent & { url: AutomergeUrl };
+export type StoredLeaf = LeafContent & { url: AutomergeUrl };
 
 /**
  * Build the artifact classifier from the working tree's attributes. Its
@@ -140,7 +140,7 @@ function artifactClassifier(
 	return (p) => isInArtifactDir(p, configDirs);
 }
 
-const datatypeClassifier = (attrs: AttributesTree): DatatypeOf => (p) =>
+export const datatypeClassifier = (attrs: AttributesTree): DatatypeOf => (p) =>
 	attrs.datatypeOf(p);
 
 const diskDatatypes = (fsFiles: FileTree): DatatypeOf =>
@@ -1516,7 +1516,7 @@ function computeDiff(
  * `@patchwork` field is rebuilt from its `datatype` rule and, where the disk
  * copy lacks it, from the document.
  */
-async function pushFiles(
+export async function pushFiles(
 	repo: Repo,
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, StoredLeaf> | undefined,
@@ -1674,7 +1674,7 @@ function applyJsonEdit(
 /** Read every leaf of `tree` at its merge base ({@link baseOf}), as it
  * should appear on disk: JSON documents whose datatype strips metadata come
  * without their `@patchwork` field. */
-async function readLeaves(
+export async function readLeaves(
 	repo: Repo,
 	tree: VfsNode,
 	datatypeOf: DatatypeOf,
