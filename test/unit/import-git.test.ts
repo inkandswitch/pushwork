@@ -265,6 +265,13 @@ describe("import-git", () => {
 			expect(onDraft["@patchwork"].type).toBe("notebook");
 			expect(onDraft.cells).toEqual(["one", "two"]);
 			expect(Object.values(draft.git!.syncPoints)[0].sha).toBe(tip);
+			// the notebook's document is in the sync points, as strand's git sync reads it
+			const main = (await repo.find<DraftDoc>(info.mainDraft)).doc();
+			const mainPoint = Object.values(main.git!.syncPoints)[0];
+			const root = (await repo.find<FolderDoc>(info.url)).doc();
+			const nb = stripHeads(root.docs.find((l) => l.name === "a.nb")!.url);
+			expect(mainPoint.heads[nb]).toBeDefined();
+			expect(Object.values(draft.git!.syncPoints)[0].heads[nb]).toBeDefined();
 			// main's copy is untouched
 			expect((await docAt(info.url, "a.nb")).cells).toEqual(["one"]);
 		});

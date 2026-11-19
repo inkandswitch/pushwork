@@ -2,6 +2,7 @@ import * as os from "os";
 import * as fs from "fs/promises";
 import * as path from "path";
 import {
+	isImmutableString,
 	isValidAutomergeUrl,
 	type AutomergeUrl,
 	type DocHandle,
@@ -22,7 +23,12 @@ import {
 	type SyncSnapshot,
 } from "./repo.js";
 import type { Backend } from "./config.js";
-import { isInArtifactDir, patchworkFolderShape, stripHeads } from "./shapes/index.js";
+import {
+	isFileEntryDoc,
+	isInArtifactDir,
+	patchworkFolderShape,
+	stripHeads,
+} from "./shapes/index.js";
 
 const dlog = log("import-git");
 
@@ -39,9 +45,9 @@ const dlog = log("import-git");
 // from .pushworkattributes make JSON documents, artifacts are atomic.
 //
 // Each of those versions is recorded as a sync point (a commit and the
-// heads of every folder and file doc at it; datatype documents aren't
-// files to strand's git sync, so they're left out), which is what strand's git
-// sync starts from: the workspace arrives already connected, and each draft
+// heads of every folder and leaf doc at it, JSON documents included, read the
+// way strand's git sync reads them), which is what strand's git sync starts
+// from: the workspace arrives already connected, and each draft
 // already linked with its branch. Git itself is untouched.
 
 // --- strand's draft docs (drafts' draft-types.ts) ---------------------------
@@ -428,7 +434,11 @@ async function readView(
 				continue;
 			}
 			const file = await read(child);
-			if (!isFile(file.doc) || view.files.has(childPath) || seen.has(child)) continue;
+			if (Array.isArray((file.doc as Partial<FolderDoc> | undefined)?.docs)) {
+				await walk(child, childPath);
+				continue;
+			}
+			if (!isLeaf(file.doc) || view.files.has(childPath) || seen.has(child)) continue;
 			seen.add(child);
 			view.heads[child] = file.heads;
 			view.files.set(childPath, child);
@@ -438,8 +448,13 @@ async function readView(
 	return view;
 }
 
-function isFile(doc: unknown): boolean {
-	return !!doc && typeof doc === "object" && "content" in (doc as object);
+// A leaf as strand's git sync reads one (its `readFiles`): a file doc whose
+// content it can read, or any other doc, which is a JSON document.
+function isLeaf(doc: unknown): boolean {
+	if (!doc || typeof doc !== "object") return false;
+	if (!isFileEntryDoc(doc)) return true;
+	const content = (doc as { content?: unknown }).content;
+	return typeof content === "string" || isImmutableString(content) || content instanceof Uint8Array;
 }
 
 // --- Drafts ------------------------------------------------------------------
