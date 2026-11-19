@@ -5,19 +5,29 @@ import * as path from "path";
 import type { AutomergeUrl } from "@automerge/automerge-repo";
 import {
 	clone,
+	createDraft,
+	currentDraft,
 	cutWorkdir,
+	deleteDraft,
 	diff,
+	draftUrl,
+	drafts,
 	heads,
 	init,
+	merge,
 	pasteSnarf,
+	renameDraft,
 	save,
 	showSnarfs,
 	status,
+	switchDraft,
 	sync,
 	url,
 	yeet,
 	yoink,
+	type DraftRef,
 } from "./pushwork.js";
+import type { DraftSummary } from "./drafts/actions.js";
 import { log } from "./log.js";
 import { out } from "./output.js";
 import {
@@ -193,6 +203,53 @@ async function pickStrategyInteractively(info: {
 	}
 }
 
+const draftLabel = (draft: DraftRef) => (draft.url ? `draft ${draft.name}` : draft.name);
+
+async function switchAction(ref: string | undefined, create: string | undefined): Promise<void> {
+	const cwd = process.cwd();
+	if (create !== undefined) {
+		const { draft } = await createDraft(cwd, { name: create, start: ref, switchTo: true });
+		out.log(`Switched to a new ${draftLabel(draft)}`);
+		return;
+	}
+	if (!ref) throw new Error("name a draft to switch to, or main");
+	const { draft, alreadyOn } = await switchDraft(cwd, ref);
+	out.log(`${alreadyOn ? "Already on" : "Switched to"} ${draftLabel(draft)}`);
+}
+
+/** `git branch`-style: one line per draft, `*` on the checked-out one. */
+function printDrafts(
+	listing: { root: string; current: string | null; drafts: DraftSummary[] },
+	tree: boolean,
+): void {
+	const mark = (url: string | null) => (url === listing.current ? "*" : " ");
+	if (out.isPorcelain) {
+		out.log(`${mark(null)}\tmain\t${listing.root}\t`);
+		for (const d of listing.drafts) out.log(`${mark(d.url)}\t${d.name}\t${d.url}\t${d.parent ?? ""}`);
+		return;
+	}
+	const prefixes = tree ? treePrefixes(listing.drafts) : listing.drafts.map(() => "");
+	const lines = [`${mark(null)} main`];
+	listing.drafts.forEach((d, i) => lines.push(`${mark(d.url)} ${prefixes[i]}${d.name}`));
+	out.log(lines.join("\n"));
+}
+
+// The connector drawn before each draft so the list reads as the fork tree,
+// under main.
+function treePrefixes(list: DraftSummary[]): string[] {
+	const byUrl = new Map(list.map((d) => [d.url, d]));
+	const isLast = new Map(
+		list.map((d, i) => [d.url, !list.slice(i + 1).some((e) => e.parent === d.parent)]),
+	);
+	return list.map((d) => {
+		let lead = "";
+		for (let p = d.parent; p; p = byUrl.get(p)?.parent ?? null) {
+			lead = (isLast.get(p) ? "   " : "│  ") + lead;
+		}
+		return lead + (isLast.get(d.url) ? "└─ " : "├─ ");
+	});
+}
+
 const program = new Command()
 	.name("pushwork")
 	.description("Bidirectional directory synchronization using Automerge CRDTs")
@@ -285,6 +342,7 @@ program
 		undefined as string[] | undefined,
 	)
 	.option("--json-docs", JSON_DOCS_HELP)
+	.option("-b, --draft <draft>", "Check out this draft (name, url, or main) instead of main")
 	.action(async (u, dir, opts) => {
 		dlog("clone url=%s dir=%s opts=%o", u, dir, opts);
 		const backend = backendOf(opts);
@@ -299,6 +357,7 @@ program
 				shape: opts.shape,
 				artifactDirectories: opts.artifactDir,
 				jsonDocuments: opts.jsonDocs,
+				draft: opts.draft,
 				onBranchesDoc: pickBranchInteractively,
 				onStrategyDoc: pickStrategyInteractively,
 			},
@@ -337,9 +396,14 @@ program
 program
 	.command("url")
 	.description("Print the automerge URL of this pushwork repo")
-	.action(async () => {
-		dlog("url cwd=%s", process.cwd());
-		out.log(await url(process.cwd()));
+	.option("--draft [draft]", "Print a draft's URL instead (default: the checked-out draft)")
+	.action(async (opts) => {
+		dlog("url cwd=%s opts=%o", process.cwd(), opts);
+		if (opts.draft === undefined) {
+			out.log(await url(process.cwd()));
+			return;
+		}
+		out.log(await draftUrl(process.cwd(), opts.draft === true ? undefined : opts.draft));
 	});
 
 program
@@ -402,7 +466,7 @@ program
 	.command("status")
 	.description("Show changes against the saved state")
 	.action(async () => {
-		const { diff: d } = await status(process.cwd());
+		const { diff: d, draft } = await status(process.cwd());
 		const total = d.added.length + d.modified.length + d.deleted.length;
 		if (out.isPorcelain) {
 			for (const p of d.modified) out.log(`modified\t${p}`);
@@ -410,11 +474,12 @@ program
 			for (const p of d.deleted) out.log(`deleted\t${p}`);
 			return;
 		}
+		const on = `On ${draftLabel(draft)}`;
 		if (total === 0) {
-			out.log("nothing to save, working tree clean");
+			out.log(`${on}\nnothing to save, working tree clean`);
 			return;
 		}
-		const lines = ["Changes:"];
+		const lines = [on, "Changes:"];
 		for (const p of d.modified) lines.push(`  modified:   ${p}`);
 		for (const p of d.added) lines.push(`  added:      ${p}`);
 		for (const p of d.deleted) lines.push(`  deleted:    ${p}`);
@@ -504,6 +569,74 @@ program
 				return `#${s.id}${name}  ${plural(s.entries.length, "entry", "entries")}  ${ts}`;
 			}),
 		);
+	});
+
+program
+	.command("draft")
+	.description(
+		"List drafts, or create, rename (-m) or delete (-d/-D) one. Like `git branch`, for drafts.",
+	)
+	.argument("[name]", "Draft to create (or, with -m/-d, the draft to act on)")
+	.argument("[start]", "Draft to fork it off (default: the checked-out draft); with -m, the new name")
+	.option("-m, --move", "Rename: `draft -m <new>` renames the checked-out draft, `draft -m <old> <new>` another")
+	.option("-d, --delete", "Delete a draft that has no unmerged changes")
+	.option("-D", "Delete a draft even if it has unmerged changes")
+	.option("--show-current", "Print the checked-out draft's name")
+	.option("--tree", "List drafts as the tree they were forked in")
+	.action(async (name, start, opts) => {
+		const cwd = process.cwd();
+		if (opts.showCurrent) {
+			out.log((await currentDraft(cwd)).name);
+			return;
+		}
+		if (opts.move) {
+			if (!name) throw new Error("usage: pushwork draft -m [<old>] <new>");
+			const result =
+				start === undefined ? await renameDraft(cwd, name) : await renameDraft(cwd, start, name);
+			out.success(`renamed draft ${result.from} to ${result.to}`);
+			return;
+		}
+		if (opts.delete || opts.D) {
+			if (!name) throw new Error("usage: pushwork draft -d <draft>");
+			const deleted = await deleteDraft(cwd, name, { force: Boolean(opts.D) });
+			out.success(`deleted draft ${deleted.name}`);
+			return;
+		}
+		if (name) {
+			const { draft } = await createDraft(cwd, { name, start });
+			out.success(`created draft ${draft.name}`);
+			return;
+		}
+		printDrafts(await drafts(cwd), Boolean(opts.tree));
+	});
+
+program
+	.command("switch")
+	.description("Switch to a draft (or main) and update the working tree to match")
+	.argument("[draft]", "Draft to switch to: a name, url, or main (with -c, the draft to fork off)")
+	.option("-c, --create <name>", "Create a draft and switch to it")
+	.action(async (ref, opts) => {
+		await switchAction(ref, opts.create);
+	});
+
+program
+	.command("checkout")
+	.description("Alias for switch; -b creates a draft and switches to it")
+	.argument("[draft]", "Draft to switch to: a name, url, or main (with -b, the draft to fork off)")
+	.option("-b <name>", "Create a draft and switch to it")
+	.action(async (ref, opts) => {
+		await switchAction(ref, opts.b);
+	});
+
+program
+	.command("merge")
+	.description("Merge the checked-out draft into the draft it was forked off, and switch to that")
+	.action(async () => {
+		const result = await merge(process.cwd());
+		out.success(
+			`merged draft ${result.from} into ${result.into.name} (${plural(result.merged, "doc")})`,
+		);
+		out.log(`Switched to ${draftLabel(result.into)}`);
 	});
 
 program

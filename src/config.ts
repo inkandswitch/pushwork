@@ -5,7 +5,7 @@ import { stripHeads } from "./shapes/file.js";
 
 export type Backend = "legacy" | "subduction";
 
-export const CONFIG_VERSION = 6;
+export const CONFIG_VERSION = 7;
 
 export interface PushworkConfig {
 	version: typeof CONFIG_VERSION;
@@ -16,6 +16,8 @@ export interface PushworkConfig {
 	/** Store new `.json` files whose `@patchwork.type` isn't "file" as JSON
 	 * documents rather than text. */
 	jsonDocuments: boolean;
+	/** The checked-out draft's `DraftDoc` url; null for main, the root itself. */
+	draft: AutomergeUrl | null;
 }
 
 const DIR = ".pushwork";
@@ -48,6 +50,7 @@ export async function readConfig(root: string): Promise<PushworkConfig> {
 		shape: parsed.shape,
 		artifactDirectories: parsed.artifactDirectories ?? [],
 		jsonDocuments: parsed.jsonDocuments === true,
+		draft: parsed.draft ?? null,
 	};
 }
 

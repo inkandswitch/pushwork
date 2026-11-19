@@ -40,17 +40,21 @@ export const vfsShape: Shape = {
 				"@patchwork": { type: "directory", ...(title ? { title } : {}) },
 			});
 
-		handle.change((d: DirectoryDoc) => {
-			if (!d["@patchwork"]) d["@patchwork"] = { type: "directory" };
-			if (title && d["@patchwork"].title !== title) d["@patchwork"].title = title;
-			for (const k of Object.keys(d)) {
-				if (RESERVED.has(k)) continue;
-				if (!flat.has(k)) delete d[k];
-			}
-			for (const [k, url] of flat) {
-				d[k] = url;
-			}
-		});
+		// Skip the write when nothing changed, so the root only changes when its
+		// entries do (and a draft doesn't clone it for nothing).
+		if (!previousRoot || !sameEntries(handle.doc(), flat, title)) {
+			handle.change((d: DirectoryDoc) => {
+				if (!d["@patchwork"]) d["@patchwork"] = { type: "directory" };
+				if (title && d["@patchwork"].title !== title) d["@patchwork"].title = title;
+				for (const k of Object.keys(d)) {
+					if (RESERVED.has(k)) continue;
+					if (!flat.has(k)) delete d[k];
+				}
+				for (const [k, url] of flat) {
+					if (d[k] !== url) d[k] = url;
+				}
+			});
+		}
 
 		dlog("encode complete url=%s", handle.url);
 		return handle.url;
@@ -76,6 +80,22 @@ export const vfsShape: Shape = {
 		return tree;
 	},
 };
+
+function sameEntries(
+	doc: DirectoryDoc | undefined,
+	flat: Map<string, AutomergeUrl>,
+	title: string | undefined,
+): boolean {
+	if (!doc?.[META]) return false;
+	if (title && doc[META].title !== title) return false;
+	let count = 0;
+	for (const [k, v] of Object.entries(doc)) {
+		if (RESERVED.has(k)) continue;
+		count++;
+		if (flat.get(k) !== v) return false;
+	}
+	return count === flat.size;
+}
 
 function setLeaf(root: VfsNode, segments: string[], url: AutomergeUrl): void {
 	if (root.kind !== "dir") throw new Error("setLeaf: root must be a dir");

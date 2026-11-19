@@ -19,7 +19,8 @@
  *     4  drops `branches`.
  *     5  moves CRDT storage from the nodefs chunk tree (`.pushwork/storage/`)
  *        into a single LMDB database (`.pushwork/storage.lmdb`).
- *     6  adds `jsonDocuments: boolean` (current).
+ *     6  adds `jsonDocuments: boolean`.
+ *     7  adds `draft`, the checked-out draft (null for main) (current).
  *
  * Each migration is a small, pure-ish step stored in {@link migrations}. The
  * "-"→1 step is the only one that touches the filesystem (it relocates the
@@ -236,6 +237,11 @@ async function migrate5To6(_root: string, raw: RawConfig): Promise<RawConfig> {
 	return { ...raw, version: 6, jsonDocuments: false };
 }
 
+/** 6 → 7: introduce `draft`; existing checkouts are on main. */
+async function migrate6To7(_root: string, raw: RawConfig): Promise<RawConfig> {
+	return { ...raw, version: 7, draft: null };
+}
+
 /**
  * Read every chunk in a nodefs storage tree as `[key, bytes]` entries,
  * reversing the adapter's sharded layout: a key `[first, ...rest]` is stored
@@ -331,6 +337,7 @@ export const migrations: Migration[] = [
 	{ from: 3, to: 4, run: migrate3To4 },
 	{ from: 4, to: 5, run: migrate4To5 },
 	{ from: 5, to: 6, run: migrate5To6 },
+	{ from: 6, to: 7, run: migrate6To7 },
 ];
 
 export interface MigrateResult {

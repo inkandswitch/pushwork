@@ -1,7 +1,7 @@
 /**
  * White-box tests: import src/ directly and verify the on-disk Automerge doc
- * structure (folder doc, file-doc indirection, universal link pinning). All
- * tests run fully offline.
+ * structure (folder doc, file-doc indirection, bare links with pinned
+ * artifacts, local merge bases). All tests run fully offline.
  */
 
 import * as fs from "fs/promises";
@@ -36,9 +36,11 @@ import {
 	showSnarfs,
 	nuclearizeRepo,
 	stripHeads,
+	pinUrl,
 	type UnixFileEntry,
 } from "../../src/index.js";
 import { readConfig } from "../../src/config.js";
+import { readBases } from "../../src/bases.js";
 
 async function openOfflineRepo(storage: string): Promise<Repo> {
 	await initSubduction();
@@ -141,7 +143,7 @@ describe("doc shape", () => {
 		});
 	});
 
-	it("artifact files store ImmutableString content; every leaf is pinned", async () => {
+	it("artifact files store ImmutableString content and are pinned; other links are bare", async () => {
 		await fs.mkdir(path.join(workRoot, "dist"));
 		await fs.writeFile(path.join(workRoot, "dist", "main.js"), "console.log(1)\n");
 		await fs.writeFile(path.join(workRoot, "src.ts"), "export {}\n");
@@ -158,9 +160,10 @@ describe("doc shape", () => {
 
 			const artifactUrl = folderDoc["dist/main.js"] as string;
 			const sourceUrl = folderDoc["src.ts"] as string;
-			// Every link is pinned at heads, artifact or not.
+			// Artifacts are published as exact snapshots; everything else is
+			// linked live so Patchwork opens it editable.
 			expect(parseAutomergeUrl(artifactUrl).heads).toBeTruthy();
-			expect(parseAutomergeUrl(sourceUrl).heads).toBeTruthy();
+			expect(parseAutomergeUrl(sourceUrl).heads).toBeFalsy();
 
 			// `artifact` decides the content encoding only.
 			const artifactDoc = readDoc(await repo.find(artifactUrl)) as UnixFileEntry;
@@ -175,7 +178,7 @@ describe("doc shape", () => {
 	it(".pushworkattributes overrides the default artifact dirs", async () => {
 		// Default behavior treats `dist/` content as artifact. Here we override
 		// via the repo-carried attributes file: `out/` is artifact instead, and
-		// `dist/` explicitly not. Pinning is universal and unaffected.
+		// `dist/` explicitly not, so only `out/` is pinned.
 		await fs.mkdir(path.join(workRoot, "dist"));
 		await fs.mkdir(path.join(workRoot, "out"));
 		await fs.writeFile(path.join(workRoot, "dist", "main.js"), "console.log(1)\n");
@@ -202,9 +205,8 @@ describe("doc shape", () => {
 			const folderDoc = readDoc(folder) as Record<string, unknown>;
 			const outUrl = folderDoc["out/bundle.js"] as `automerge:${string}`;
 			const distUrl = folderDoc["dist/main.js"] as `automerge:${string}`;
-			// Both leaves are pinned regardless of artifact-ness.
 			expect(parseAutomergeUrl(outUrl).heads).toBeTruthy();
-			expect(parseAutomergeUrl(distUrl).heads).toBeTruthy();
+			expect(parseAutomergeUrl(distUrl).heads).toBeFalsy();
 			// out/ carries ImmutableString content; dist/ stays merge-able text.
 			const outDoc = readDoc(await repo.find(outUrl)) as UnixFileEntry;
 			const distDoc = readDoc(await repo.find(distUrl)) as UnixFileEntry;
@@ -214,7 +216,7 @@ describe("doc shape", () => {
 		});
 	});
 
-	it("patchwork-folder pins every folder and file link; the root stays bare", async () => {
+	it("patchwork-folder links folders bare and pins only artifact files", async () => {
 		await fs.mkdir(path.join(workRoot, "dist"));
 		await fs.mkdir(path.join(workRoot, "src"));
 		await fs.writeFile(path.join(workRoot, "dist", "main.js"), "console.log(1)\n");
@@ -241,27 +243,25 @@ describe("doc shape", () => {
 			const root = await repo.find(cfg.rootUrl);
 			const rootDoc = readDoc(root) as FolderDoc;
 
-			// Every folder link carries heads — artifact dir or not. Only the
-			// root doc URL itself is never pinned.
+			// Folder links are bare — artifact dir or not — like the root.
 			const distLink = linkByName(rootDoc.docs, "dist");
 			const srcLink = linkByName(rootDoc.docs, "src");
 			expect(distLink.type).toBe("folder");
-			expect(parseAutomergeUrl(distLink.url).heads).toBeTruthy();
-			expect(parseAutomergeUrl(srcLink.url).heads).toBeTruthy();
+			expect(parseAutomergeUrl(distLink.url).heads).toBeFalsy();
+			expect(parseAutomergeUrl(srcLink.url).heads).toBeFalsy();
 			expect(parseAutomergeUrl(cfg.rootUrl).heads).toBeFalsy();
 
-			// Inside each subfolder, the file leaves are pinned too.
+			// Inside each subfolder, only the artifact file is pinned.
 			const distFolder = await repo.find(distLink.url);
 			const mainLink = linkByName(readDoc(distFolder).docs as Link[], "main.js");
 			expect(parseAutomergeUrl(mainLink.url).heads).toBeTruthy();
 
 			const srcFolder = await repo.find(srcLink.url);
 			const appLink = linkByName(readDoc(srcFolder).docs as Link[], "app.ts");
-			expect(parseAutomergeUrl(appLink.url).heads).toBeTruthy();
+			expect(parseAutomergeUrl(appLink.url).heads).toBeFalsy();
 		});
 
-		// Re-encoding (e.g. a later save) keeps the subfolder doc URL stable:
-		// we strip the pin to edit the live doc rather than recreating it.
+		// Re-encoding (e.g. a later save) keeps the subfolder doc URL stable.
 		const distUrlBefore = await withRepo(storageOf(workRoot), async (repo) => {
 			const root = await repo.find(cfg.rootUrl);
 			return parseAutomergeUrl(
@@ -274,14 +274,13 @@ describe("doc shape", () => {
 			const root = await repo.find(cfg.rootUrl);
 			const distLink = linkByName((readDoc(root) as FolderDoc).docs, "dist");
 			expect(parseAutomergeUrl(distLink.url).documentId).toBe(distUrlBefore);
-			expect(parseAutomergeUrl(distLink.url).heads).toBeTruthy();
+			expect(parseAutomergeUrl(distLink.url).heads).toBeFalsy();
 		});
 	});
 
-	it("an untouched subtree keeps its exact pin when a sibling changes", async () => {
-		// Editing a/x.txt must re-pin `a` (new heads) but leave `b`'s link —
-		// and so its whole folder doc — byte-identical, since syncFolder skips
-		// the docs write when nothing changed.
+	it("editing a file's content leaves every folder doc untouched", async () => {
+		// Links are bare, so a content edit changes only the file doc:
+		// syncFolder skips the docs write when no entry changed.
 		await fs.mkdir(path.join(workRoot, "a"));
 		await fs.mkdir(path.join(workRoot, "b"));
 		await fs.writeFile(path.join(workRoot, "a", "x.txt"), "x1\n");
@@ -306,6 +305,7 @@ describe("doc shape", () => {
 				const root = await repo.find(cfg.rootUrl);
 				const docs = (readDoc(root) as FolderDoc).docs;
 				return {
+					rootHeads: root.heads(),
 					a: linkByName(docs, "a").url,
 					b: linkByName(docs, "b").url,
 				};
@@ -316,11 +316,7 @@ describe("doc shape", () => {
 		await save(workRoot);
 		const after = await linksOf();
 
-		expect(after.a).not.toBe(before.a);
-		expect(parseAutomergeUrl(after.a).documentId).toBe(
-			parseAutomergeUrl(before.a).documentId,
-		);
-		expect(after.b).toBe(before.b);
+		expect(after).toEqual(before);
 	});
 
 	it("binary files store content as Uint8Array", async () => {
@@ -360,7 +356,7 @@ describe("file-doc lifecycle", () => {
 
 	it("file URLs stay stable across edits (mutation, not clone)", async () => {
 		// pushFiles mutates the existing UnixFileEntry doc in place, which
-		// keeps the file doc stable across edits — only the pin's heads move.
+		// keeps the file doc — and so its bare link — stable across edits.
 		await fs.writeFile(path.join(workRoot, "stable.txt"), "stable\n");
 		await fs.writeFile(path.join(workRoot, "edited.txt"), "v1\n");
 		await init({
@@ -388,13 +384,8 @@ describe("file-doc lifecycle", () => {
 		const stableUrl2 = await urlFor("stable.txt");
 		const editedUrl2 = await urlFor("edited.txt");
 
-		// Untouched file: the pin (doc id and heads) is identical. Edited
-		// file: same doc, new heads.
 		expect(stableUrl2).toBe(stableUrl1);
-		expect(editedUrl2).not.toBe(editedUrl1);
-		expect(parseAutomergeUrl(editedUrl2 as `automerge:${string}`).documentId).toBe(
-			parseAutomergeUrl(editedUrl1 as `automerge:${string}`).documentId,
-		);
+		expect(editedUrl2).toBe(editedUrl1);
 	});
 
 	it("save does not stamp lastSyncAt; sync would (offline test of negative case)", async () => {
@@ -424,7 +415,7 @@ describe("file-doc lifecycle", () => {
 	});
 });
 
-describe("three-way reconcile (pinned link as merge base)", () => {
+describe("three-way reconcile (local merge base)", () => {
 	let workRoot: string;
 	let cleanup: () => void;
 
@@ -482,29 +473,55 @@ describe("three-way reconcile (pinned link as merge base)", () => {
 	it("merges a doc edit with a concurrent disk edit instead of undoing it", async () => {
 		await setup("alpha\nbeta\ngamma\n");
 		// Doc side: rewrite the middle line. Disk side: append a line. The
-		// disk edit is recorded at the pinned base, so both survive the merge.
+		// disk edit is recorded at the local base, so both survive the merge.
 		await editDoc("alpha\nBETA\ngamma\n");
 		await fs.writeFile(notePath(), "alpha\nbeta\ngamma\ndelta\n");
 		await save(workRoot);
 
 		expect(await docContent()).toBe("alpha\nBETA\ngamma\ndelta\n");
-		// The link re-pinned at the merged heads, and materialize wrote the
-		// merged content back to disk.
+		// Materialize wrote the merged content back to disk.
 		expect(await fs.readFile(notePath(), "utf8")).toBe(
 			"alpha\nBETA\ngamma\ndelta\n",
 		);
 	});
 
-	it("publishes a doc-only edit: re-pins at the tip and materializes it", async () => {
+	it("materializes a doc-only edit and moves the local base, not the link", async () => {
 		await setup("v1\n");
 		await editDoc("v2\n");
 
-		const pinBefore = await noteUrl();
+		const linkBefore = await noteUrl();
+		const baseBefore = (await readBases(workRoot)).get("note.txt");
 		await save(workRoot);
-		const pinAfter = await noteUrl();
+		const baseAfter = (await readBases(workRoot)).get("note.txt");
 
-		expect(pinAfter).not.toBe(pinBefore);
+		expect(await noteUrl()).toBe(linkBefore);
+		expect(parseAutomergeUrl(linkBefore).heads).toBeFalsy();
+		expect(baseAfter).not.toBe(baseBefore);
 		expect(await fs.readFile(notePath(), "utf8")).toBe("v2\n");
+	});
+
+	it("upgrades a link pinned by an older pushwork: merges at the pin, then unpins", async () => {
+		await setup("alpha\nbeta\ngamma\n");
+		// Older pushwork kept the merge base in the link itself and had no
+		// bases.json.
+		const cfg = await readConfig(workRoot);
+		await withRepo(storageOf(workRoot), async (repo) => {
+			const folder = await repo.find<Record<string, string>>(cfg.rootUrl);
+			const file = await repo.find(folder.doc()["note.txt"] as `automerge:${string}`);
+			const pinned = pinUrl(file);
+			folder.change((d) => {
+				d["note.txt"] = pinned;
+			});
+		});
+		await fs.rm(path.join(workRoot, ".pushwork", "bases.json"));
+
+		await editDoc("alpha\nBETA\ngamma\n");
+		await fs.writeFile(notePath(), "alpha\nbeta\ngamma\ndelta\n");
+		await save(workRoot);
+
+		expect(await docContent()).toBe("alpha\nBETA\ngamma\ndelta\n");
+		expect(parseAutomergeUrl(await noteUrl()).heads).toBeFalsy();
+		expect((await readBases(workRoot)).has("note.txt")).toBe(true);
 	});
 
 	it("does not duplicate an edit that already reached the doc", async () => {

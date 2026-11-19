@@ -1,48 +1,36 @@
-# Pinned Links and Artifacts
+# Links and Artifacts
 
-These used to be one concept ("artifact directories") and are now two:
-
-1. **Every link is pinned.** Every file and folder link a folder doc carries
-   is a heads-pinned URL. This is universal and not configurable.
+1. **Links are live, artifacts are pinned.** Folder links and ordinary file
+   links are bare URLs, so anyone opening them — Patchwork included — gets the
+   live, editable document. File links under an `artifact` path are
+   heads-pinned snapshots.
 2. **`artifact` is a content attribute.** A path marked `artifact` stores its
    text content as an atomic, last-writer-wins `ImmutableString` instead of a
    merge-able CRDT text. Configured per folder via `.pushworkattributes`.
 
-## Universal pinning
+## Links
 
 ```
 folder doc (root)          ← tracked by its bare URL (automerge:root)
-  ├── "src"  → automerge:abc#h1|h2          (pinned folder link)
-  │     └── "app.ts" → automerge:jkl#h5     (pinned file link)
-  └── "dist" → automerge:def#h3             (pinned folder link)
-        └── "cli.js" → automerge:ghi#h4     (pinned file link)
+  ├── "src"  → automerge:abc                (live folder link)
+  │     └── "app.ts" → automerge:jkl        (live file link)
+  └── "dist" → automerge:def                (live folder link)
+        └── "cli.js" → automerge:ghi#h4     (pinned artifact link)
 ```
 
 A pinned URL (`documentId` + heads, `pinUrl(handle)`) names an exact,
-immutable version. Because *every* link is pinned:
+immutable version; opening one yields a view-only handle. Artifacts are
+published that way: a changed artifact gets fresh content and a _new pinned
+link_ in its folder doc, and readers holding the old URL keep a consistent
+view of the old snapshot. Writers must strip heads first (`stripHeads`).
 
-- **A URL is a version.** Anyone holding a link from a folder doc sees the
-  content that was published there, forever — no cache-staleness, and the
-  folder doc's history is a version history of the whole tree.
-- **The pin is the merge base.** Sync materialized disk from the pins, so at
-  rest disk == pin. The next sync uses the pinned content as the base of a
-  three-way reconcile (see [sync](./sync.md)) — no separate snapshot state.
-- **Syncing is publishing.** `sync`/`save` re-pin every link at the heads
-  they can see, so whatever has reached local storage becomes the published
-  version.
+Everything else is linked live. Because a live link doesn't move when its
+document changes, a content edit touches only the file doc: `syncFolder` and
+the `vfs` encoder skip the folder-doc write when no entry changed.
 
-Only the *root* folder URL stays bare: the repo is tracked by identity, not
-by version, and config load strips heads off it anyway (a pinned root would
-yield a view-only handle that throws on edit).
-
-Pins move only when content does: `syncFolder` skips the folder-doc write
-when the link array is unchanged, so an untouched subtree keeps its exact
-pin — and therefore its parents keep theirs.
-
-Consequently a changed file gets fresh content and a _new pinned link_ in its
-folder doc; readers holding the old pinned URL keep a consistent view of the
-old snapshot. Writers must strip heads first (`stripHeads`) — opening a
-pinned URL yields a view-only handle.
+The three-way merge base is therefore not in the link. Each clone records the
+pinned version it last materialized per path in `.pushwork/bases.json` (see
+[sync](./sync.md)).
 
 ## The `artifact` attribute
 
@@ -76,9 +64,9 @@ for repos that carry no attributes files.
   deletion-resurrection bugs.
 - v2 expressed artifact-ness as heads-pinned links *plus* ImmutableString
   content, but only for configured artifact directories, with a root-only
-  attributes file. Pinning some links and not others meant most URLs were
-  mutable references and a pre-refresh server wait tried to pin "the merged"
-  heads.
-- v3 (current) pins everything, always, and reduces `artifact` to the
-  content-encoding attribute described above. The extra server wait is gone:
-  pins deliberately capture the local heads — publish what you have.
+  attributes file.
+- v3 pinned every link and used the pin as the merge base. Patchwork opened
+  every document from such a folder read-only.
+- v4 (current) links live again, pins only artifacts, and keeps the merge
+  base locally. A link pinned by v3 still serves as the base on its first
+  sync, which rewrites it bare.

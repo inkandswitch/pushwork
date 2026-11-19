@@ -111,7 +111,7 @@ describe("migrate '-' (original pushwork) → current", () => {
 
 		expect(result.from).toBe(UNVERSIONED);
 		expect(result.to).toBe(CONFIG_VERSION);
-		expect(result.steps).toEqual(["- → 1", "1 → 2", "2 → 3", "3 → 4", "4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["- → 1", "1 → 2", "2 → 3", "3 → 4", "4 → 5", "5 → 6", "6 → 7"]);
 
 		// storage moved automerge/ → storage/ ("-" → 1), then storage/ → LMDB
 		// with a .bak of the tree (4 → 5); contents preserved in both places
@@ -144,6 +144,7 @@ describe("migrate '-' (original pushwork) → current", () => {
 			shape: "patchwork-folder",
 			artifactDirectories: [],
 			jsonDocuments: false,
+			draft: null,
 		});
 	});
 
@@ -183,7 +184,7 @@ describe("migrate from intermediate versions", () => {
 		await writeConfigRaw({ rootUrl: SOME_URL, backend: "subduction" });
 		const result = await migrate(root);
 		expect(result.from).toBe(1);
-		expect(result.steps).toEqual(["1 → 2", "2 → 3", "3 → 4", "4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["1 → 2", "2 → 3", "3 → 4", "4 → 5", "5 → 6", "6 → 7"]);
 		const cfg = await readConfig(root);
 		expect(cfg).toEqual({
 			version: CONFIG_VERSION,
@@ -192,6 +193,7 @@ describe("migrate from intermediate versions", () => {
 			shape: "vfs",
 			artifactDirectories: [],
 			jsonDocuments: false,
+			draft: null,
 		});
 	});
 
@@ -205,7 +207,7 @@ describe("migrate from intermediate versions", () => {
 		});
 		const result = await migrate(root);
 		expect(result.from).toBe(2);
-		expect(result.steps).toEqual(["2 → 3", "3 → 4", "4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["2 → 3", "3 → 4", "4 → 5", "5 → 6", "6 → 7"]);
 		const cfg = await readConfig(root);
 		expect(cfg.shape).toBe("patchwork-folder");
 		expect(cfg.artifactDirectories).toEqual(["assets"]);
@@ -222,7 +224,7 @@ describe("migrate from intermediate versions", () => {
 		});
 		const result = await migrate(root);
 		expect(result.from).toBe(3);
-		expect(result.steps).toEqual(["3 → 4", "4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["3 → 4", "4 → 5", "5 → 6", "6 → 7"]);
 		const raw = await readRawConfig(root);
 		expect(raw).not.toHaveProperty("branches");
 		expect(raw.version).toBe(CONFIG_VERSION);
@@ -249,7 +251,7 @@ describe("migrate from intermediate versions", () => {
 		});
 
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["4 → 5", "5 → 6", "6 → 7"]);
 
 		// Data landed in the LMDB database…
 		const lmdb = new LMDBStorageAdapter(pushwork("storage.lmdb"));
@@ -291,7 +293,7 @@ describe("migrate from intermediate versions", () => {
 		});
 
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["4 → 5", "5 → 6", "6 → 7"]);
 
 		const { LMDBStorageAdapter } = await import(
 			"@automerge/automerge-repo-storage-lmdb"
@@ -316,7 +318,7 @@ describe("migrate from intermediate versions", () => {
 			artifactDirectories: [],
 		});
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["4 → 5", "5 → 6", "6 → 7"]);
 		expect(await exists(pushwork("storage"))).toBe(false);
 		expect(await exists(pushwork("storage.nodefs.bak"))).toBe(false);
 		expect(await exists(pushwork("storage.lmdb"))).toBe(false);
@@ -339,7 +341,7 @@ describe("migrate from intermediate versions", () => {
 			artifactDirectories: [],
 		});
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["4 → 5", "5 → 6", "6 → 7"]);
 		// Old backup untouched; new tree landed at .bak.1.
 		expect(await fs.readFile(pushwork("storage.nodefs.bak", "old"), "utf8")).toBe("x");
 		expect(await exists(pushwork("storage.nodefs.bak.1"))).toBe(true);
@@ -355,7 +357,7 @@ describe("migrate from intermediate versions", () => {
 			artifactDirectories: [],
 		});
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["4 → 5", "5 → 6"]);
+		expect(result.steps).toEqual(["4 → 5", "5 → 6", "6 → 7"]);
 		expect(await exists(pushwork("storage.lmdb"))).toBe(false);
 		expect((await readRawConfig(root)).version).toBe(CONFIG_VERSION);
 	});
@@ -369,14 +371,29 @@ describe("migrate from intermediate versions", () => {
 			artifactDirectories: ["dist"],
 		});
 		const result = await migrate(root);
-		expect(result.steps).toEqual(["5 → 6"]);
-		expect(await readRawConfig(root)).toEqual({
+		expect(result.steps).toEqual(["5 → 6", "6 → 7"]);
+		expect(await readRawConfig(root)).toMatchObject({ jsonDocuments: false });
+	});
+
+	it("6 → 7 adds draft, on main", async () => {
+		await writeConfigRaw({
 			version: 6,
 			rootUrl: SOME_URL,
 			backend: "subduction",
 			shape: "patchwork-folder",
 			artifactDirectories: ["dist"],
-			jsonDocuments: false,
+			jsonDocuments: true,
+		});
+		const result = await migrate(root);
+		expect(result.steps).toEqual(["6 → 7"]);
+		expect(await readRawConfig(root)).toEqual({
+			version: 7,
+			rootUrl: SOME_URL,
+			backend: "subduction",
+			shape: "patchwork-folder",
+			artifactDirectories: ["dist"],
+			jsonDocuments: true,
+			draft: null,
 		});
 	});
 });

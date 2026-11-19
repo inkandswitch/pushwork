@@ -45,6 +45,41 @@ describe("Attributes.parse", () => {
 		expect(Attributes.parse("").hasArtifactRules).toBe(false);
 		expect(Attributes.parse("# nothing here\n").hasArtifactRules).toBe(false);
 	});
+
+	it("reads a datatype with its import URL, keeping metadata by default", () => {
+		const a = Attributes.parse(
+			"*.kanban datatype=kanban import=https://example.com/kanban.js?v=1\n",
+		);
+		expect(a.datatypeOf("board.kanban")).toEqual({
+			type: "kanban",
+			importUrl: "https://example.com/kanban.js?v=1",
+			stripMetadata: false,
+		});
+		expect(a.datatypeOf("notes.md")).toBeUndefined();
+	});
+
+	it("opts into strip-metadata per rule", () => {
+		const a = Attributes.parse(
+			["*.kanban datatype=kanban strip-metadata", "*.tldraw datatype=tldraw"].join("\n"),
+		);
+		expect(a.datatypeOf("a.kanban")?.stripMetadata).toBe(true);
+		expect(a.datatypeOf("a.tldraw")?.stripMetadata).toBe(false);
+	});
+
+	it("unsets a datatype with -datatype and ignores options without one", () => {
+		const a = Attributes.parse(
+			["*.kanban datatype=kanban", "drafts/ -datatype", "*.md strip-metadata"].join("\n"),
+		);
+		expect(a.datatypeOf("a.kanban")?.type).toBe("kanban");
+		expect(a.datatypeOf("drafts/a.kanban")).toBeNull();
+		expect(a.datatypeOf("a.md")).toBeUndefined();
+	});
+
+	it("keeps artifact and datatype on the same line independent", () => {
+		const a = Attributes.parse("*.kanban artifact datatype=kanban\n");
+		expect(a.isArtifact("a.kanban")).toBe(true);
+		expect(a.datatypeOf("a.kanban")?.type).toBe("kanban");
+	});
 });
 
 describe("attributesTreeOf", () => {
@@ -89,5 +124,19 @@ describe("attributesTreeOf", () => {
 		expect(tree.isArtifact("pkg/dist/a.js")).toBe(true);
 		expect(tree.isArtifact("pkg/b.gen.js")).toBe(true);
 		expect(tree.isArtifact("pkg/b.js")).toBe(false);
+	});
+
+	it("scopes datatypes like artifacts, letting a deeper -datatype unset", () => {
+		const tree = attributesTreeOf(
+			new Map([
+				[".pushworkattributes", enc("*.kanban datatype=kanban\n")],
+				["drafts/.pushworkattributes", enc("*.kanban -datatype\n")],
+				["pkg/.pushworkattributes", enc("*.board datatype=kanban\n")],
+			]),
+		);
+		expect(tree.datatypeOf("a.kanban")?.type).toBe("kanban");
+		expect(tree.datatypeOf("drafts/a.kanban")).toBeUndefined();
+		expect(tree.datatypeOf("pkg/a.board")?.type).toBe("kanban");
+		expect(tree.datatypeOf("a.board")).toBeUndefined();
 	});
 });

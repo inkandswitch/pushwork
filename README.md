@@ -136,6 +136,7 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | --- | --- |
 | `.pushwork/config.json` | Repo configuration (see below). |
 | `.pushwork/storage/` | Automerge CRDT storage (`NodeFSStorageAdapter`). |
+| `.pushwork/bases.json` | Per-path merge bases: the version last written to disk (see [Links and merge bases](#links-and-merge-bases)). |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
 `config.json` is currently at version `6`:
@@ -166,9 +167,9 @@ tmp/
 .env
 ```
 
-### Pinned links
+### Links and merge bases
 
-Every file and folder link inside the tracked tree is a heads-_pinned_ `automerge:` URL (`automerge:<docId>#<heads>`): it names the exact version that was last synced, so consumers reference a snapshot rather than a moving target, and syncing is also publishing — each sync re-pins every link at the heads it can see. Only the root folder URL (the repo's shared identity) stays bare. The pinned content is also the base for sync's three-way reconcile; see [`design/artifacts.md`](./design/artifacts.md) and [`design/sync.md`](./design/sync.md).
+Folder and file links inside the tracked tree are live `automerge:` URLs, so opening any document from the folder (in Patchwork, say) gives you an editable document. Only [artifact files](#artifact-files) are linked as heads-_pinned_ snapshots (`automerge:<docId>#<heads>`). Each checkout records the version it last wrote to disk per path in `.pushwork/bases.json`; that is the base for sync's three-way reconcile, so a browser edit and a concurrent disk edit merge instead of one undoing the other. Links pinned by an older pushwork serve as the base on their first sync, which rewrites them live. See [`design/artifacts.md`](./design/artifacts.md) and [`design/sync.md`](./design/sync.md).
 
 ### Artifact files
 
@@ -186,7 +187,7 @@ build/**    artifact
 vendored/   -artifact     # negate a default; last matching rule wins
 ```
 
-Each line is `<glob> <attr>...` (blank lines and `#` comments ignored). Patterns are gitignore-style globs; the only attribute today is `artifact` (`-artifact` unsets it). An attributes file may sit in **any directory**: its patterns are relative to its own location and apply only to its subtree, with deeper files overriding shallower ones for the paths they match. When any attributes file is present, its `artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`, and pushwork warns when the two disagree so a stale local config can't silently diverge from the repo.
+Each line is `<glob> <attr>...` (blank lines and `#` comments ignored). Patterns are gitignore-style globs; the attributes are `artifact` (`-artifact` unsets it) and `datatype` (see [Datatypes by file ending](#datatypes-by-file-ending)). An attributes file may sit in **any directory**: its patterns are relative to its own location and apply only to its subtree, with deeper files overriding shallower ones for the paths they match. When any attributes file is present, its `artifact` rules **override** `artifactDirectories` from `.pushwork/config.json`, and pushwork warns when the two disagree so a stale local config can't silently diverge from the repo.
 
 ### JSON documents
 
@@ -203,6 +204,22 @@ With `jsonDocuments` on (`--json-docs` at `init`/`clone`, or `"jsonDocuments": t
 Edits are diffed key by key, so concurrent changes to different keys merge. Automerge keeps neither key order nor whitespace, so pushwork compares values rather than bytes, leaves a file alone while its value matches the document, and when it must rewrite one, reuses that file's own indentation and key order. A file received from a peer with no local copy yet is written with two-space indent. If a tracked JSON document's file stops parsing as an object, sync warns and leaves that file unsynced until it does.
 
 The flag decides only how new files are stored: a path already tracked as a JSON document stays one, whoever syncs it. Turning the flag on for an existing repo converts qualifying text files on the next sync, giving them a new document URL.
+
+A JSON document's `@patchwork` field is never removed by a file that omits it: the document keeps the metadata it has.
+
+#### Datatypes by file ending
+
+To store files of a given ending as a Patchwork datatype, without writing `@patchwork` into each one, add a `datatype` rule to `.pushworkattributes`. Because the rule lives in a tracked file, everyone who clones the folder gets the same datatypes:
+
+```gitattributes
+*.kanban   datatype=kanban  import=automerge:2a5Rkw9LkqXfBAQZbcBWjTcf15Mc
+*.tldraw   datatype=tldraw  import=https://example.com/tldraw/dist/index.js  strip-metadata
+drafts/    -datatype
+```
+
+A matching file that holds a JSON object is stored as a JSON document whatever its extension, and with or without `jsonDocuments`. The rule sets `@patchwork.type` and, with `import=`, `@patchwork.suggestedImportUrl`, so Patchwork can load the tool for it; an `automerge:` URL pinned to heads also sets `frozenImportUrl`. Changing a rule updates the documents it covers on the next sync.
+
+By default the `@patchwork` field is written to disk like any other key. Add `strip-metadata` to a rule to keep it out of the files: pushwork rebuilds it from the rule and the document whenever it reads the file back, and fields Patchwork adds to the metadata are kept.
 
 ## Document shapes
 
@@ -247,9 +264,9 @@ A pushwork repo is a tree of Automerge documents. One _root folder doc_ (whose U
 ```mermaid
 graph TD
     A["root folder doc<br/>(automerge: URL — this is what you share)"]
-    A --> B["src/index.ts → file doc (pinned link)"]
-    A --> C["README.md → file doc (pinned link)"]
-    A --> D["dist/bundle.js → file doc (pinned link)"]
+    A --> B["src/index.ts → file doc (live link)"]
+    A --> C["README.md → file doc (live link)"]
+    A --> D["dist/bundle.js → file doc (pinned artifact link)"]
     A --> E["..."]
 ```
 

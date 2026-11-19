@@ -22,46 +22,98 @@ const dlog = log("attributes");
  * attribute token is `name` (set) or `-name` (unset). The last rule that
  * matches a given path wins within a file.
  *
- * The only attribute pushwork understands today is `artifact`: a path with
- * `artifact` set stores its text content as an atomic, last-writer-wins
- * ImmutableString instead of a live, merge-able CRDT text. (Link pinning is
- * not an attribute — every link is pinned.)
+ * Two attributes are understood:
+ *
+ * - `artifact`: a path with `artifact` set stores its text content as an
+ *   atomic, last-writer-wins ImmutableString instead of a live, merge-able
+ *   CRDT text. (Link pinning is not an attribute — every link is pinned.)
+ * - `datatype=<type>`: a path holding a JSON object is stored as a JSON
+ *   document of that Patchwork datatype, whatever its extension, with
+ *   `@patchwork.type` set to `<type>`. On the same line, `import=<url>` sets
+ *   `@patchwork.suggestedImportUrl`, and `strip-metadata` leaves the
+ *   `@patchwork` field out of the file on disk (pushwork rebuilds it from the
+ *   rule and the document). `-datatype` unsets an earlier rule.
  *
  *   dist/**     artifact
  *   build/**    artifact
  *   *.wasm      artifact
  *   vendored/   -artifact
+ *   *.kanban    datatype=kanban import=automerge:2a5Rkw9LkqXfBAQZbcBWjTcf15Mc strip-metadata
  */
 export const ATTRIBUTES_FILE = ".pushworkattributes";
 
 const ARTIFACT = "artifact";
+const DATATYPE = "datatype";
+const IMPORT = "import";
+const STRIP_METADATA = "strip-metadata";
+
+/** The Patchwork datatype a `datatype=` rule assigns to a path. */
+export type Datatype = {
+	type: string;
+	importUrl?: string;
+	stripMetadata: boolean;
+};
 
 type Rule = { ig: Ignore; set: boolean };
 
+/** `datatype: null` is a `-datatype` rule: it unsets earlier matches. */
+type DatatypeRule = { ig: Ignore; datatype: Datatype | null };
+
 export class Attributes {
-	private constructor(private readonly artifactRules: Rule[]) {}
+	private constructor(
+		private readonly artifactRules: Rule[],
+		private readonly datatypeRules: DatatypeRule[],
+	) {}
 
 	/** Parse the text of a `.pushworkattributes` file. */
 	static parse(text: string): Attributes {
 		const artifactRules: Rule[] = [];
+		const datatypeRules: DatatypeRule[] = [];
 		for (const raw of text.split(/\r?\n/)) {
 			const line = raw.trim();
 			if (!line || line.startsWith("#")) continue;
 			const [pattern, ...attrs] = line.split(/\s+/);
 			if (!pattern) continue;
+			// One matcher per line so we can honor last-match-wins ordering,
+			// including negation, exactly like gitattributes.
+			const ig = ignore().add(pattern);
+			let type: string | null | undefined;
+			let importUrl: string | undefined;
+			let stripMetadata = false;
 			for (const attr of attrs) {
 				const unset = attr.startsWith("-");
-				const name = (unset ? attr.slice(1) : attr).split("=")[0];
-				if (name !== ARTIFACT) {
-					dlog("unknown attribute %s on %s — ignoring", attr, pattern);
-					continue;
+				const token = unset ? attr.slice(1) : attr;
+				const eq = token.indexOf("=");
+				const name = eq < 0 ? token : token.slice(0, eq);
+				const value = eq < 0 ? undefined : token.slice(eq + 1);
+				switch (name) {
+					case ARTIFACT:
+						artifactRules.push({ ig, set: !unset });
+						break;
+					case DATATYPE:
+						if (unset) type = null;
+						else if (value) type = value;
+						else dlog("datatype without a value on %s — ignoring", pattern);
+						break;
+					case IMPORT:
+						importUrl = unset ? undefined : value || undefined;
+						break;
+					case STRIP_METADATA:
+						stripMetadata = !unset;
+						break;
+					default:
+						dlog("unknown attribute %s on %s — ignoring", attr, pattern);
 				}
-				// One matcher per rule so we can honor last-match-wins ordering,
-				// including negation, exactly like gitattributes.
-				artifactRules.push({ ig: ignore().add(pattern), set: !unset });
+			}
+			if (type === null) {
+				datatypeRules.push({ ig, datatype: null });
+			} else if (type !== undefined) {
+				datatypeRules.push({ ig, datatype: { type, importUrl, stripMetadata } });
+			} else if (importUrl !== undefined || stripMetadata) {
+				dlog("%s/%s without datatype on %s — ignoring", IMPORT, STRIP_METADATA, pattern);
 			}
 		}
-		return new Attributes(artifactRules);
+		return new Attributes(artifactRules, datatypeRules);
 	}
 
 	/** Whether any `artifact` rule was declared (empty/no file → false). */
@@ -81,6 +133,16 @@ export class Attributes {
 		let result: boolean | undefined;
 		for (const { ig, set } of this.artifactRules) {
 			if (ig.ignores(posixPath)) result = set;
+		}
+		return result;
+	}
+
+	/** Tri-state like {@link artifactOf}: the last matching `datatype` rule's
+	 * datatype, `null` when that rule unsets it, undefined when none match. */
+	datatypeOf(posixPath: string): Datatype | null | undefined {
+		let result: Datatype | null | undefined;
+		for (const { ig, datatype } of this.datatypeRules) {
+			if (ig.ignores(posixPath)) result = datatype;
 		}
 		return result;
 	}
@@ -112,6 +174,19 @@ export class AttributesTree {
 			if (match !== undefined) result = match;
 		}
 		return result;
+	}
+
+	/** The Patchwork datatype `posixPath` is assigned, with the same scope and
+	 * precedence as {@link isArtifact}. */
+	datatypeOf(posixPath: string): Datatype | undefined {
+		let result: Datatype | null | undefined;
+		for (const { dir, attrs } of this.files) {
+			const rel = relativeTo(dir, posixPath);
+			if (rel === undefined) continue;
+			const match = attrs.datatypeOf(rel);
+			if (match !== undefined) result = match;
+		}
+		return result ?? undefined;
 	}
 }
 

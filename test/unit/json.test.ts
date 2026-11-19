@@ -128,6 +128,17 @@ describe("patchJson", () => {
 		expect(Automerge.getHeads(after)).toEqual(Automerge.getHeads(doc));
 	});
 
+	it("edits strings under keys containing a slash", () => {
+		const output = (png: string, lines: string[]) => ({
+			cells: [{ outputs: [{ data: { "image/png": png, "text/plain": lines } }] }],
+		});
+		const doc = Automerge.change(
+			Automerge.from<JsonObject>(output("iVBOR-old", ["<Figure 1>"])),
+			(d) => patchJson(d, output("iVBOR-new", ["<Figure 2>"])),
+		);
+		expect(jsonValueOf(doc)).toEqual(output("iVBOR-new", ["<Figure 2>"]));
+	});
+
 	it("merges concurrent edits to different keys, array ends and one string", () => {
 		const base = Automerge.from<JsonObject>({
 			a: 1,

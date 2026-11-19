@@ -17,10 +17,12 @@ import {
 import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 
 import {
+	clone,
 	init,
 	save,
 	status,
 	nuclearizeRepo,
+	pinUrl,
 	stripHeads,
 	type UnixFileEntry,
 } from "../../src/index.js";
@@ -179,6 +181,114 @@ describe("JSON documents", () => {
 		await fs.writeFile(modelPath(), modelText({ ...MODEL, title: "Fixed" }));
 		await save(workRoot);
 		expect(((await docAt("model.json")) as JsonObject).title).toBe("Fixed");
+	});
+
+	it("keeps a tracked document's metadata when its file drops the field", async () => {
+		await setup(true);
+		const { "@patchwork": _meta, ...bare } = MODEL;
+		await fs.writeFile(modelPath(), modelText({ ...bare, title: "Renamed" }));
+
+		await save(workRoot);
+
+		expect(await docAt("model.json")).toEqual({ ...MODEL, title: "Renamed" });
+		expect(JSON.parse(await fs.readFile(modelPath(), "utf8"))).toEqual({
+			...MODEL,
+			title: "Renamed",
+		});
+	});
+
+	describe("datatype rules", () => {
+		const BOARD = { title: "Sprint", columns: [{ name: "Todo", cards: ["a"] }] };
+		const IMPORT = "https://example.com/kanban/dist/index.js";
+		const META = { type: "kanban", suggestedImportUrl: IMPORT };
+		const boardPath = () => path.join(workRoot, "sprint.kanban");
+		const readBoard = async () => JSON.parse(await fs.readFile(boardPath(), "utf8"));
+
+		async function setupBoard(rule: string, shape = "vfs"): Promise<void> {
+			await fs.writeFile(path.join(workRoot, ".pushworkattributes"), rule + "\n");
+			await fs.writeFile(boardPath(), modelText(BOARD));
+			await init({
+				dir: workRoot,
+				backend: "subduction",
+				shape,
+				online: false,
+				jsonDocuments: false,
+			});
+		}
+
+		it("stores a matching file as that datatype and writes the metadata to disk", async () => {
+			await setupBoard(`*.kanban datatype=kanban import=${IMPORT}`);
+
+			expect(await docAt("sprint.kanban")).toEqual({ ...BOARD, "@patchwork": META });
+			await save(workRoot);
+			expect(await readBoard()).toEqual({ ...BOARD, "@patchwork": META });
+		});
+
+		it("links a matching file in a Patchwork folder by its datatype", async () => {
+			await setupBoard("*.kanban datatype=kanban", "patchwork-folder");
+			const cfg = await readConfig(workRoot);
+			const links = await withRepo(workRoot, async (repo) => {
+				const folder = await repo.find<{ docs: { name: string; type: string }[] }>(
+					cfg.rootUrl,
+				);
+				return folder.doc().docs;
+			});
+			expect(links.find((l) => l.name === "sprint.kanban")?.type).toBe("kanban");
+		});
+
+		it("keeps metadata off disk with strip-metadata and rebuilds it on edit", async () => {
+			await setupBoard(`*.kanban datatype=kanban import=${IMPORT} strip-metadata`);
+			await save(workRoot);
+
+			expect(await readBoard()).toEqual(BOARD);
+			expect((await status(workRoot)).diff.modified).toEqual([]);
+
+			await fs.writeFile(boardPath(), modelText({ ...BOARD, title: "Sprint 2" }));
+			await save(workRoot);
+
+			expect(await docAt("sprint.kanban")).toEqual({
+				...BOARD,
+				title: "Sprint 2",
+				"@patchwork": META,
+			});
+			expect(await readBoard()).toEqual({ ...BOARD, title: "Sprint 2" });
+		});
+
+		it("applies the repo's strip-metadata rule when cloning", async () => {
+			await setupBoard("*.kanban datatype=kanban strip-metadata");
+			const { rootUrl } = await readConfig(workRoot);
+			const dst = path.join(workRoot, "clone");
+			await fs.mkdir(path.join(dst, ".pushwork"), { recursive: true });
+			await fs.cp(
+				path.join(workRoot, ".pushwork", "storage.lmdb"),
+				path.join(dst, ".pushwork", "storage.lmdb"),
+				{ recursive: true },
+			);
+
+			await clone({ url: rootUrl, dir: dst, backend: "subduction", shape: "vfs", online: false });
+
+			const cloned = JSON.parse(await fs.readFile(path.join(dst, "sprint.kanban"), "utf8"));
+			expect(cloned).toEqual(BOARD);
+		});
+
+		it("splits a pinned import URL into suggested and frozen URLs", async () => {
+			await setupBoard("*.kanban datatype=kanban");
+			const pinned = await withRepo(workRoot, async (repo) =>
+				pinUrl(repo.create({ tool: true })),
+			);
+			await fs.writeFile(
+				path.join(workRoot, ".pushworkattributes"),
+				`*.kanban datatype=kanban import=${pinned}\n`,
+			);
+
+			await save(workRoot);
+
+			expect(((await docAt("sprint.kanban")) as JsonObject)["@patchwork"]).toEqual({
+				type: "kanban",
+				suggestedImportUrl: stripHeads(pinned),
+				frozenImportUrl: pinned,
+			});
+		});
 	});
 
 	it("nuclearize recreates a JSON document as a JSON document", async () => {

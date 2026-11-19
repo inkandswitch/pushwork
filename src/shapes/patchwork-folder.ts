@@ -6,7 +6,7 @@ import {
 	type Repo,
 } from "@automerge/automerge-repo";
 import { log } from "../log.js";
-import { pinUrl, stripHeads } from "./file.js";
+import { stripHeads } from "./file.js";
 import { newDir, type Shape, type VfsNode } from "./types.js";
 
 const dlog = log("shapes:folder");
@@ -82,7 +82,7 @@ async function createFolder(
 			links.push({ name, type: child.type ?? linkFileType(name), url: child.url });
 		} else {
 			const sub = await createFolder(repo, child, name);
-			links.push({ name, type: "folder", url: pinUrl(sub) });
+			links.push({ name, type: "folder", url: sub.url });
 		}
 	}
 	const handle = repo.create<FolderDoc>({
@@ -114,26 +114,24 @@ async function syncFolder(
 			continue;
 		}
 		// child is a dir. Reuse the existing subfolder doc so its URL stays
-		// stable across syncs. Its link is pinned with heads, and a pinned URL
-		// resolves to a view-only handle that throws on `.change()`, so strip
-		// the heads to get the live, editable doc before syncing into it; the
-		// pin is re-derived from the handle's post-sync heads.
+		// stable across syncs. A link pinned by an older pushwork resolves to
+		// a view-only handle that throws on `.change()`, so strip the heads to
+		// get the live, editable doc; the link is written back bare.
 		if (existing && existing.type === "folder") {
 			const subHandle = await repo.find<FolderDoc>(stripHeads(existing.url));
 			if (isFolderDoc(subHandle.doc())) {
 				await syncFolder(repo, subHandle, child);
-				nextLinks.push({ name, type: "folder", url: pinUrl(subHandle) });
+				nextLinks.push({ name, type: "folder", url: subHandle.url });
 				continue;
 			}
 		}
 		const sub = await createFolder(repo, child, name);
-		nextLinks.push({ name, type: "folder", url: pinUrl(sub) });
+		nextLinks.push({ name, type: "folder", url: sub.url });
 	}
 
 	// Reassigning `docs` always advances the doc's heads, even when the array
-	// is identical — which would move this folder's pin, its parent's link,
-	// and so on up to the root on every sync. Skip the write when nothing
-	// changed so pins only move when content does.
+	// is identical. Skip the write when nothing changed so a folder doc only
+	// changes when its entries do.
 	if (!sameLinks(handle.doc(), nextLinks)) {
 		handle.change((d: FolderDoc) => {
 			if (!d["@patchwork"]) d["@patchwork"] = { type: "folder" };
@@ -170,7 +168,7 @@ async function readFolder(
 		if (!link?.name) continue;
 		if (!isValidAutomergeUrl(link.url)) continue;
 		if (link.type === "folder") {
-			const sub = await repo.find<FolderDoc>(link.url);
+			const sub = await repo.find<FolderDoc>(stripHeads(link.url));
 			if (isFolderDoc(sub.doc())) {
 				const subTree = await readFolder(repo, sub);
 				if (tree.kind === "dir") tree.entries.set(link.name, subTree);

@@ -19,7 +19,13 @@ import {
 	type PushworkConfig,
 } from "./config.js";
 import { loadIgnore } from "./ignore.js";
-import { ATTRIBUTES_FILE, attributesTreeOf } from "./attributes.js";
+import { baseOf, readBases, writeBases, type Bases } from "./bases.js";
+import {
+	ATTRIBUTES_FILE,
+	attributesTreeOf,
+	type AttributesTree,
+	type Datatype,
+} from "./attributes.js";
 import { byteEq, walkDir, writeFileAtomic, type FileTree } from "./fs-tree.js";
 import { log } from "./log.js";
 import {
@@ -43,6 +49,7 @@ import {
 import {
 	applyFileEntry,
 	contentToBytes,
+	documentValueOf,
 	flattenLeaves,
 	formatJson,
 	isFileEntryDoc,
@@ -67,6 +74,7 @@ import {
 	stripHeads,
 	urlHeads,
 	vfsShape,
+	withMeta,
 	type JsonObject,
 	type LeafContent,
 	type Shape,
@@ -74,6 +82,12 @@ import {
 	type VfsNode,
 } from "./shapes/index.js";
 import { loadCustomShape } from "./shapes/custom.js";
+import * as draftOps from "./drafts/actions.js";
+import type { DraftSummary } from "./drafts/actions.js";
+import { canonicalUrl } from "./drafts/clones.js";
+import { treeMembers } from "./drafts/tree.js";
+import { isDraftDoc, type CloneEntry, type DraftDoc, type HasDrafts } from "./drafts/types.js";
+import { DraftView, repairCloneConflicts } from "./drafts/view.js";
 
 const dlog = log("pushwork");
 
@@ -91,11 +105,15 @@ const noWarn: Warn = () => {};
  *  stored as an atomic ImmutableString rather than a merge-able CRDT text). */
 type IsArtifact = (posixPath: string) => boolean;
 
+/** The Patchwork datatype a `.pushworkattributes` rule assigns to a
+ *  repo-relative posix path, if any. */
+type DatatypeOf = (posixPath: string) => Datatype | undefined;
+
 /** A leaf as recorded at its pinned link: the merge base for the next sync. */
 type StoredLeaf = LeafContent & { url: AutomergeUrl };
 
 /**
- * Build the artifact classifier from a walked working tree. The tree's
+ * Build the artifact classifier from the working tree's attributes. Its
  * `.pushworkattributes` files (in any directory, each scoped to its own
  * subtree) travel with the repo content, so their `artifact` rules take
  * precedence over the local `.pushwork/config.json` `artifactDirectories`.
@@ -104,11 +122,10 @@ type StoredLeaf = LeafContent & { url: AutomergeUrl };
  * ones the repo carries.
  */
 function artifactClassifier(
-	fsFiles: FileTree,
+	attrs: AttributesTree,
 	configDirs: readonly string[],
 	warn: Warn = noWarn,
 ): IsArtifact {
-	const attrs = attributesTreeOf(fsFiles);
 	if (attrs.hasArtifactRules) {
 		if (configDirs.length > 0) {
 			warn(
@@ -122,6 +139,12 @@ function artifactClassifier(
 	dlog("artifact source: config artifactDirectories %o", configDirs);
 	return (p) => isInArtifactDir(p, configDirs);
 }
+
+const datatypeClassifier = (attrs: AttributesTree): DatatypeOf => (p) =>
+	attrs.datatypeOf(p);
+
+const diskDatatypes = (fsFiles: FileTree): DatatypeOf =>
+	datatypeClassifier(attributesTreeOf(fsFiles));
 
 /** Result of init/clone: the root doc URL, how many files it tracks, and — when
  * run online — how it stands relative to the sync server (see {@link SyncSnapshot}). */
@@ -148,6 +171,9 @@ export type CloneOpts = {
 	artifactDirectories?: readonly string[];
 	jsonDocuments?: boolean; // default: false
 	online?: boolean; // default: true
+	// The draft to check out: `main`, a draft's name, its url, or a prefix of
+	// its id. A `url` that is itself a draft checks that draft out.
+	draft?: string;
 	// If the URL turns out to be a legacy "branches" doc, this callback is
 	// invoked with the available branch entries and must return the URL to
 	// clone instead. If absent, clone throws.
@@ -217,11 +243,12 @@ export async function init(
 		const title = path.basename(root) || undefined;
 		report(`Encoding ${fsFiles.size} ${fsFiles.size === 1 ? "file" : "files"}`);
 		const jsonDocuments = opts.jsonDocuments ?? false;
-		const { tree } = await pushFiles(
+		const { tree, bases } = await pushFiles(
 			repo,
 			fsFiles,
 			undefined,
 			isArtifactPath,
+			datatypeClassifier(attrs),
 			jsonDocuments,
 			warn,
 		);
@@ -252,7 +279,9 @@ export async function init(
 			shape: opts.shape,
 			artifactDirectories: artifactDirs,
 			jsonDocuments,
+			draft: null,
 		});
+		await writeBases(root, bases);
 		await attachConnectMs(sync, connWait);
 		dlog("init complete: rootUrl=%s files=%d synced=%s", folderUrl, fsFiles.size, sync?.synced);
 		return { url: folderUrl, files: fsFiles.size, sync };
@@ -309,6 +338,17 @@ export async function clone(
 			storedUrl = chosenUrl;
 		}
 
+		let draft: AutomergeUrl | null = null;
+		if (isDraftDoc(folderHandle.doc())) {
+			const found = await rootOfDraft(repo, folderHandle as DocHandle<DraftDoc>, online);
+			draft = found.draft;
+			folderHandle = found.root;
+			storedUrl = canonicalUrl(found.root.url);
+		}
+		if (opts.draft !== undefined) {
+			draft = await draftOps.resolveDraft(repo, folderHandle as DocHandle<HasDrafts>, opts.draft);
+		}
+
 		const { shape, shapeName } = await resolveCloneShape({
 			opts,
 			repo,
@@ -317,10 +357,16 @@ export async function clone(
 			folderHandle,
 		});
 
-		const tree = await shape.decode({ repo, root: folderHandle });
+		const checkout = await openTree(repo, storedUrl, draft);
+		const tree = await shape.decode({ repo: checkout.repo, root: checkout.root });
 		const fileCount = flattenLeaves(tree).size;
 		report(`Downloading ${fileCount} ${fileCount === 1 ? "file" : "files"}`);
-		await materializeTree(repo, root, tree);
+		const bases = await materializeTree(
+			checkout.repo,
+			root,
+			tree,
+			await treeDatatypes(checkout.repo, tree),
+		);
 
 		// Now that the tree (including any `.pushworkattributes` files) is on
 		// disk, decide what to record locally. If the repo carries its own
@@ -330,6 +376,14 @@ export async function clone(
 		const artifactDirs = cloned.hasArtifactRules
 			? []
 			: normalizeDirs(opts.artifactDirectories ?? DEFAULT_ARTIFACT_DIRECTORIES);
+
+		// Bring main and every draft along, so switching works offline.
+		if (online) {
+			if (draft) await treeMembers(repo, shape, folderHandle);
+			await touchDrafts(repo, storedUrl).catch((err) =>
+				dlog("fetching drafts failed: %s", err instanceof Error ? err.message : err),
+			);
+		}
 
 		// Confirm we hold everything the server has for the root doc before we
 		// declare the clone done, and capture both head sets for reporting.
@@ -347,13 +401,59 @@ export async function clone(
 			shape: shapeName,
 			artifactDirectories: artifactDirs,
 			jsonDocuments: opts.jsonDocuments ?? false,
+			draft,
 		});
+		await writeBases(root, bases);
 		await attachConnectMs(sync, connWait);
 		dlog("clone complete files=%d synced=%s", fileCount, sync?.synced);
 		return { url: storedUrl, files: fileCount, sync };
 	} finally {
 		await safeShutdown(repo);
 	}
+}
+
+/** The tree a command works on: the root as the checked-out draft has it,
+ * and the repo that reads and writes that draft. */
+type Tree = {
+	repo: Repo;
+	root: DocHandle<unknown>;
+	rootUrl: AutomergeUrl;
+	draft: DocHandle<DraftDoc> | null;
+};
+
+async function openTree(
+	repo: Repo,
+	rootUrl: AutomergeUrl,
+	draft: AutomergeUrl | null,
+): Promise<Tree> {
+	if (!draft) return { repo, root: await repo.find<unknown>(rootUrl), rootUrl, draft: null };
+	const view = await DraftView.open(repo, draft);
+	return { repo: view.repo, root: await view.repo.find<unknown>(rootUrl), rootUrl, draft: view.draft };
+}
+
+// The root a draft url belongs to, following `parent` up past the main
+// draft, and the draft to check out (null when the url is the main draft).
+async function rootOfDraft(
+	repo: Repo,
+	handle: DocHandle<DraftDoc>,
+	online: boolean,
+): Promise<{ root: DocHandle<unknown>; draft: AutomergeUrl | null }> {
+	const seen = new Set<AutomergeUrl>();
+	let cursor: DocHandle<unknown> = handle;
+	let last: AutomergeUrl = handle.url;
+	while (isDraftDoc(cursor.doc())) {
+		last = canonicalUrl(cursor.url);
+		if (seen.has(last)) throw new Error(`draft ${handle.url} has a cycle in its parents`);
+		seen.add(last);
+		cursor = await repo.find<unknown>((cursor.doc() as DraftDoc).parent);
+		if (online) await waitForSync(cursor, { idleMs: 1500, maxMs: 15000 });
+	}
+	const mainDraftUrl = (cursor.doc() as HasDrafts)?.["@patchwork"]?.mainDraftUrl;
+	if (!mainDraftUrl || canonicalUrl(mainDraftUrl) !== last) {
+		throw new Error(`draft ${handle.url} doesn't belong to the root it names`);
+	}
+	const draft = canonicalUrl(handle.url) === last ? null : canonicalUrl(handle.url);
+	return { root: cursor, draft };
 }
 
 // Reads `doc["@patchwork"].type` if present (e.g. "directory", "folder").
@@ -577,12 +677,13 @@ export async function yeet(
 		if (isFileEntryDoc(handle.doc())) {
 			applyFileEntry(handle, fresh);
 		} else {
-			const value = parseJsonObject(bytes);
-			if (!value) {
+			const disk = parseJsonObject(bytes);
+			if (!disk) {
 				throw new Error(
 					`${docUrl} is a JSON document; ${srcPath} must hold a JSON object`,
 				);
 			}
+			const value = documentValueOf(disk, jsonValueOf(handle.doc())["@patchwork"]);
 			(handle as DocHandle<unknown> as DocHandle<JsonObject>).change(
 				(d: JsonObject) => patchJson(d, value),
 			);
@@ -605,6 +706,9 @@ export async function sync(
 	warn: Warn = noWarn,
 ): Promise<SyncSnapshot | undefined> {
 	if (opts.nuclear) {
+		if ((await readConfig(path.resolve(cwd))).draft) {
+			throw new Error("--nuclear rewrites main's documents; run `pushwork switch main` first");
+		}
 		report("Recreating documents");
 		await nuclearizeRepo(cwd);
 		report("Publishing to sync server");
@@ -670,9 +774,14 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 
 		const title = path.basename(root) || undefined;
 		const oldTree = await shape.decode({ repo, root: folderHandle });
+		const isArtifactPath = artifactClassifier(
+			attributesTreeOf(await walkDir(root, await loadIgnore(root))),
+			config.artifactDirectories,
+		);
 
 		// For each leaf: read content, create a fresh doc of the same kind.
 		const newTree = newDir();
+		const bases: Bases = new Map();
 		for (const [posixPath, fileUrl] of flattenLeaves(oldTree)) {
 			const bare = stripHeads(fileUrl);
 			const oldDoc = (await repo.find<unknown>(bare)).doc();
@@ -681,10 +790,12 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 				: repo.create<JsonObject>(
 						Automerge.toJS(oldDoc as Automerge.Doc<JsonObject>),
 					);
+			const pinned = pinUrl(newFileHandle);
+			bases.set(posixPath, pinned);
 			setFileAt(
 				newTree,
 				posixPath.split("/").filter(Boolean),
-				pinUrl(newFileHandle),
+				isArtifactPath(posixPath) ? pinned : newFileHandle.url,
 				jsonLinkType(oldDoc),
 			);
 		}
@@ -696,6 +807,7 @@ export async function nuclearizeRepo(cwd: string): Promise<void> {
 			previousRoot: folderHandle,
 			title,
 		});
+		await writeBases(root, bases);
 	} finally {
 		await safeShutdown(repo);
 	}
@@ -733,60 +845,78 @@ async function commitWorkdir(
 	const connWait = online ? waitForConnection(repo, config.backend) : undefined;
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readLeaves(repo, previousTree);
+		let tree = await openTree(repo, config.rootUrl, config.draft);
+		if (tree.draft?.doc()?.mergedAt !== undefined) {
+			throw new Error(
+				`draft "${tree.draft.doc()?.name ?? "Draft"}" has been merged; switch to another draft`,
+			);
+		}
 
 		const ig = await loadIgnore(root);
 		report("Scanning working tree");
 		const fsFiles = await walkDir(root, ig);
+		const attrs = attributesTreeOf(fsFiles);
 		const isArtifactPath = artifactClassifier(
-			fsFiles,
+			attrs,
 			config.artifactDirectories,
 			warn,
+		);
+		const datatypeOf = datatypeClassifier(attrs);
+
+		const previousTree = await shape.decode({ repo: tree.repo, root: tree.root });
+		const previousFiles = await readLeaves(
+			tree.repo,
+			previousTree,
+			datatypeOf,
+			await readBases(root),
 		);
 
 		report(online ? "Committing local changes" : "Writing documents");
 		const { tree: newTree, held } = await pushFiles(
-			repo,
+			tree.repo,
 			fsFiles,
 			previousFiles,
 			isArtifactPath,
+			datatypeOf,
 			config.jsonDocuments,
 			warn,
 		);
-		const changed = !sameTree(previousTree, newTree);
-		dlog("commit tree changed: %s", changed);
-		if (changed) {
-			await shape.encode({
-				repo,
-				tree: newTree,
-				previousRoot: folderHandle,
-			});
-		}
+		// Shapes only write the folder docs whose links actually changed.
+		await shape.encode({
+			repo: tree.repo,
+			tree: newTree,
+			previousRoot: tree.root,
+		});
 
 		let sync: SyncSnapshot | undefined;
 		if (online) {
 			report("Syncing with peers");
-			// Stamp lastSyncAt — a sync is also a checkpoint that "we reconciled
-			// with the server at this time" — then confirm the server has caught
-			// up to the stamped state. The same wait pulls peer changes into the
-			// local docs; they reach disk through the final decode + materialize
-			// below (when their folder links won the merge) or get re-pinned and
-			// published by the next sync. Pins taken by pushFiles above capture
-			// our local heads on purpose: publishing means "publish what I
-			// have", not "wait for everyone else first".
-			stampLastSyncAt(folderHandle);
-			sync = await waitForServerSync(repo, folderHandle, config.backend, {
-				idleMs: 1500,
-				maxMs: 15000,
-			});
+			// The same wait pulls peer changes into the local docs and reach disk
+			// through the final decode + materialize below. Artifact pins taken by
+			// pushFiles above capture our local heads on purpose: publishing means
+			// "publish what I have", not "wait for everyone else first".
+			sync = await waitForTreeSync(repo, tree, config.backend);
+			await touchDrafts(repo, config.rootUrl).catch((err) =>
+				dlog("touching drafts failed: %s", err instanceof Error ? err.message : err),
+			);
+			if (tree.draft) {
+				// A peer may have cloned docs into the draft meanwhile, even the
+				// same ones; fold those together and read the draft afresh.
+				await repairCloneConflicts(repo, tree.draft);
+				tree = await openTree(repo, config.rootUrl, config.draft);
+			}
 		}
 
 		if (online) report("Writing changes");
-		const finalTree = await shape.decode({ repo, root: folderHandle });
-		await materializeTree(repo, root, finalTree, held);
+		const finalTree = await shape.decode({ repo: tree.repo, root: tree.root });
+		const bases = await materializeTree(
+			tree.repo,
+			root,
+			finalTree,
+			await treeDatatypes(tree.repo, finalTree),
+			held,
+		);
+		await writeBases(root, bases);
 		await attachConnectMs(sync, connWait);
 		dlog("commit complete synced=%s", sync?.synced);
 		return sync;
@@ -819,8 +949,8 @@ export async function heads(
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const tree = await shape.decode({ repo, root: folderHandle });
+		const checkout = await openTree(repo, config.rootUrl, config.draft);
+		const tree = await shape.decode({ repo: checkout.repo, root: checkout.root });
 
 		const out: HeadsEntry[] = [];
 		const matches = (p: string) => matchesPathspec(p, pathspec);
@@ -829,13 +959,13 @@ export async function heads(
 			out.push({
 				path: "/",
 				url: config.rootUrl,
-				heads: folderHandle.heads() ?? [],
+				heads: checkout.root.heads() ?? [],
 			});
 		}
 
 		for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
 			if (!matches(posixPath)) continue;
-			const handle = await repo.find<UnixFileEntry>(fileUrl);
+			const handle = await checkout.repo.find<UnixFileEntry>(fileUrl);
 			out.push({
 				path: posixPath,
 				url: fileUrl,
@@ -858,25 +988,38 @@ function matchesPathspec(path: string, spec?: string): boolean {
 	return path.startsWith(trimmed + "/");
 }
 
-export async function status(cwd: string): Promise<{ diff: Diff }> {
+/** The checked-out draft: its name, and its url (null on main). */
+export type DraftRef = { name: string; url: AutomergeUrl | null };
+
+export async function status(cwd: string): Promise<{ diff: Diff; draft: DraftRef }> {
 	const root = path.resolve(cwd);
 	const config = await readConfig(root);
 
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readLeaves(repo, previousTree);
-
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-
-		const diff = computeDiff(previousFiles, fsFiles);
-		return { diff };
+		const tree = await openTree(repo, config.rootUrl, config.draft);
+		const diff = await workingTreeDiff(tree, shape, root);
+		return {
+			diff,
+			draft: { name: await draftOps.draftName(repo, config.draft), url: config.draft },
+		};
 	} finally {
 		await safeShutdown(repo);
 	}
+}
+
+/** The working tree's changes against the saved state of `tree`. */
+async function workingTreeDiff(tree: Tree, shape: Shape, root: string): Promise<Diff> {
+	const previousTree = await shape.decode({ repo: tree.repo, root: tree.root });
+	const fsFiles = await walkDir(root, await loadIgnore(root));
+	const previousFiles = await readLeaves(
+		tree.repo,
+		previousTree,
+		diskDatatypes(fsFiles),
+		await readBases(root),
+	);
+	return computeDiff(previousFiles, fsFiles);
 }
 
 export async function diff(
@@ -889,12 +1032,16 @@ export async function diff(
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readLeaves(repo, previousTree);
-
+		const tree = await openTree(repo, config.rootUrl, config.draft);
+		const previousTree = await shape.decode({ repo: tree.repo, root: tree.root });
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
+		const previousFiles = await readLeaves(
+			tree.repo,
+			previousTree,
+			diskDatatypes(fsFiles),
+			await readBases(root),
+		);
 
 		const out: Array<{ path: string; kind: "added" | "modified" | "deleted"; before?: Uint8Array; after?: Uint8Array }> = [];
 		for (const [p, bytes] of fsFiles) {
@@ -935,12 +1082,16 @@ export async function cutWorkdir(
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readLeaves(repo, previousTree);
-
+		const tree = await openTree(repo, config.rootUrl, config.draft);
+		const previousTree = await shape.decode({ repo: tree.repo, root: tree.root });
 		const ig = await loadIgnore(root);
 		const fsFiles = await walkDir(root, ig);
+		const previousFiles = await readLeaves(
+			tree.repo,
+			previousTree,
+			diskDatatypes(fsFiles),
+			await readBases(root),
+		);
 
 		const entries: SnarfEntry[] = [];
 		for (const [p, bytes] of fsFiles) {
@@ -970,7 +1121,13 @@ export async function cutWorkdir(
 		});
 
 		// Reset working tree to the saved state.
-		await materializeTree(repo, root, previousTree);
+		const bases = await materializeTree(
+			tree.repo,
+			root,
+			previousTree,
+			await treeDatatypes(tree.repo, previousTree),
+		);
+		await writeBases(root, bases);
 		dlog("cut complete id=%d entries=%d", snarf.id, entries.length);
 		return { id: snarf.id, entries: entries.length };
 	} finally {
@@ -994,13 +1151,8 @@ export async function pasteSnarf(
 	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
 	try {
 		const shape = await resolveShape(config.shape);
-		const folderHandle = await repo.find<unknown>(config.rootUrl);
-		const previousTree = await shape.decode({ repo, root: folderHandle });
-		const previousFiles = await readLeaves(repo, previousTree);
-		const ig = await loadIgnore(root);
-		const fsFiles = await walkDir(root, ig);
-		const dirty = computeDiff(previousFiles, fsFiles);
-		if (dirty.added.length || dirty.modified.length || dirty.deleted.length) {
+		const tree = await openTree(repo, config.rootUrl, config.draft);
+		if (isDirty(await workingTreeDiff(tree, shape, root))) {
 			throw new Error(
 				"refusing to paste: working tree has uncommitted changes. run `pushwork save` or `pushwork cut` first.",
 			);
@@ -1041,6 +1193,251 @@ export async function showSnarfs(cwd: string): Promise<Snarf[]> {
 	return listSnarfs(path.resolve(cwd));
 }
 
+// --- Drafts ------------------------------------------------------------------
+// Drafts are stored the way Patchwork stores them (see src/drafts/), so a
+// draft made in either shows up in both. The commands are offline; `sync`
+// publishes drafts and brings in ones made elsewhere.
+
+/** The root's open drafts, depth-first, and which one is checked out. */
+export async function drafts(
+	cwd: string,
+): Promise<{ root: AutomergeUrl; current: AutomergeUrl | null; drafts: DraftSummary[] }> {
+	return withOfflineRepo(cwd, async ({ config, repo }) => {
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		return {
+			root: config.rootUrl,
+			current: config.draft,
+			drafts: await draftOps.listDrafts(repo, rootHandle),
+		};
+	});
+}
+
+export async function currentDraft(cwd: string): Promise<DraftRef> {
+	return withOfflineRepo(cwd, async ({ config, repo }) => ({
+		name: await draftOps.draftName(repo, config.draft),
+		url: config.draft,
+	}));
+}
+
+/**
+ * Fork a new draft off the checked-out draft, or off `start`, and optionally
+ * switch to it. Forked off the checked-out draft, the new draft reads exactly
+ * what is saved now, so switching to it keeps the working tree as it is,
+ * unsaved changes and all; forked off another, switching needs a clean tree.
+ */
+export async function createDraft(
+	cwd: string,
+	opts: { name?: string; start?: string; switchTo?: boolean } = {},
+): Promise<{ draft: DraftRef; switched: boolean }> {
+	return withOfflineRepo(cwd, async ({ root, config, repo }) => {
+		const shape = await resolveShape(config.shape);
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const parent =
+			opts.start === undefined
+				? config.draft
+				: await draftOps.resolveDraft(repo, rootHandle, opts.start);
+		const carriesOver = parent === config.draft;
+		if (opts.switchTo && !carriesOver) await refuseDirty(repo, config, shape, root, "switch");
+		const members = await treeMembers(repo, shape, rootHandle as DocHandle<unknown>);
+		const url = await draftOps.forkDraft(repo, rootHandle, members, parent, opts.name);
+		const draft = { name: await draftOps.draftName(repo, url), url };
+		if (!opts.switchTo) return { draft, switched: false };
+		if (carriesOver) await writeConfig(root, { ...config, draft: url });
+		else await checkOut(repo, config, shape, root, url);
+		return { draft, switched: true };
+	});
+}
+
+/** Check out another draft (or `main`) and rewrite the working tree to match. */
+export async function switchDraft(
+	cwd: string,
+	ref: string,
+): Promise<{ draft: DraftRef; alreadyOn: boolean }> {
+	return withOfflineRepo(cwd, async ({ root, config, repo }) => {
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const target = await draftOps.resolveDraft(repo, rootHandle, ref);
+		const draft = { name: await draftOps.draftName(repo, target), url: target };
+		if (target === config.draft) return { draft, alreadyOn: true };
+		const shape = await resolveShape(config.shape);
+		await refuseDirty(repo, config, shape, root, "switch");
+		await checkOut(repo, config, shape, root, target);
+		return { draft, alreadyOn: false };
+	});
+}
+
+/**
+ * Merge the checked-out draft into the draft it was forked off, then switch
+ * to wherever it landed: its parent, or the nearest ancestor that hasn't been
+ * merged away, or main.
+ */
+export async function merge(
+	cwd: string,
+): Promise<{ from: string; into: DraftRef; merged: number }> {
+	return withOfflineRepo(cwd, async ({ root, config, repo }) => {
+		if (!config.draft) throw new Error("main has no parent to merge into");
+		const shape = await resolveShape(config.shape);
+		await refuseDirty(repo, config, shape, root, "merge");
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const from = await draftOps.draftName(repo, config.draft);
+		const { landed, merged } = await draftOps.mergeIntoParent(repo, rootHandle, config.draft);
+		await checkOut(repo, config, shape, root, landed);
+		return { from, into: { name: await draftOps.draftName(repo, landed), url: landed }, merged };
+	});
+}
+
+/**
+ * Drop a draft, and every draft forked from it, from the list without merging
+ * it. Refuses while it's checked out, and unless `force`, while it holds
+ * changes that haven't been merged.
+ */
+export async function deleteDraft(
+	cwd: string,
+	ref: string,
+	{ force = false }: { force?: boolean } = {},
+): Promise<DraftRef> {
+	return withOfflineRepo(cwd, async ({ config, repo }) => {
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const target = await draftOps.resolveDraft(repo, rootHandle, ref);
+		if (!target) throw new Error("main can't be deleted");
+		const name = await draftOps.draftName(repo, target);
+		if (config.draft && (await draftOps.descendsFrom(repo, config.draft, target))) {
+			const which = config.draft === target ? "it is" : "a draft forked from it is";
+			throw new Error(`can't delete "${name}" while ${which} checked out; switch to another draft first`);
+		}
+		if (!force && (await draftOps.hasUnmergedChanges(repo, target))) {
+			throw new Error(`draft "${name}" has changes that haven't been merged; use -D to delete it anyway`);
+		}
+		await draftOps.deleteDraft(repo, rootHandle, target);
+		return { name, url: target };
+	});
+}
+
+/** Rename the checked-out draft, or the one `ref` names. */
+export async function renameDraft(
+	cwd: string,
+	name: string,
+	ref?: string,
+): Promise<{ from: string; to: string }> {
+	return withOfflineRepo(cwd, async ({ config, repo }) => {
+		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const target =
+			ref === undefined ? config.draft : await draftOps.resolveDraft(repo, rootHandle, ref);
+		if (!target) throw new Error("main can't be renamed");
+		const from = await draftOps.draftName(repo, target);
+		await draftOps.renameDraft(repo, rootHandle, target, name);
+		return { from, to: name };
+	});
+}
+
+/** The url to share a draft by (`pushwork clone` checks it out); the root's for main. */
+export async function draftUrl(cwd: string, ref?: string): Promise<AutomergeUrl> {
+	return withOfflineRepo(cwd, async ({ config, repo }) => {
+		const target =
+			ref === undefined
+				? config.draft
+				: await draftOps.resolveDraft(repo, await repo.find<HasDrafts>(config.rootUrl), ref);
+		return target ?? config.rootUrl;
+	});
+}
+
+async function withOfflineRepo<T>(
+	cwd: string,
+	fn: (ctx: { root: string; config: PushworkConfig; repo: Repo }) => Promise<T>,
+): Promise<T> {
+	const root = path.resolve(cwd);
+	const config = await readConfig(root);
+	const repo = await openRepo(config.backend, storageDir(root), { offline: true });
+	try {
+		return await fn({ root, config, repo });
+	} finally {
+		await safeShutdown(repo);
+	}
+}
+
+async function refuseDirty(
+	repo: Repo,
+	config: PushworkConfig,
+	shape: Shape,
+	root: string,
+	verb: string,
+): Promise<void> {
+	const tree = await openTree(repo, config.rootUrl, config.draft);
+	if (!isDirty(await workingTreeDiff(tree, shape, root))) return;
+	const name = await draftOps.draftName(repo, config.draft);
+	throw new Error(
+		`refusing to ${verb}: the working tree has unsaved changes. ` +
+			`run \`pushwork save\` to keep them on ${name}, or \`pushwork cut\` to set them aside and \`pushwork paste\` them after.`,
+	);
+}
+
+// Point the checkout at `draft` and make the working tree and its merge
+// bases match it.
+async function checkOut(
+	repo: Repo,
+	config: PushworkConfig,
+	shape: Shape,
+	root: string,
+	draft: AutomergeUrl | null,
+): Promise<void> {
+	const tree = await openTree(repo, config.rootUrl, draft);
+	const decoded = await shape.decode({ repo: tree.repo, root: tree.root });
+	const bases = await materializeTree(
+		tree.repo,
+		root,
+		decoded,
+		await treeDatatypes(tree.repo, decoded),
+	);
+	await writeBases(root, bases);
+	await writeConfig(root, { ...config, draft });
+}
+
+const SERVER_WAIT = { idleMs: 1500, maxMs: 15000 };
+
+/**
+ * Confirm the server has caught up with the tree, pulling peer changes in.
+ * On main that's the root, stamped with `lastSyncAt` (a sync is also a
+ * checkpoint that "we reconciled with the server at this time"). On a draft
+ * it's the draft doc, which lists the draft's clones, and the draft's clone
+ * of the root; the root itself is main's and isn't stamped.
+ */
+async function waitForTreeSync(repo: Repo, tree: Tree, backend: Backend): Promise<SyncSnapshot> {
+	if (!tree.draft) {
+		stampLastSyncAt(tree.root);
+		return waitForServerSync(repo, tree.root, backend, SERVER_WAIT);
+	}
+	const rootClone = tree.draft.doc()?.clones?.[canonicalUrl(tree.rootUrl)]?.cloneUrl;
+	const [draft, root] = await Promise.all([
+		waitForServerSync(repo, tree.draft, backend, SERVER_WAIT),
+		rootClone
+			? repo.find<unknown>(rootClone).then((h) => waitForServerSync(repo, h, backend, SERVER_WAIT))
+			: undefined,
+	]);
+	if (!root) return draft;
+	const synced = draft.synced && root.synced;
+	return { ...root, synced, pending: !synced && (draft.pending || root.pending) };
+}
+
+/**
+ * Load the root's drafts and every doc they read (the originals they forked,
+ * their clones, and the clones they forked off), so those go out with this
+ * sync even when made while another draft was checked out, and drafts made
+ * elsewhere come in whole.
+ */
+async function touchDrafts(repo: Repo, rootUrl: AutomergeUrl): Promise<void> {
+	const root = await repo.find<HasDrafts>(rootUrl);
+	const mainDraftUrl = root.doc()?.["@patchwork"]?.mainDraftUrl;
+	if (!mainDraftUrl) return;
+	await repo.find<unknown>(mainDraftUrl);
+	const urls = new Set<AutomergeUrl>();
+	for (const draft of await draftOps.listDrafts(repo, root)) {
+		const clones = (await repo.find<DraftDoc>(draft.url)).doc()?.clones ?? {};
+		for (const [original, entry] of Object.entries(clones) as [AutomergeUrl, CloneEntry][]) {
+			for (const url of [original, entry.cloneUrl, entry.source]) if (url) urls.add(url);
+		}
+	}
+	await Promise.all([...urls].map((url) => repo.find<unknown>(url).catch(() => undefined)));
+}
+
 type Stamped = { lastSyncAt?: number };
 
 function stampLastSyncAt(handle: DocHandle<unknown>): void {
@@ -1077,6 +1474,9 @@ function normalizeDirs(dirs: readonly string[]): string[] {
 	return out;
 }
 
+const isDirty = (d: Diff): boolean =>
+	d.added.length + d.modified.length + d.deleted.length > 0;
+
 function computeDiff(
 	previous: Map<string, StoredLeaf>,
 	current: Map<string, Uint8Array>,
@@ -1100,52 +1500,67 @@ function computeDiff(
 
 /**
  * Record the working tree into leaf docs, reconciling each path against its
- * pinned link in `previous`. Returns the new tree plus the paths `held` at
- * their old link because their disk copy isn't the JSON object their
- * document needs; materialize must leave those files alone.
+ * merge base in `previous`. Returns the new tree, each path's version as
+ * recorded (`bases`), and the paths `held` at their old base because their
+ * disk copy isn't the JSON object their document needs; materialize must
+ * leave those files alone.
  *
- * A path already tracked as a JSON document stays one. Otherwise, with
- * `jsonDocuments` on, a file that qualifies ({@link jsonDocumentOf}) gets a
- * new JSON document — for a path tracked as text until now, that replaces
- * its file doc and URL.
+ * The tree links each document bare, so Patchwork opens it live; only
+ * artifacts are pinned at the recorded version, so consumers of build output
+ * get an exact snapshot.
+ *
+ * A path already tracked as a JSON document stays one. Otherwise a file that
+ * qualifies ({@link jsonDocumentOf}) gets a new JSON document when
+ * `jsonDocuments` is on or a `datatype` rule covers it — for a path tracked
+ * as text until now, that replaces its file doc and URL. A JSON document's
+ * `@patchwork` field is rebuilt from its `datatype` rule and, where the disk
+ * copy lacks it, from the document.
  */
 async function pushFiles(
 	repo: Repo,
 	fsFiles: Map<string, Uint8Array>,
 	previous: Map<string, StoredLeaf> | undefined,
 	isArtifactPath: IsArtifact,
+	datatypeOf: DatatypeOf,
 	jsonDocuments: boolean,
 	warn: Warn,
-): Promise<{ tree: VfsNode; held: Set<string> }> {
+): Promise<{ tree: VfsNode; bases: Bases; held: Bases }> {
 	const root = newDir();
-	const held = new Set<string>();
+	const bases: Bases = new Map();
+	const held: Bases = new Map();
+	const linkTo = (posixPath: string, pinned: AutomergeUrl) =>
+		isArtifactPath(posixPath) ? pinned : stripHeads(pinned);
 	let created = 0;
 	let updated = 0;
 	let unchanged = 0;
 	for (const [posixPath, bytes] of fsFiles) {
 		const segments = posixPath.split("/").filter(Boolean);
 		const prev = previous?.get(posixPath);
+		const datatype = datatypeOf(posixPath);
 		const json =
-			jsonDocuments && !prev?.value
-				? jsonDocumentOf(posixPath, bytes)
+			(jsonDocuments || datatype) && !prev?.value
+				? jsonDocumentOf(posixPath, bytes, datatype)
 				: undefined;
 
 		let handle: DocHandle<unknown>;
 		if (prev?.value) {
-			const value = parseJsonObject(bytes);
-			if (!value) {
+			const base = withMeta(prev.value, prev.meta);
+			const disk = parseJsonObject(bytes);
+			if (!disk) {
 				warn(
 					`${posixPath} is synced as a JSON document but isn't a JSON object on disk; leaving it unsynced until it is`,
 				);
-				held.add(posixPath);
-				setFileAt(root, segments, prev.url, jsonLinkType(prev.value));
+				held.set(posixPath, prev.url);
+				bases.set(posixPath, prev.url);
+				setFileAt(root, segments, linkTo(posixPath, prev.url), jsonLinkType(base));
 				continue;
 			}
+			const value = documentValueOf(disk, base["@patchwork"], datatype);
 			handle = await repo.find<unknown>(stripHeads(prev.url));
-			if (jsonEquals(prev.value, value)) {
+			if (jsonEquals(base, value)) {
 				unchanged++;
 			} else {
-				applyJsonEdit(handle as DocHandle<JsonObject>, prev.url, prev.value, value);
+				applyJsonEdit(handle as DocHandle<JsonObject>, prev.url, base, value);
 				updated++;
 				dlog("pushFiles updated json %s url=%s", posixPath, handle.url);
 			}
@@ -1162,8 +1577,8 @@ async function pushFiles(
 			// Existing path: mutate the file doc in place. This keeps the file
 			// URL stable across edits and avoids the propagation race where a
 			// brand-new file doc URL is referenced by the folder before its
-			// bytes have reached the server. The link's pinned heads are the
-			// merge base; strip them to get the live, editable doc.
+			// bytes have reached the server. The base's heads are the merge
+			// base; strip them to get the live, editable doc.
 			handle = await repo.find<unknown>(stripHeads(prev.url));
 			if (byteEq(prev.bytes, bytes)) {
 				unchanged++;
@@ -1186,15 +1601,16 @@ async function pushFiles(
 			dlog("pushFiles created %s url=%s bytes=%d", posixPath, handle.url, bytes.length);
 		}
 
-		// Every link is pinned at the doc's current heads: the folder doc
-		// names this file's exact published version, and that pin doubles as
-		// the next sync's merge base. An unchanged path whose doc moved
-		// underneath us (a peer's edit already in local storage) re-pins at
-		// the tip, publishing what we can see.
-		setFileAt(root, segments, pinUrl(handle), jsonLinkType(handle.doc()));
+		// The doc's current heads are this path's recorded version: the merge
+		// base until materialize replaces it with the version it writes. An
+		// unchanged path whose doc moved underneath us (a peer's edit already
+		// in local storage) records the tip, publishing what we can see.
+		const pinned = pinUrl(handle);
+		bases.set(posixPath, pinned);
+		setFileAt(root, segments, linkTo(posixPath, pinned), jsonLinkType(handle.doc()));
 	}
 	dlog("pushFiles done: %d created, %d updated, %d unchanged, %d held", created, updated, unchanged, held.size);
-	return { tree: root, held };
+	return { tree: root, bases, held };
 }
 
 /**
@@ -1255,29 +1671,59 @@ function applyJsonEdit(
 	handle.changeAt(base, (d: JsonObject) => patchJson(d, value));
 }
 
+/** Read every leaf of `tree` at its merge base ({@link baseOf}), as it
+ * should appear on disk: JSON documents whose datatype strips metadata come
+ * without their `@patchwork` field. */
 async function readLeaves(
 	repo: Repo,
 	tree: VfsNode,
+	datatypeOf: DatatypeOf,
+	bases: Bases,
 ): Promise<Map<string, StoredLeaf>> {
 	const out = new Map<string, StoredLeaf>();
 	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
-		const handle = await repo.find<unknown>(fileUrl);
-		out.set(posixPath, { url: fileUrl, ...leafContent(handle.doc()) });
+		const base = baseOf(fileUrl, bases.get(posixPath));
+		const handle = await repo.find<unknown>(base);
+		out.set(posixPath, {
+			url: base,
+			...leafContent(handle.doc(), isStripped(datatypeOf, posixPath)),
+		});
 	}
 	return out;
 }
 
 /**
- * Make the working tree match `tree`. A JSON document is only written when
- * its value differs from the disk copy, laid out like that copy; `held`
- * paths are never written.
+ * The datatype rules carried by `tree`'s own `.pushworkattributes` files,
+ * read from their documents — so a tree can be written out with its rules
+ * applied before those files are on disk.
+ */
+async function treeDatatypes(repo: Repo, tree: VfsNode): Promise<DatatypeOf> {
+	const files = new Map<string, Uint8Array>();
+	for (const [posixPath, fileUrl] of flattenLeaves(tree)) {
+		if (posixPath.split("/").pop() !== ATTRIBUTES_FILE) continue;
+		files.set(posixPath, leafContent((await repo.find<unknown>(fileUrl)).doc()).bytes);
+	}
+	return datatypeClassifier(attributesTreeOf(files));
+}
+
+const isStripped = (datatypeOf: DatatypeOf, posixPath: string): boolean =>
+	datatypeOf(posixPath)?.stripMetadata ?? false;
+
+/**
+ * Make the working tree match `tree`, and return the version each path now
+ * reflects: the merge bases for the next sync. A bare link is written at the
+ * doc's tip, a pinned one at its pin. A JSON document is only written when
+ * its value differs from the disk copy, laid out like that copy, and without
+ * its `@patchwork` field when its datatype strips it; `held` paths are never
+ * written and keep their base.
  */
 async function materializeTree(
 	repo: Repo,
 	root: string,
 	tree: VfsNode,
-	held: ReadonlySet<string> = new Set(),
-): Promise<void> {
+	datatypeOf: DatatypeOf,
+	held: ReadonlyMap<string, AutomergeUrl> = new Map(),
+): Promise<Bases> {
 	const leaves = flattenLeaves(tree);
 
 	// Fetch all leaves concurrently: a single Subduction connection
@@ -1285,11 +1731,14 @@ async function materializeTree(
 	// instead of serializing (benched vs serial and vs the old worker pool in
 	// ADR-031/032). The transport's own receive-credit windowing is the
 	// backpressure; no artificial cap here.
-	const desired = new Map<string, LeafContent>();
+	const desired = new Map<string, StoredLeaf>();
 	await Promise.all(
 		[...leaves].map(async ([posixPath, fileUrl]) => {
 			const handle = await repo.find<unknown>(fileUrl);
-			desired.set(posixPath, leafContent(handle.doc()));
+			desired.set(posixPath, {
+				url: urlHeads(fileUrl) ? fileUrl : pinUrl(handle),
+				...leafContent(handle.doc(), isStripped(datatypeOf, posixPath)),
+			});
 		}),
 	);
 	dlog("materialize desired: %d files", desired.size);
@@ -1305,11 +1754,14 @@ async function materializeTree(
 	const ig = await loadIgnore(root);
 	const present = await walkDir(root, ig);
 
+	const bases: Bases = new Map();
 	let written = 0;
 	let removed = 0;
 	for (const [posixPath, leaf] of desired) {
+		const kept = held.get(posixPath);
+		bases.set(posixPath, kept ?? leaf.url);
 		const onDisk = present.get(posixPath);
-		if (held.has(posixPath) || leafMatchesDisk(leaf, onDisk)) continue;
+		if (kept || leafMatchesDisk(leaf, onDisk)) continue;
 		const bytes = leaf.value ? formatJson(leaf.value, onDisk) : leaf.bytes;
 		await writeFileAtomic(path.join(root, fromPosix(posixPath)), bytes);
 		written++;
@@ -1325,6 +1777,7 @@ async function materializeTree(
 		await pruneEmptyDirs(root, path.dirname(fromPosix(posixPath)));
 	}
 	dlog("materialize done: %d written, %d removed", written, removed);
+	return bases;
 }
 
 const fromPosix = (p: string) => p.split("/").join(path.sep);
@@ -1342,16 +1795,6 @@ async function pruneEmptyDirs(root: string, relDir: string): Promise<void> {
 		}
 		dir = path.dirname(dir);
 	}
-}
-
-function sameTree(a: VfsNode, b: VfsNode): boolean {
-	const av = flattenLeaves(a);
-	const bv = flattenLeaves(b);
-	if (av.size !== bv.size) return false;
-	for (const [k, v] of av) {
-		if (bv.get(k) !== v) return false;
-	}
-	return true;
 }
 
 export type { Shape, UnixFileEntry, VfsNode, PushworkConfig };
