@@ -10,8 +10,15 @@ import {
 	type UrlHeads,
 } from "@automerge/automerge-repo";
 import { attributesTreeOf } from "./attributes.js";
-import { forkDraft } from "./drafts/actions.js";
+import { ensureIndex, forkDraft } from "./drafts/actions.js";
 import { treeMembers } from "./drafts/tree.js";
+import type {
+	CloneEntry,
+	DraftDoc,
+	GitState,
+	OverlayIndex,
+	SyncPoint,
+} from "./drafts/types.js";
 import { DraftView } from "./drafts/view.js";
 import { GitRepo, githubRepoOf, type TreeChange } from "./git.js";
 import { log } from "./log.js";
@@ -32,14 +39,14 @@ import {
 
 const dlog = log("import-git");
 
-// `pushwork import-git`: a git repository as a Patchwork workspace with
-// drafts, the way strand's drafts and its git sync read one.
+// `pushwork import-git`: a git repository as a Patchwork root with drafts,
+// the way strand's drafts and its git sync read one.
 //
-// Main (the default branch) becomes the workspace: a patchwork-folder tree,
-// built by replaying the branch's first-parent history one commit at a time,
-// so the workspace's history has a version for each of those commits. Every
-// other branch becomes a draft of main, copied from main as of the commit it
-// was branched from, with the branch's changes since written through a
+// Main (the default branch) becomes the root: a patchwork-folder tree, built
+// by replaying the branch's first-parent history one commit at a time, so the
+// root's history has a version for each of those commits. Every other branch
+// becomes a draft of main, named after it, copied from main as of the commit
+// it was branched from, with the branch's changes since written through a
 // DraftView, so only the docs the branch changes are cloned into the draft.
 // Files go in the way `pushwork init` and `sync` write them: datatype rules
 // from .pushworkattributes make JSON documents, artifacts are atomic.
@@ -47,39 +54,14 @@ const dlog = log("import-git");
 // Each of those versions is recorded as a sync point (a commit and the
 // heads of every folder and leaf doc at it, JSON documents included, read the
 // way strand's git sync reads them), which is what strand's git sync starts
-// from: the workspace arrives already connected, and each draft
+// from: main's on the root's overlay index, with the GitHub repo, and each
+// draft's on the draft. The root arrives already connected, and each draft
 // already linked with its branch. Git itself is untouched.
-
-// --- strand's draft docs (drafts' draft-types.ts) ---------------------------
-
-type CloneEntry = {
-	source?: AutomergeUrl;
-	clonedAt: UrlHeads;
-	cloneUrl?: AutomergeUrl;
-};
-
-type SyncPoint = {
-	sha: string;
-	tree: string;
-	heads: Record<AutomergeUrl, UrlHeads>;
-	at: number;
-};
-
-type DraftDoc = {
-	"@patchwork": { type: "draft" };
-	isMain?: boolean;
-	name?: string;
-	parent: AutomergeUrl;
-	drafts: AutomergeUrl[];
-	clones: Record<AutomergeUrl, CloneEntry>;
-	git?: { syncPoints: Record<string, SyncPoint> };
-	remote?: { owner: string; repo: string; branch: string };
-};
 
 type DocLink = { name: string; type: string; url: AutomergeUrl };
 
 type FolderDoc = {
-	"@patchwork": { type: "folder"; mainDraftUrl?: AutomergeUrl };
+	"@patchwork": { type: "folder"; overlaysUrl?: AutomergeUrl };
 	title: string;
 	docs: DocLink[];
 };
@@ -112,7 +94,8 @@ export type ImportedDraft = { branch: string; url: AutomergeUrl; changed: number
 
 export type ImportSummary = {
 	url: AutomergeUrl;
-	mainDraft: AutomergeUrl;
+	// the root's overlay index, which lists the drafts and holds main's git link
+	index: AutomergeUrl;
 	main: { branch: string; commits: number; files: number };
 	drafts: ImportedDraft[];
 	skipped: { branch: string; reason: string }[];
@@ -189,7 +172,7 @@ export async function importGit(
 		const files = new Map<string, Uint8Array>();
 		let previous: Map<string, StoredLeaf> | undefined;
 		let root: DocHandle<FolderDoc> | undefined;
-		let mainDraft: DocHandle<DraftDoc> | undefined;
+		let index: DocHandle<OverlayIndex> | undefined;
 		const drafts: ImportedDraft[] = [];
 		const importedAt = Date.now();
 		let order = 0;
@@ -219,18 +202,10 @@ export async function importGit(
 			});
 			if (!root) {
 				root = await repo.find<FolderDoc>(url);
-				mainDraft = repo.create<DraftDoc>({
-					"@patchwork": { type: "draft" },
-					isMain: true,
-					parent: root.url,
-					drafts: [],
-					clones: {},
-					git: { syncPoints: {} },
-					...(github ? { remote: { ...github, branch: mainName } } : {}),
-				});
-				const mainDraftUrl = mainDraft.url;
-				root.change((d: FolderDoc) => {
-					d["@patchwork"].mainDraftUrl = mainDraftUrl;
+				index = await ensureIndex(repo, root);
+				index.change((d: OverlayIndex) => {
+					d.git = { syncPoints: {} };
+					if (github) d.remote = { ...github, branch: mainName };
 				});
 			}
 			previous = await readLeaves(repo, tree, rules.datatypeOf, bases);
@@ -242,7 +217,7 @@ export async function importGit(
 				heads: view.heads,
 				at: importedAt + order++,
 			};
-			recordSyncPoint(mainDraft!, point);
+			recordSyncPoint(index!, point);
 
 			for (const branch of forksAt.get(sha) ?? []) {
 				report(`Making a draft of ${branch.name}`);
@@ -260,7 +235,7 @@ export async function importGit(
 			}
 		}
 
-		const handles: DocHandle<unknown>[] = [root!, mainDraft!];
+		const handles: DocHandle<unknown>[] = [root!, index!];
 		for (const draft of drafts) handles.push(await repo.find(draft.url));
 		let sync: SyncSnapshot[] | undefined;
 		if (online) {
@@ -275,7 +250,7 @@ export async function importGit(
 		}
 		return {
 			url: root!.url,
-			mainDraft: mainDraft!.url,
+			index: index!.url,
 			main: { branch: mainName, commits: replay.length, files: files.size },
 			drafts,
 			skipped,
@@ -378,16 +353,20 @@ function classifiers(files: Map<string, Uint8Array>, artifactDirectories: readon
 	};
 }
 
-function recordSyncPoint(state: DocHandle<DraftDoc>, point: SyncPoint): void {
+// Main's sync points go on the overlay index, a draft's on the draft.
+function recordSyncPoint(
+	state: DocHandle<OverlayIndex> | DocHandle<DraftDoc>,
+	point: SyncPoint,
+): void {
 	const id = Math.random().toString(36).slice(2, 10);
 	const copy: SyncPoint = JSON.parse(JSON.stringify(point));
-	state.change((d: DraftDoc) => {
+	(state as DocHandle<{ git?: GitState }>).change((d: { git?: GitState }) => {
 		d.git ??= { syncPoints: {} };
 		d.git.syncPoints[`${point.sha}/${id}`] = copy;
 	});
 }
 
-// --- Reading a workspace the way strand's git sync does ---------------------
+// --- Reading a root the way strand's git sync does --------------------------
 
 type View = {
 	// the heads of every folder and file doc, keyed by original url
@@ -398,7 +377,7 @@ type View = {
 	files: Map<string, AutomergeUrl>;
 };
 
-// The workspace as main (no clones) or a draft (its clones) sees it: a
+// The root as main (no clones) or a draft (its clones) sees it: a
 // draft reads its clone of a doc, or the original as of the fork point.
 async function readView(
 	repo: Repo,

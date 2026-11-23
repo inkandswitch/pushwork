@@ -30,6 +30,7 @@ import {
 	type DraftDoc,
 	type UnixFileEntry,
 } from "../../src/index.js";
+import type { HasOverlays, MergeDoc, OverlayIndex } from "../../src/drafts/types.js";
 import { readConfig } from "../../src/config.js";
 import { repairCloneConflicts } from "../../src/drafts/view.js";
 
@@ -123,7 +124,7 @@ describe.each(["patchwork-folder", "vfs"])("drafts (%s)", (shape) => {
 	});
 
 	it("merges into main and switches there", async () => {
-		const { draft } = await createDraft(workRoot, { name: "feature", switchTo: true });
+		await createDraft(workRoot, { name: "feature", switchTo: true });
 		await fs.writeFile(file("a.txt"), "draft\n");
 		await fs.writeFile(file("sub/c.txt"), "c\n");
 		await save(workRoot);
@@ -136,7 +137,6 @@ describe.each(["patchwork-folder", "vfs"])("drafts (%s)", (shape) => {
 		expect(await read("sub/c.txt")).toBe("c\n");
 		expect(await isClean()).toBe(true);
 		expect((await drafts(workRoot)).drafts).toEqual([]);
-		expect((await draftDoc(draft.url!))!.mergedAt).toBeDefined();
 	});
 
 	it("merges a sub-draft into the draft it was forked off", async () => {
@@ -202,35 +202,37 @@ describe("draft bookkeeping", () => {
 
 	afterEach(() => cleanup());
 
-	it("stores drafts in Patchwork's format, with main found through the root", async () => {
+	it("stores drafts in Patchwork's format, listed on the root's overlay index", async () => {
 		const { draft } = await createDraft(workRoot);
 		const { rootUrl } = await readConfig(workRoot);
 		await withRepo(workRoot, async (repo) => {
-			const root = (await repo.find<{ "@patchwork": { mainDraftUrl?: AutomergeUrl } }>(rootUrl)).doc();
-			const mainUrl = root!["@patchwork"].mainDraftUrl!;
-			const main = (await repo.find<DraftDoc>(mainUrl)).doc()!;
-			expect(main).not.toHaveProperty("isMain");
-			expect(main.parent).toBe(rootUrl);
-			expect(main.drafts).toEqual([draft.url]);
+			const root = (await repo.find<HasOverlays>(rootUrl)).doc();
+			const indexUrl = root!["@patchwork"]!.overlaysUrl!;
+			const index = (await repo.find<OverlayIndex>(indexUrl)).doc()!;
+			expect(index["@patchwork"]).toEqual({ type: "overlay-index" });
+			expect(index.drafts).toEqual([draft.url]);
+			expect(index.merges).toEqual([]);
 			const doc = (await repo.find<DraftDoc>(draft.url!)).doc()!;
 			expect(doc["@patchwork"]).toEqual({ type: "draft" });
-			expect(doc.parent).toBe(mainUrl);
+			expect(doc.parent).toBeNull();
+			expect(doc).not.toHaveProperty("name");
 			expect(Object.keys(doc.clones)).toContain(rootUrl);
 		});
 	});
 
-	it("names drafts Draft N, keeps names unique, and renames", async () => {
-		expect((await createDraft(workRoot)).draft.name).toBe("Draft 1");
-		expect((await createDraft(workRoot)).draft.name).toBe("Draft 2");
-		await expect(createDraft(workRoot, { name: "Draft 1" })).rejects.toThrow(/already exists/);
+	it("leaves unnamed drafts as Draft, keeps given names unique, and renames", async () => {
+		expect((await createDraft(workRoot)).draft.name).toBe("Draft");
+		expect((await createDraft(workRoot)).draft.name).toBe("Draft");
+		await createDraft(workRoot, { name: "first" });
+		await expect(createDraft(workRoot, { name: "first" })).rejects.toThrow(/already exists/);
 		await expect(createDraft(workRoot, { name: "main" })).rejects.toThrow(/root's name/);
+		await expect(switchDraft(workRoot, "Draft")).rejects.toThrow(/more than one/);
 
-		await renameDraft(workRoot, "first", "Draft 1");
-		expect((await createDraft(workRoot)).draft.name).toBe("Draft 3");
+		await renameDraft(workRoot, "second", "first");
 		expect((await drafts(workRoot)).drafts.map((d) => d.name)).toEqual([
-			"first",
-			"Draft 2",
-			"Draft 3",
+			"Draft",
+			"Draft",
+			"second",
 		]);
 	});
 
@@ -245,9 +247,42 @@ describe("draft bookkeeping", () => {
 			["b", 0],
 		]);
 		expect(listing.current).toBe(listing.drafts[0].url);
+
+		// Gone, a draft's children list under its parent.
+		await switchDraft(workRoot, "main");
+		await deleteDraft(workRoot, "a");
+		expect((await drafts(workRoot)).drafts.map((d) => [d.name, d.depth])).toEqual([
+			["a1", 0],
+			["b", 0],
+		]);
 	});
 
-	it("clones a draft by its url, or by name with -b", async () => {
+	it("drops the merges a deleted draft is in", async () => {
+		const { draft } = await createDraft(workRoot, { name: "feature" });
+		const { rootUrl } = await readConfig(workRoot);
+		await withRepo(workRoot, async (repo) => {
+			const root = (await repo.find<HasOverlays>(rootUrl)).doc();
+			const index = await repo.find<OverlayIndex>(root!["@patchwork"]!.overlaysUrl!);
+			const merge = repo.create<MergeDoc>({
+				"@patchwork": { type: "merge" },
+				source: draft.url,
+				target: null,
+				clones: {},
+			});
+			index.change((d: OverlayIndex) => {
+				d.merges.push(merge.url);
+			});
+		});
+		await deleteDraft(workRoot, "feature");
+		await withRepo(workRoot, async (repo) => {
+			const root = (await repo.find<HasOverlays>(rootUrl)).doc();
+			const index = (await repo.find<OverlayIndex>(root!["@patchwork"]!.overlaysUrl!)).doc()!;
+			expect(index.drafts).toEqual([]);
+			expect(index.merges).toEqual([]);
+		});
+	});
+
+	it("clones a draft with --draft, by name or url", async () => {
 		const { draft } = await createDraft(workRoot, { name: "feature", switchTo: true });
 		await fs.writeFile(path.join(workRoot, "a.txt"), "draft\n");
 		await save(workRoot);
@@ -272,14 +307,15 @@ describe("draft bookkeeping", () => {
 			return { dir, summary };
 		};
 
-		const byUrl = await cloneInto(draft.url!);
-		expect(byUrl.summary.url).toBe(rootUrl);
-		expect((await readConfig(byUrl.dir)).draft).toBe(draft.url);
-		expect(await fs.readFile(path.join(byUrl.dir, "a.txt"), "utf8")).toBe("draft\n");
+		// A draft doesn't name its root.
+		await expect(cloneInto(draft.url!)).rejects.toThrow(/--draft/);
 
-		const byName = await cloneInto(rootUrl, { draft: "feature" });
-		expect((await readConfig(byName.dir)).draft).toBe(draft.url);
-		expect(await fs.readFile(path.join(byName.dir, "a.txt"), "utf8")).toBe("draft\n");
+		for (const ref of ["feature", draft.url!]) {
+			const cloned = await cloneInto(rootUrl, { draft: ref });
+			expect(cloned.summary.url).toBe(rootUrl);
+			expect((await readConfig(cloned.dir)).draft).toBe(draft.url);
+			expect(await fs.readFile(path.join(cloned.dir, "a.txt"), "utf8")).toBe("draft\n");
+		}
 
 		const main = await cloneInto(rootUrl);
 		expect((await readConfig(main.dir)).draft).toBeNull();

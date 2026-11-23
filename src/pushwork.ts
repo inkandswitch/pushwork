@@ -86,7 +86,13 @@ import * as draftOps from "./drafts/actions.js";
 import type { DraftSummary } from "./drafts/actions.js";
 import { canonicalUrl } from "./drafts/clones.js";
 import { treeMembers } from "./drafts/tree.js";
-import { isDraftDoc, type CloneEntry, type DraftDoc, type HasDrafts } from "./drafts/types.js";
+import {
+	isDraftDoc,
+	type CloneEntry,
+	type DraftDoc,
+	type HasOverlays,
+	type MergeDoc,
+} from "./drafts/types.js";
 import { DraftView, repairCloneConflicts } from "./drafts/view.js";
 
 const dlog = log("pushwork");
@@ -172,7 +178,7 @@ export type CloneOpts = {
 	jsonDocuments?: boolean; // default: false
 	online?: boolean; // default: true
 	// The draft to check out: `main`, a draft's name, its url, or a prefix of
-	// its id. A `url` that is itself a draft checks that draft out.
+	// its id.
 	draft?: string;
 	// If the URL turns out to be a legacy "branches" doc, this callback is
 	// invoked with the available branch entries and must return the URL to
@@ -338,15 +344,14 @@ export async function clone(
 			storedUrl = chosenUrl;
 		}
 
-		let draft: AutomergeUrl | null = null;
 		if (isDraftDoc(folderHandle.doc())) {
-			const found = await rootOfDraft(repo, folderHandle as DocHandle<DraftDoc>, online);
-			draft = found.draft;
-			folderHandle = found.root;
-			storedUrl = canonicalUrl(found.root.url);
+			throw new Error(
+				`${opts.url} is a draft, which doesn't name its root: clone the root with --draft ${opts.url}`,
+			);
 		}
+		let draft: AutomergeUrl | null = null;
 		if (opts.draft !== undefined) {
-			draft = await draftOps.resolveDraft(repo, folderHandle as DocHandle<HasDrafts>, opts.draft);
+			draft = await draftOps.resolveDraft(repo, folderHandle as DocHandle<HasOverlays>, opts.draft);
 		}
 
 		const { shape, shapeName } = await resolveCloneShape({
@@ -429,31 +434,6 @@ async function openTree(
 	if (!draft) return { repo, root: await repo.find<unknown>(rootUrl), rootUrl, draft: null };
 	const view = await DraftView.open(repo, draft);
 	return { repo: view.repo, root: await view.repo.find<unknown>(rootUrl), rootUrl, draft: view.draft };
-}
-
-// The root a draft url belongs to, following `parent` up past the main
-// draft, and the draft to check out (null when the url is the main draft).
-async function rootOfDraft(
-	repo: Repo,
-	handle: DocHandle<DraftDoc>,
-	online: boolean,
-): Promise<{ root: DocHandle<unknown>; draft: AutomergeUrl | null }> {
-	const seen = new Set<AutomergeUrl>();
-	let cursor: DocHandle<unknown> = handle;
-	let last: AutomergeUrl = handle.url;
-	while (isDraftDoc(cursor.doc())) {
-		last = canonicalUrl(cursor.url);
-		if (seen.has(last)) throw new Error(`draft ${handle.url} has a cycle in its parents`);
-		seen.add(last);
-		cursor = await repo.find<unknown>((cursor.doc() as DraftDoc).parent);
-		if (online) await waitForSync(cursor, { idleMs: 1500, maxMs: 15000 });
-	}
-	const mainDraftUrl = (cursor.doc() as HasDrafts)?.["@patchwork"]?.mainDraftUrl;
-	if (!mainDraftUrl || canonicalUrl(mainDraftUrl) !== last) {
-		throw new Error(`draft ${handle.url} doesn't belong to the root it names`);
-	}
-	const draft = canonicalUrl(handle.url) === last ? null : canonicalUrl(handle.url);
-	return { root: cursor, draft };
 }
 
 // Reads `doc["@patchwork"].type` if present (e.g. "directory", "folder").
@@ -846,9 +826,12 @@ async function commitWorkdir(
 	try {
 		const shape = await resolveShape(config.shape);
 		let tree = await openTree(repo, config.rootUrl, config.draft);
-		if (tree.draft?.doc()?.mergedAt !== undefined) {
+		if (
+			config.draft &&
+			!(await draftOps.isListed(repo, await repo.find<HasOverlays>(config.rootUrl), config.draft))
+		) {
 			throw new Error(
-				`draft "${tree.draft.doc()?.name ?? "Draft"}" has been merged; switch to another draft`,
+				`draft "${await draftOps.draftName(repo, config.draft)}" has been merged or deleted; switch to another draft`,
 			);
 		}
 
@@ -1203,7 +1186,7 @@ export async function drafts(
 	cwd: string,
 ): Promise<{ root: AutomergeUrl; current: AutomergeUrl | null; drafts: DraftSummary[] }> {
 	return withOfflineRepo(cwd, async ({ config, repo }) => {
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		return {
 			root: config.rootUrl,
 			current: config.draft,
@@ -1231,7 +1214,7 @@ export async function createDraft(
 ): Promise<{ draft: DraftRef; switched: boolean }> {
 	return withOfflineRepo(cwd, async ({ root, config, repo }) => {
 		const shape = await resolveShape(config.shape);
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		const parent =
 			opts.start === undefined
 				? config.draft
@@ -1254,7 +1237,7 @@ export async function switchDraft(
 	ref: string,
 ): Promise<{ draft: DraftRef; alreadyOn: boolean }> {
 	return withOfflineRepo(cwd, async ({ root, config, repo }) => {
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		const target = await draftOps.resolveDraft(repo, rootHandle, ref);
 		const draft = { name: await draftOps.draftName(repo, target), url: target };
 		if (target === config.draft) return { draft, alreadyOn: true };
@@ -1277,7 +1260,7 @@ export async function merge(
 		if (!config.draft) throw new Error("main has no parent to merge into");
 		const shape = await resolveShape(config.shape);
 		await refuseDirty(repo, config, shape, root, "merge");
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		const from = await draftOps.draftName(repo, config.draft);
 		const { landed, merged } = await draftOps.mergeIntoParent(repo, rootHandle, config.draft);
 		await checkOut(repo, config, shape, root, landed);
@@ -1286,9 +1269,9 @@ export async function merge(
 }
 
 /**
- * Drop a draft, and every draft forked from it, from the list without merging
- * it. Refuses while it's checked out, and unless `force`, while it holds
- * changes that haven't been merged.
+ * Drop a draft from the list without merging it; drafts forked off it list
+ * under its parent. Refuses while it's checked out, and unless `force`, while
+ * it holds changes that haven't been merged.
  */
 export async function deleteDraft(
 	cwd: string,
@@ -1296,13 +1279,12 @@ export async function deleteDraft(
 	{ force = false }: { force?: boolean } = {},
 ): Promise<DraftRef> {
 	return withOfflineRepo(cwd, async ({ config, repo }) => {
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		const target = await draftOps.resolveDraft(repo, rootHandle, ref);
 		if (!target) throw new Error("main can't be deleted");
 		const name = await draftOps.draftName(repo, target);
-		if (config.draft && (await draftOps.descendsFrom(repo, config.draft, target))) {
-			const which = config.draft === target ? "it is" : "a draft forked from it is";
-			throw new Error(`can't delete "${name}" while ${which} checked out; switch to another draft first`);
+		if (config.draft === target) {
+			throw new Error(`can't delete "${name}" while it is checked out; switch to another draft first`);
 		}
 		if (!force && (await draftOps.hasUnmergedChanges(repo, target))) {
 			throw new Error(`draft "${name}" has changes that haven't been merged; use -D to delete it anyway`);
@@ -1319,7 +1301,7 @@ export async function renameDraft(
 	ref?: string,
 ): Promise<{ from: string; to: string }> {
 	return withOfflineRepo(cwd, async ({ config, repo }) => {
-		const rootHandle = await repo.find<HasDrafts>(config.rootUrl);
+		const rootHandle = await repo.find<HasOverlays>(config.rootUrl);
 		const target =
 			ref === undefined ? config.draft : await draftOps.resolveDraft(repo, rootHandle, ref);
 		if (!target) throw new Error("main can't be renamed");
@@ -1329,13 +1311,13 @@ export async function renameDraft(
 	});
 }
 
-/** The url to share a draft by (`pushwork clone` checks it out); the root's for main. */
+/** A draft's url (`pushwork clone <root> --draft <url>` checks it out); the root's for main. */
 export async function draftUrl(cwd: string, ref?: string): Promise<AutomergeUrl> {
 	return withOfflineRepo(cwd, async ({ config, repo }) => {
 		const target =
 			ref === undefined
 				? config.draft
-				: await draftOps.resolveDraft(repo, await repo.find<HasDrafts>(config.rootUrl), ref);
+				: await draftOps.resolveDraft(repo, await repo.find<HasOverlays>(config.rootUrl), ref);
 		return target ?? config.rootUrl;
 	});
 }
@@ -1418,19 +1400,23 @@ async function waitForTreeSync(repo: Repo, tree: Tree, backend: Backend): Promis
 }
 
 /**
- * Load the root's drafts and every doc they read (the originals they forked,
- * their clones, and the clones they forked off), so those go out with this
- * sync even when made while another draft was checked out, and drafts made
- * elsewhere come in whole.
+ * Load the root's overlays and every doc they read (the originals they
+ * forked, their clones, and the clones they forked off), so those go out
+ * with this sync even when made while another draft was checked out, and
+ * overlays made elsewhere come in whole.
  */
 async function touchDrafts(repo: Repo, rootUrl: AutomergeUrl): Promise<void> {
-	const root = await repo.find<HasDrafts>(rootUrl);
-	const mainDraftUrl = root.doc()?.["@patchwork"]?.mainDraftUrl;
-	if (!mainDraftUrl) return;
-	await repo.find<unknown>(mainDraftUrl);
+	const index = await draftOps.findIndex(repo, await repo.find<HasOverlays>(rootUrl));
+	if (!index) return;
+	const overlays = [...(index.doc()?.drafts ?? []), ...(index.doc()?.merges ?? [])];
 	const urls = new Set<AutomergeUrl>();
-	for (const draft of await draftOps.listDrafts(repo, root)) {
-		const clones = (await repo.find<DraftDoc>(draft.url)).doc()?.clones ?? {};
+	for (const overlay of overlays) {
+		let clones: Record<AutomergeUrl, CloneEntry>;
+		try {
+			clones = (await repo.find<DraftDoc | MergeDoc>(overlay)).doc()?.clones ?? {};
+		} catch {
+			continue;
+		}
 		for (const [original, entry] of Object.entries(clones) as [AutomergeUrl, CloneEntry][]) {
 			for (const url of [original, entry.cloneUrl, entry.source]) if (url) urls.add(url);
 		}

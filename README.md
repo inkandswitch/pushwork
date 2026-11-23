@@ -73,7 +73,7 @@ pushwork diff
 | `pushwork save` (alias `commit`) | Commit local changes to local storage without contacting the server. |
 | `pushwork status` | Show changes against the saved state. |
 | `pushwork diff [path]` | Show textual diffs of local changes; optionally limit to `path`. |
-| `pushwork url` | Print the `automerge:` URL of this repo. |
+| `pushwork url [--draft [draft]]` | Print the `automerge:` URL of this repo, or with `--draft` a draft's (default: the checked-out one). |
 | `pushwork heads [pathspec]` | Print Automerge heads for the root folder and every file doc (offline). |
 | `pushwork yoink <url> [path]` | Pull a single file doc by URL and write it to disk (default path: the doc's own name). |
 | `pushwork yeet <path> <url>` | Push a single file from disk into the file doc at `url`, mutating it in place. |
@@ -82,7 +82,11 @@ pushwork diff
 | `pushwork paste [id-or-name]` | Re-apply a stashed change set (default: most recent). |
 | `pushwork snarfs` (alias `clipboard`) | List stashed change sets, newest first. |
 | `pushwork version` | Print pushwork and Automerge package versions. |
-| `pushwork import-git [dir]` | Import a git repository as a Patchwork workspace with drafts (see [Importing a git repository](#importing-a-git-repository)). |
+| `pushwork draft [name] [start]` | List drafts, or create one (see [Drafts](#drafts)); `-m` renames, `-d`/`-D` deletes. |
+| `pushwork switch [draft]` | Switch to a draft (or `main`) and update the working tree; `-c <name>` creates one first. |
+| `pushwork checkout [draft]` | Alias for `switch`; `-b <name>` creates a draft first. |
+| `pushwork merge` | Merge the checked-out draft into the draft it was forked off, and switch to that. |
+| `pushwork import-git [dir]` | Import a git repository into Patchwork, with a draft per branch (see [Importing a git repository](#importing-a-git-repository)). |
 
 ### Global options
 
@@ -102,6 +106,7 @@ These apply to every command:
 | `--shape <shape>` | both | Document shape: `vfs` (default), `patchwork-folder`, or a path to a custom shape module. |
 | `--artifact-dir <dir>` | both | Directory whose text content is stored atomically (never character-merged). Repeatable. Defaults to `dist`. |
 | `--json-docs` | both | Store `.json` files whose `"@patchwork".type` isn't `"file"` as Automerge JSON documents instead of text (see [JSON documents](#json-documents)). |
+| `-b, --draft <draft>` | `clone` | Check out this draft (a name, url, or `main`) instead of main (see [Drafts](#drafts)). |
 | `--no-sub` | both | Use the legacy WebSocket backend instead of Subduction. |
 | `--legacy` | both | Alias for `--no-sub`. |
 
@@ -116,16 +121,38 @@ On `clone`, the shape is normally chosen from the root doc itself (`@patchwork.t
 ## Importing a git repository
 
 ```sh
-pushwork import-git ~/code/my-repo     # prints the workspace's automerge: URL
+pushwork import-git ~/code/my-repo     # prints the root's automerge: URL
 ```
 
-`import-git` reads a git repository (git itself is left untouched) and makes a Patchwork workspace the way strand's drafts lay one out:
+`import-git` reads a git repository (git itself is left untouched) and makes a Patchwork root the way strand's drafts lay one out:
 
 - **Main** is the checked-out branch (or `--main <branch>`), built by replaying its first-parent history one commit at a time, from the oldest commit a draft needs (just the tip when there are none; `--history` replays the last `--depth` commits, default 200).
-- **Every other local branch** (or each `--branch <name>`) becomes a draft named after it (see `pushwork switch`), forked off main as of the commit it branched from, with the branch's files written through the draft so only the docs it changes are cloned into it. Branches already merged into main are skipped, as are ones that started further back than `--depth`.
-- **Each replayed commit and each branch tip is recorded as a sync point**, so strand's git sync starts out connected to the GitHub repository `origin` points at (`--github owner/repo` to name another, `--no-github` for none) with every draft linked to its branch. Push the branches first: strand compares them with GitHub's.
+- **Every other local branch** (or each `--branch <name>`) becomes a draft named after it (see [Drafts](#drafts)), forked off main as of the commit it branched from, with the branch's files written through the draft so only the docs it changes are cloned into it. Branches already merged into main are skipped, as are ones that started further back than `--depth`.
+- **Each replayed commit and each branch tip is recorded as a sync point**, so strand's git sync starts out connected (main's on the root's overlay index, each draft's on the draft) to the GitHub repository `origin` points at (`--github owner/repo` to name another, `--no-github` for none) with every draft linked to its branch. Push the branches first: strand compares them with GitHub's.
 
 Files are stored as `init` stores them, so `.pushworkattributes` datatype and artifact rules apply. Only regular and executable files are imported; symlinks and submodules stay in git. The automerge storage goes in a temporary directory that's removed once the sync server has everything; `--storage <dir>` keeps it, and `--offline` imports without publishing.
+
+## Drafts
+
+A draft is a line of edits forked off main (or off another draft) that can be merged back later. Drafts are stored the way strand stores them, so a draft made here shows up in Patchwork and one made there shows up here:
+
+- The root's `@patchwork.overlaysUrl` points at an _overlay index_ listing its drafts and merges.
+- A draft doc records the draft it was forked off (`null` for main) and, for every doc, the version it branched off. Forking copies nothing: a doc is cloned into the draft the first time the draft changes it.
+- Merging a draft merges each doc it cloned into the parent's version and takes the draft off the list.
+
+The commands work like git's branch commands:
+
+```sh
+pushwork draft                    # list drafts; * marks the checked-out one (--tree shows forks)
+pushwork draft fix-typos          # fork a draft off the checked-out one (or: draft <name> <start>)
+pushwork switch fix-typos         # check it out and update the working tree
+pushwork switch -c try-this main  # fork off main and switch to it (checkout -b works too)
+pushwork draft -m better-name     # rename the checked-out draft (draft -m <old> <new> for another)
+pushwork merge                    # merge into the draft it was forked off, and switch there
+pushwork draft -d fix-typos       # delete a draft; -D even if it has unmerged changes
+```
+
+`save` and `sync` write to the checked-out draft, which `status` names and `.pushwork/config.json` records under `draft`. Draft commands are offline; `sync` publishes drafts and brings in ones made elsewhere. Switching or merging needs a clean working tree, except when you create a draft off the checked-out one and switch to it, which keeps your unsaved changes. To check out a draft on another machine, pass its URL (`pushwork url --draft`) or name to `clone --draft`.
 
 ## Sync backends
 
@@ -154,18 +181,21 @@ pushwork stores all of its metadata under `.pushwork/` at the repo root:
 | `.pushwork/bases.json` | Per-path merge bases: the version last written to disk (see [Links and merge bases](#links-and-merge-bases)). |
 | `.pushwork/snarf/index.json` | Local stash entries (see [Stashing changes](#stashing-changes)). |
 
-`config.json` is currently at version `6`:
+`config.json` is currently at version `7`:
 
 ```json
 {
-	"version": 6,
+	"version": 7,
 	"rootUrl": "automerge:2sX...e9",
 	"backend": "subduction",
 	"shape": "vfs",
 	"artifactDirectories": ["dist"],
-	"jsonDocuments": false
+	"jsonDocuments": false,
+	"draft": null
 }
 ```
+
+`draft` is the checked-out draft's URL, or `null` for main.
 
 If the config version doesn't match the installed pushwork, commands fail with a prompt to run `pushwork migrate`.
 

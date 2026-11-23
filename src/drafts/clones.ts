@@ -1,5 +1,5 @@
-// Copied from gaios-pkg-base `drafts/src/draft-clones.ts` and
-// `clone-policy.ts`; keep the two in step by hand.
+// Copied from strand's `drafts/src/draft-clones.ts` and `children.ts`; keep
+// the two in step by hand.
 import * as Automerge from "@automerge/automerge";
 import {
 	decodeHeads,

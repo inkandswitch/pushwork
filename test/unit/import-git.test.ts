@@ -14,26 +14,15 @@ import {
 	type AutomergeUrl,
 	type DocHandle,
 	type Repo,
-	type UrlHeads,
 } from "@automerge/automerge-repo";
 import { LMDBStorageAdapter } from "@automerge/automerge-repo-storage-lmdb";
 
 import { importGit } from "../../src/import-git.js";
 import { stripHeads } from "../../src/index.js";
+import type { CloneEntry, DraftDoc, OverlayIndex } from "../../src/drafts/types.js";
 
-type CloneEntry = { source?: AutomergeUrl; clonedAt: UrlHeads; cloneUrl?: AutomergeUrl };
-type SyncPoint = { sha: string; tree: string; heads: Record<string, UrlHeads>; at: number };
-type DraftDoc = {
-	isMain?: boolean;
-	name?: string;
-	parent: AutomergeUrl;
-	drafts: AutomergeUrl[];
-	clones: Record<AutomergeUrl, CloneEntry>;
-	git?: { syncPoints: Record<string, SyncPoint> };
-	remote?: { owner: string; repo: string; branch: string };
-};
 type FolderDoc = {
-	"@patchwork": { type: string; mainDraftUrl?: AutomergeUrl };
+	"@patchwork": { type: string; overlaysUrl?: AutomergeUrl };
 	docs: { name: string; type: string; url: AutomergeUrl }[];
 };
 
@@ -144,15 +133,16 @@ describe("import-git", () => {
 
 		await withRepo(storage, async (repo) => {
 			const root = await repo.find<FolderDoc>(info.url);
-			expect(root.doc()["@patchwork"].mainDraftUrl).toBe(info.mainDraft);
+			expect(root.doc()["@patchwork"].overlaysUrl).toBe(info.index);
 			expect(await filesOf(repo, info.url)).toEqual({
 				"README.md": "hello\n",
 				"src/a.ts": "one\ntwo\n",
 				"src/c.ts": "see\n",
 			});
 
-			const main = (await repo.find<DraftDoc>(info.mainDraft)).doc();
-			expect(main.isMain).toBe(true);
+			const main = (await repo.find<OverlayIndex>(info.index)).doc();
+			expect(main["@patchwork"]).toEqual({ type: "overlay-index" });
+			expect(main.merges).toEqual([]);
 			expect(main.remote).toEqual({ owner: "ink", repo: "demo", branch: "main" });
 			const points = Object.values(main.git!.syncPoints).sort((a, b) => a.at - b.at);
 			expect(points.map((p) => p.sha)).toEqual([first, second]);
@@ -162,7 +152,7 @@ describe("import-git", () => {
 			expect(main.drafts).toEqual([draftUrl]);
 			const draft = (await repo.find<DraftDoc>(draftUrl)).doc();
 			expect(draft.name).toBe("feature");
-			expect(draft.parent).toBe(info.mainDraft);
+			expect(draft.parent).toBeNull();
 			// copied from main at the first commit: no c.ts, the branch's edits
 			expect(await filesOf(repo, info.url, draft.clones)).toEqual({
 				"src/a.ts": "one\nTWO\n",
@@ -266,7 +256,7 @@ describe("import-git", () => {
 			expect(onDraft.cells).toEqual(["one", "two"]);
 			expect(Object.values(draft.git!.syncPoints)[0].sha).toBe(tip);
 			// the notebook's document is in the sync points, as strand's git sync reads it
-			const main = (await repo.find<DraftDoc>(info.mainDraft)).doc();
+			const main = (await repo.find<OverlayIndex>(info.index)).doc();
 			const mainPoint = Object.values(main.git!.syncPoints)[0];
 			const root = (await repo.find<FolderDoc>(info.url)).doc();
 			const nb = stripHeads(root.docs.find((l) => l.name === "a.nb")!.url);

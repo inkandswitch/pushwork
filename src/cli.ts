@@ -327,7 +327,7 @@ program
 program
 	.command("import-git")
 	.description(
-		"Import a git repository as a Patchwork workspace: main from a branch's history, a draft for every other branch",
+		"Import a git repository into Patchwork: main from a branch's history, a draft for every other branch",
 	)
 	.argument("[dir]", "The git repository", ".")
 	.option("--main <branch>", "The branch to make main (default: the checked-out branch)")
@@ -340,7 +340,7 @@ program
 	.option("--depth <n>", "Replay at most this many of main's commits", "200")
 	.option("--history", "Replay all of those commits, not only from the oldest a draft starts at")
 	.option("--github <owner/repo>", "The GitHub repository strand syncs with (default: origin's)")
-	.option("--no-github", "Don't connect the workspace to a GitHub repository")
+	.option("--no-github", "Don't connect main to a GitHub repository")
 	.option(
 		"--artifact-dir <dir>",
 		"Directory whose text is stored atomically (default: dist). Repeatable.",
@@ -471,7 +471,7 @@ program
 program
 	.command("url")
 	.description("Print the automerge URL of this pushwork repo")
-	.option("--draft [draft]", "Print a draft's URL instead (default: the checked-out draft)")
+	.option("--draft [draft]", "Print a draft's URL instead (default: the checked-out draft), for `clone <root> --draft <url>`")
 	.action(async (opts) => {
 		dlog("url cwd=%s opts=%o", process.cwd(), opts);
 		if (opts.draft === undefined) {
